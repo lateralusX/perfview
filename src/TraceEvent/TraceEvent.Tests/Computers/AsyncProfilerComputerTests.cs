@@ -3,6 +3,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
+
+using FastSerialization;
 
 using Microsoft.Diagnostics.Tracing.Computers;
 using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
@@ -342,6 +345,75 @@ namespace TraceEventTests
             Assert.Equal(0, only.Depth);
             Assert.Equal(0xAUL, only.Frames.MethodIdAt(0));
             Assert.Equal(3, computer.DistinctFramesCount); // A, B, C all recorded
+        }
+
+        [Fact]
+        public void Index_SerializesAndDeserializes_RoundTrip()
+        {
+            long utc = new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc).ToFileTimeUtc();
+            var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
+                .Metadata(Start + 1, qpcFrequency: 10_000_000, qpcSync: (ulong)(Start + 1), utcSync: (ulong)utc, eventBufferSize: 0, wrapperCount: 32, new AsyncManifestEntry[0])
+                .Reset(Start + 2)
+                .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA, 0xB }, new[] { 1, 2 }, continuationIndex: 5)
+                .ResumeStack(Start + 15, dispatcher: 2, new ulong[] { 0xC }, new[] { 3 })   // nested
+                .WrapperReset(Start + 17)
+                .Suspend(Start + 20)          // pop D2 -> [15,20)
+                .CompleteMethod(Start + 25)   // applies to D1
+                .Suspend(Start + 30)          // pop D1 -> [10,30)
+                .ResumeStack(Start + 40, dispatcher: 3, new ulong[] { 0xA, 0xB }, new[] { 1, 2 }) // dedups with D1
+                .Suspend(Start + 50));
+
+            AsyncCallStacksIndex original = computer.Index;
+            AsyncCallStacksIndex reloaded = RoundTrip(original);
+
+            Assert.Equal(original.DistinctFramesCount, reloaded.DistinctFramesCount);
+            Assert.Equal(2, reloaded.DistinctFramesCount); // {A,B} shared by D1 & D3, and {C}
+
+            foreach (long qpc in new[] { Start + 12, Start + 17, Start + 25, Start + 45, Start + 60 })
+            {
+                AssertSameStacks(original, reloaded, Key(ThreadA), qpc);
+            }
+        }
+
+        private static void AssertSameStacks(AsyncCallStacksIndex expected, AsyncCallStacksIndex actual, AsyncThreadKey thread, long qpc)
+        {
+            IReadOnlyList<AsyncCallStack> e = expected.GetAsyncCallStacks(thread, qpc);
+            IReadOnlyList<AsyncCallStack> a = actual.GetAsyncCallStacks(thread, qpc);
+            Assert.Equal(e.Count, a.Count);
+            for (int i = 0; i < e.Count; i++)
+            {
+                Assert.Equal(e[i].Depth, a[i].Depth);
+                Assert.Equal(e[i].FramesIndex, a[i].FramesIndex);
+                Assert.Equal(e[i].ContinuationIndexBase, a[i].ContinuationIndexBase);
+                Assert.Equal(e[i].WrapperCount, a[i].WrapperCount);
+                Assert.Equal(e[i].StartQpc, a[i].StartQpc);
+                Assert.Equal(e[i].EndQpc, a[i].EndQpc);
+                Assert.Equal(e[i].GetCompletedFrameCount(qpc), a[i].GetCompletedFrameCount(qpc));
+                Assert.Equal(e[i].GetWrapperResetCount(qpc), a[i].GetWrapperResetCount(qpc));
+
+                AsyncCallStackFrames ef = e[i].Frames, af = a[i].Frames;
+                Assert.Equal(ef.Kind, af.Kind);
+                Assert.Equal(ef.FrameCount, af.FrameCount);
+                for (int f = 0; f < ef.FrameCount; f++)
+                {
+                    Assert.Equal(ef.MethodIdAt(f), af.MethodIdAt(f));
+                    Assert.Equal(ef.FrameStateAt(f), af.FrameStateAt(f));
+                }
+            }
+        }
+
+        private static AsyncCallStacksIndex RoundTrip(AsyncCallStacksIndex index)
+        {
+            SerializationSettings settings = SerializationSettings.Default.WithStreamLabelWidth(StreamLabelWidth.EightBytes);
+            var stream = new MemoryStream();
+            using (var serializer = new Serializer(new IOStreamStreamWriter(stream, settings, leaveOpen: true), index))
+            {
+            }
+
+            stream.Position = 0;
+            var deserializer = new Deserializer(new PinnedStreamReader(stream, settings), "AsyncCallStacksIndexRoundTrip");
+            deserializer.RegisterType(typeof(AsyncCallStacksIndex));
+            return (AsyncCallStacksIndex)deserializer.ReadObject();
         }
     }
 }
