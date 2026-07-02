@@ -8,6 +8,7 @@ using FastSerialization;
 using Microsoft.Diagnostics.NETCore.Client;
 using Microsoft.Diagnostics.Symbols;
 using Microsoft.Diagnostics.Tracing.EventPipe;
+using Microsoft.Diagnostics.Tracing.Computers;
 using Microsoft.Diagnostics.Tracing.Parsers;
 using Microsoft.Diagnostics.Tracing.Parsers.AspNet;
 using Microsoft.Diagnostics.Tracing.Parsers.Clr;
@@ -2141,6 +2142,18 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
             // parsed property and then copied into the resulting ETLX file in their final form.
             GC.KeepAlive(new GCDynamicTraceEventParser(rawEvents));
 
+            // Build the per-thread active async call stack index (RuntimeAsync + StateMachineAsync) from the
+            // AsyncProfilerEventSource while the raw events are processed (like the GC dynamic parser above,
+            // it must be created here so the AsyncEvents are observed during processing). The raw AsyncEvents
+            // event is left untouched in the stream; only the derived index is added.
+            //
+            // The async buffer's internal QPC timestamps are recorded and queried as-is: because the
+            // AsyncEvents are carried in the same ETW/EventPipe file, their QPC is the same clock domain as
+            // the file's event timestamps, so no conversion is needed (the metadata qpcSync/utcSync is only
+            // for correlating with events from a different file).
+            var asyncProfilerParser = new AsyncProfilerTraceEventParser(rawEvents);
+            var asyncProfilerComputer = new AsyncProfilerComputer(asyncProfilerParser);
+
             // Fix up MemInfoWS records so that we get one per process rather than one per machine
             rawEvents.Kernel.MemoryProcessMemInfo += delegate (MemoryProcessMemInfoTraceData data)
             {
@@ -2396,6 +2409,9 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
             {
                 eventsLost = rawEvents.EventsLost;
             }
+
+            // Capture the built async call stack index (null it out when empty so we don't persist nothing).
+            asyncCallStacks = asyncProfilerComputer.Index.IsEmpty ? null : asyncProfilerComputer.Index;
 
             if (maxEventCount != -1 && eventCount >= maxEventCount)
             {
@@ -3978,6 +3994,19 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
 
             serializer.Write(truncated);
             serializer.Write((int)firstTimeInversion);
+
+            // Async call stacks index (RuntimeAsync + StateMachineAsync). Written as a deferred region: a
+            // forward reference is emitted so readers can skip it and deserialize it lazily on first query.
+            // The presence flag lets the (common) no-async-data case be skipped cheaply.
+            serializer.Log("<Marker Name=\"asyncCallStacks\"/>");
+            lazyAsyncCallStacks.Write(serializer, delegate
+            {
+                serializer.Write(asyncCallStacks != null);
+                if (asyncCallStacks != null)
+                {
+                    ((IFastSerializable)asyncCallStacks).ToStream(serializer);
+                }
+            });
         }
         void IFastSerializable.FromStream(Deserializer deserializer)
         {
@@ -4144,10 +4173,26 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
 
             deserializer.Read(out truncated);
             firstTimeInversion = (EventIndex)(uint)deserializer.ReadInt();
+
+            lazyAsyncCallStacks.Read(deserializer, delegate
+            {
+                bool present;
+                deserializer.Read(out present);
+                if (present)
+                {
+                    var index = new AsyncCallStacksIndex();
+                    ((IFastSerializable)index).FromStream(deserializer);
+                    asyncCallStacks = index;
+                }
+                else
+                {
+                    asyncCallStacks = null;
+                }
+            });
         }
         int IFastSerializableVersion.Version
         {
-            get { return 77; }
+            get { return 78; }
         }
         int IFastSerializableVersion.MinimumVersionCanRead
         {
@@ -4158,6 +4203,59 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
         {
             // We don't support old readers reading new formats.
             get { return ((IFastSerializableVersion)this).Version; }
+        }
+
+        /// <summary>
+        /// The per-thread active async call stack index (RuntimeAsync + StateMachineAsync) built from the
+        /// AsyncProfilerEventSource, or null if the trace contained no async-profiler data. Lazily deserialized
+        /// on first access.
+        /// </summary>
+        internal AsyncCallStacksIndex AsyncCallStacks
+        {
+            get { lazyAsyncCallStacks.FinishRead(); return asyncCallStacks; }
+        }
+
+        /// <summary>
+        /// Returns the async call stacks active on <paramref name="threadIndex"/> at
+        /// <paramref name="timeQPC"/> (a raw QPC timestamp, e.g. an event's <see cref="TraceEvent.TimeStampQPC"/>),
+        /// ordered bottom-to-top (async call stacks nest, so several can be active at once). Uses QPC directly
+        /// for full precision — no lossy relative-time conversion. Returns an empty list if the thread is
+        /// invalid, idle at that time, or the trace had no async-profiler data. See <see cref="AsyncCallStack"/>.
+        /// </summary>
+        public IReadOnlyList<AsyncCallStack> GetAsyncCallStacks(ThreadIndex threadIndex, long timeQPC)
+        {
+            AsyncCallStacksIndex index = AsyncCallStacks;
+            if (index == null || threadIndex == ThreadIndex.Invalid)
+            {
+                return Array.Empty<AsyncCallStack>();
+            }
+
+            TraceThread traceThread = Threads[threadIndex];
+            var key = new AsyncThreadKey(traceThread.Process.ProcessID, (ulong)traceThread.ThreadID);
+            return index.GetAsyncCallStacks(key, timeQPC);
+        }
+
+        /// <summary>
+        /// Returns the async call stacks active on the OS thread <paramref name="osThreadId"/> in process
+        /// <paramref name="processId"/> at <paramref name="timeQPC"/> (a raw QPC timestamp), ordered
+        /// bottom-to-top (async call stacks nest, so several can be active at once). Uses QPC directly for full
+        /// precision — no lossy relative-time conversion. Returns an empty list if the thread has no async call
+        /// stack covering that instant or the trace had no async-profiler data. See <see cref="AsyncCallStack"/>.
+        /// <para>
+        /// Unlike <see cref="GetAsyncCallStacks(ThreadIndex, long)"/>, this overload keys directly by OS thread id,
+        /// so it also reaches threads that emitted async-profiler data but have no other events (and therefore no
+        /// <see cref="TraceThread"/>/<see cref="ThreadIndex"/> in the trace).
+        /// </para>
+        /// </summary>
+        public IReadOnlyList<AsyncCallStack> GetAsyncCallStacks(int processId, ulong osThreadId, long timeQPC)
+        {
+            AsyncCallStacksIndex index = AsyncCallStacks;
+            if (index == null)
+            {
+                return Array.Empty<AsyncCallStack>();
+            }
+
+            return index.GetAsyncCallStacks(new AsyncThreadKey(processId, osThreadId), timeQPC);
         }
 
         // headerSize is the size we persist of TraceEventNativeMethods.EVENT_RECORD which is up to and
@@ -4191,6 +4289,8 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
         private DeferedRegion lazyEventsToStacks;
         private DeferedRegion lazyEventsToCodeAddresses;
         private DeferedRegion lazyCswitchBlockingEventsToStacks;
+        private DeferedRegion lazyAsyncCallStacks;
+        private AsyncCallStacksIndex asyncCallStacks;       // Per-thread active async call stacks (RuntimeAsync + StateMachineAsync); null if none. Lazily loaded.
         private TraceEvents events;
         private GrowableArray<EventPageEntry> eventPages;   // The offset offset of a page
         private int eventCount;                             // Total number of events

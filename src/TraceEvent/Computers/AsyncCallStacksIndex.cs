@@ -33,6 +33,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <summary>The number of distinct interned frame lists.</summary>
         public int DistinctFramesCount => _frames.Count;
 
+        /// <summary>True if no async call stacks were recorded (used to avoid persisting an empty index).</summary>
+        public bool IsEmpty => _threads.Count == 0;
+
         /// <summary>The threads that have at least one recorded async call stack.</summary>
         public IEnumerable<AsyncThreadKey> Threads => _threads.Keys;
 
