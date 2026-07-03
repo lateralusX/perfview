@@ -11,6 +11,7 @@ using Microsoft.Diagnostics.Tracing.EventPipe;
 using Microsoft.Diagnostics.Tracing.Computers;
 using Microsoft.Diagnostics.Tracing.Parsers;
 using Microsoft.Diagnostics.Tracing.Parsers.AspNet;
+using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
 using Microsoft.Diagnostics.Tracing.Parsers.Clr;
 using Microsoft.Diagnostics.Tracing.Parsers.ClrPrivate;
 using Microsoft.Diagnostics.Tracing.Parsers.FrameworkEventSource;
@@ -1674,6 +1675,7 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
 
             Action<MethodLoadUnloadVerboseTraceData> onMethodStart = delegate (MethodLoadUnloadVerboseTraceData data)
                 {
+                    onMethodDiscovered?.Invoke(data);
                     // We only capture data on unload, because we collect the addresses first.
                     if (!data.IsDynamic && !data.IsJitted)
                     {
@@ -1725,6 +1727,7 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
 
             Action<MethodLoadUnloadVerboseTraceData> onMethodDCStop = delegate (MethodLoadUnloadVerboseTraceData data)
             {
+                onMethodDiscovered?.Invoke(data);   // let conversion-time consumers (async frame symbolization) react before AddMethod binds
                 codeAddresses.AddMethod(data);
                 bookKeepingEvent = true;
             };
@@ -2154,6 +2157,96 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
             var asyncProfilerParser = new AsyncProfilerTraceEventParser(rawEvents);
             var asyncProfilerComputer = new AsyncProfilerComputer(asyncProfilerParser);
 
+            // Symbolize the async call stack frames incrementally, driven by the frames actually present (not the total
+            // method count). Each frame stores only a CodeAddressIndex, pointing into TraceLog's already-persisted
+            // CodeAddresses table.
+            //   * RuntimeAsync frames carry a native IP -> register the code address eagerly as the frame is interned.
+            //   * StateMachineAsync frames carry a MoveNext MethodDesc pointer (== the ETW MethodID) -> resolve it to
+            //     the method's start address immediately if that method was already discovered, otherwise record a
+            //     dependency and resolve when it is. (TraceLog keeps only address-keyed method lookups, so we remember
+            //     the MethodID -> start address pairing ourselves; this makes V1 order-independent like V2.)
+            // We do NOT subscribe our own method callbacks; instead SetupCallbacks' onMethodStart / onMethodDCStop
+            // invoke onMethodDiscovered (assigned here). The registered addresses are bound to methods by those
+            // handlers themselves - onMethodDCStop's AddMethod (invoked right after this hook) for rundown methods,
+            // the common case for async-profiler captures, and the jittedMethods pass for real-time JIT.
+            var asyncMethodStartByMethodId = new Dictionary<ulong, Address>();
+            var asyncV1DependentsByMethodId = new Dictionary<ulong, List<(AsyncCallStackFrames Frames, int Slot)>>();
+
+            Func<int, Address, CodeAddressIndex> registerAsyncFrameAddress = delegate (int processId, Address address)
+            {
+                if (address == 0)
+                {
+                    return CodeAddressIndex.Invalid;
+                }
+                TraceProcess process = Processes.LastProcessWithID(processId);
+                return process != null ? codeAddresses.GetOrCreateCodeAddressIndex(process, address) : CodeAddressIndex.Invalid;
+            };
+
+            asyncProfilerComputer.Index.OnFrameInterned = delegate (AsyncCallStackFrames frames)
+            {
+                for (int i = 0; i < frames.FrameCount; i++)
+                {
+                    ulong methodId = frames.MethodIdAt(i);
+                    if (methodId == 0)
+                    {
+                        continue;
+                    }
+
+                    if (frames.Kind == AsyncCallstackKind.RuntimeAsync)
+                    {
+                        // Native IP: register eagerly; the containing method's AddMethod binds it.
+                        CodeAddressIndex codeAddress = registerAsyncFrameAddress(frames.ProcessId, methodId);
+                        if (codeAddress != CodeAddressIndex.Invalid)
+                        {
+                            frames.SetCodeAddressAt(i, codeAddress);
+                        }
+                    }
+                    else if (asyncMethodStartByMethodId.TryGetValue(methodId, out Address startAddress))
+                    {
+                        // MethodDesc already discovered: resolve to its start address now.
+                        CodeAddressIndex codeAddress = registerAsyncFrameAddress(frames.ProcessId, startAddress);
+                        if (codeAddress != CodeAddressIndex.Invalid)
+                        {
+                            frames.SetCodeAddressAt(i, codeAddress);
+                        }
+                    }
+                    else
+                    {
+                        // MethodDesc not yet discovered: record a dependency (resolved in onMethodDiscovered).
+                        if (!asyncV1DependentsByMethodId.TryGetValue(methodId, out List<(AsyncCallStackFrames, int)> dependents))
+                        {
+                            dependents = new List<(AsyncCallStackFrames, int)>();
+                            asyncV1DependentsByMethodId[methodId] = dependents;
+                        }
+                        dependents.Add((frames, i));
+                    }
+                }
+            };
+
+            onMethodDiscovered = delegate (MethodLoadUnloadVerboseTraceData data)
+            {
+                if (data.MethodStartAddress == 0)
+                {
+                    return;
+                }
+
+                ulong methodId = (ulong)data.MethodID;
+                asyncMethodStartByMethodId[methodId] = data.MethodStartAddress;
+
+                if (asyncV1DependentsByMethodId.TryGetValue(methodId, out List<(AsyncCallStackFrames Frames, int Slot)> dependents))
+                {
+                    foreach ((AsyncCallStackFrames frames, int slot) in dependents)
+                    {
+                        CodeAddressIndex codeAddress = registerAsyncFrameAddress(frames.ProcessId, data.MethodStartAddress);
+                        if (codeAddress != CodeAddressIndex.Invalid)
+                        {
+                            frames.SetCodeAddressAt(slot, codeAddress);
+                        }
+                    }
+                    asyncV1DependentsByMethodId.Remove(methodId);
+                }
+            };
+
             // Fix up MemInfoWS records so that we get one per process rather than one per machine
             rawEvents.Kernel.MemoryProcessMemInfo += delegate (MemoryProcessMemInfoTraceData data)
             {
@@ -2410,7 +2503,8 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
                 eventsLost = rawEvents.EventsLost;
             }
 
-            // Capture the built async call stack index (null it out when empty so we don't persist nothing).
+            // Capture the built async call stack index (null it out when empty so we don't persist nothing). Its
+            // frames were symbolized incrementally during processing (see OnFrameInterned / onMethodDiscovered above).
             asyncCallStacks = asyncProfilerComputer.Index.IsEmpty ? null : asyncProfilerComputer.Index;
 
             if (maxEventCount != -1 && eventCount >= maxEventCount)
@@ -4306,6 +4400,12 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
         private List<MethodLoadUnloadVerboseTraceData> jittedMethods;
         private List<MethodLoadUnloadJSTraceData> jsJittedMethods;
         private Dictionary<JavaScriptSourceKey, string> sourceFilesByID;
+
+        // General hook invoked from SetupCallbacks' method-load handlers (onMethodStart / onMethodDCStop) for each
+        // managed method as it is discovered (JIT load or rundown). It lets conversion-time consumers set up in
+        // CopyRawEvents react to method discovery without subscribing their own parallel method callbacks (used to
+        // symbolize async call stack frames). Null until assigned; transient (not serialized).
+        private Action<MethodLoadUnloadVerboseTraceData> onMethodDiscovered;
 
         private TraceModuleFiles moduleFiles;
         private GrowableArray<EventsToStackIndex> eventsToStacks;

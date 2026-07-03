@@ -6,6 +6,7 @@ using System.Collections.Generic;
 
 using FastSerialization;
 
+using Microsoft.Diagnostics.Tracing.Etlx;
 using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
 
 namespace Microsoft.Diagnostics.Tracing.Computers
@@ -26,12 +27,18 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     {
         private const int SerializationVersion = 1;
 
-        private readonly List<AsyncCallStackFrames> _frames = new List<AsyncCallStackFrames>();
-        private readonly Dictionary<FrameKey, AsyncCallStackFramesIndex> _framesIntern = new Dictionary<FrameKey, AsyncCallStackFramesIndex>();
+        private readonly List<AsyncCallStackFrames> _internedAsyncCallStackFrames = new List<AsyncCallStackFrames>();
+        private readonly Dictionary<FrameKey, AsyncCallStackFramesIndex> _frameKeyToIndex = new Dictionary<FrameKey, AsyncCallStackFramesIndex>();
         private readonly Dictionary<AsyncThreadKey, ThreadCallStacks> _threads = new Dictionary<AsyncThreadKey, ThreadCallStacks>();
 
+        /// <summary>
+        /// Invoked (if set) the first time a distinct <see cref="AsyncCallStackFrames"/> is interned, so a build-time
+        /// consumer (<see cref="TraceLog"/>) can begin symbolizing its frames as they are discovered. Not used after load.
+        /// </summary>
+        internal Action<AsyncCallStackFrames> OnFrameInterned { get; set; }
+
         /// <summary>The number of distinct interned frame lists.</summary>
-        public int DistinctFramesCount => _frames.Count;
+        public int DistinctFramesCount => _internedAsyncCallStackFrames.Count;
 
         /// <summary>True if no async call stacks were recorded (used to avoid persisting an empty index).</summary>
         public bool IsEmpty => _threads.Count == 0;
@@ -43,7 +50,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         public AsyncCallStackFrames GetFrames(AsyncCallStackFramesIndex index)
         {
             int i = (int)index;
-            return (uint)i < (uint)_frames.Count ? _frames[i] : null;
+            return (uint)i < (uint)_internedAsyncCallStackFrames.Count ? _internedAsyncCallStackFrames[i] : null;
         }
 
         /// <summary>
@@ -73,25 +80,26 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             int depth, byte continuationIndexBase, byte wrapperCount, long startQpc, long endQpc,
             AsyncCallStack.CompletionDelta[] completions, long[] wrapperResets)
         {
-            AsyncCallStackFramesIndex framesIndex = Intern(kind, methodIds, frameStates, out AsyncCallStackFrames frames);
+            AsyncCallStackFramesIndex framesIndex = Intern(kind, methodIds, frameStates, thread.ProcessId, out AsyncCallStackFrames frames);
             var callStack = new AsyncCallStack(depth, framesIndex, frames, continuationIndexBase, wrapperCount, startQpc, endQpc, completions, wrapperResets);
             GetOrCreate(thread).Add(callStack);
             return callStack;
         }
 
-        private AsyncCallStackFramesIndex Intern(AsyncCallstackKind kind, ulong[] methodIds, int[] frameStates, out AsyncCallStackFrames frames)
+        private AsyncCallStackFramesIndex Intern(AsyncCallstackKind kind, ulong[] methodIds, int[] frameStates, int processId, out AsyncCallStackFrames frames)
         {
             var key = new FrameKey(kind, methodIds, frameStates);
-            if (_framesIntern.TryGetValue(key, out AsyncCallStackFramesIndex existing))
+            if (_frameKeyToIndex.TryGetValue(key, out AsyncCallStackFramesIndex existing))
             {
-                frames = _frames[(int)existing];
+                frames = _internedAsyncCallStackFrames[(int)existing];
                 return existing;
             }
 
-            var index = (AsyncCallStackFramesIndex)_frames.Count;
-            frames = new AsyncCallStackFrames(kind, methodIds, frameStates);
-            _frames.Add(frames);
-            _framesIntern[key] = index;
+            var index = (AsyncCallStackFramesIndex)_internedAsyncCallStackFrames.Count;
+            frames = new AsyncCallStackFrames(kind, methodIds, frameStates, processId);
+            _internedAsyncCallStackFrames.Add(frames);
+            _frameKeyToIndex[key] = index;
+            OnFrameInterned?.Invoke(frames);
             return index;
         }
 
@@ -109,10 +117,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         {
             serializer.Write(SerializationVersion);
 
-            serializer.Write(_frames.Count);
-            for (int i = 0; i < _frames.Count; i++)
+            serializer.Write(_internedAsyncCallStackFrames.Count);
+            for (int i = 0; i < _internedAsyncCallStackFrames.Count; i++)
             {
-                _frames[i].Write(serializer);
+                _internedAsyncCallStackFrames[i].Write(serializer);
             }
 
             serializer.Write(_threads.Count);
@@ -138,14 +146,14 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 throw new SerializationException("Unsupported AsyncCallStacksIndex serialization version " + version);
             }
 
-            _frames.Clear();
-            _framesIntern.Clear();
+            _internedAsyncCallStackFrames.Clear();
+            _frameKeyToIndex.Clear();
             _threads.Clear();
 
             int frameCount = deserializer.ReadInt();
             for (int i = 0; i < frameCount; i++)
             {
-                _frames.Add(AsyncCallStackFrames.Read(deserializer));
+                _internedAsyncCallStackFrames.Add(AsyncCallStackFrames.Read(deserializer));
             }
 
             int threadCount = deserializer.ReadInt();
@@ -163,7 +171,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
         }
 
-        private AsyncCallStackFrames ResolveFrames(AsyncCallStackFramesIndex index) => _frames[(int)index];
+        private AsyncCallStackFrames ResolveFrames(AsyncCallStackFramesIndex index) => _internedAsyncCallStackFrames[(int)index];
 
         /// <summary>Per-thread recorded async call stacks plus a lazily-built interval index for stabbing queries.</summary>
         private sealed class ThreadCallStacks

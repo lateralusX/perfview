@@ -8,6 +8,7 @@ using System.IO;
 using FastSerialization;
 
 using Microsoft.Diagnostics.Tracing.Computers;
+using Microsoft.Diagnostics.Tracing.Etlx;
 using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
 
 using Xunit;
@@ -364,10 +365,27 @@ namespace TraceEventTests
                 .Suspend(Start + 50));
 
             AsyncCallStacksIndex original = computer.Index;
+
+            // Assign each frame a fake CodeAddressIndex (== methodId) so the per-frame CodeAddressIndex is
+            // exercised through serialization.
+            for (int fi = 0; fi < original.DistinctFramesCount; fi++)
+            {
+                AsyncCallStackFrames f = original.GetFrames((AsyncCallStackFramesIndex)fi);
+                for (int s = 0; s < f.FrameCount; s++)
+                {
+                    f.SetCodeAddressAt(s, (CodeAddressIndex)(int)f.MethodIdAt(s));
+                }
+            }
+
             AsyncCallStacksIndex reloaded = RoundTrip(original);
 
             Assert.Equal(original.DistinctFramesCount, reloaded.DistinctFramesCount);
             Assert.Equal(2, reloaded.DistinctFramesCount); // {A,B} shared by D1 & D3, and {C}
+
+            // The resolved code addresses round-trip (and are the ones the fake resolver assigned).
+            AsyncCallStack d1 = reloaded.GetAsyncCallStacks(Key(ThreadA), Start + 12)[0];
+            Assert.Equal((CodeAddressIndex)0xA, d1.Frames.CodeAddressAt(0));
+            Assert.Equal((CodeAddressIndex)0xB, d1.Frames.CodeAddressAt(1));
 
             foreach (long qpc in new[] { Start + 12, Start + 17, Start + 25, Start + 45, Start + 60 })
             {
@@ -398,6 +416,7 @@ namespace TraceEventTests
                 {
                     Assert.Equal(ef.MethodIdAt(f), af.MethodIdAt(f));
                     Assert.Equal(ef.FrameStateAt(f), af.FrameStateAt(f));
+                    Assert.Equal(ef.CodeAddressAt(f), af.CodeAddressAt(f));
                 }
             }
         }

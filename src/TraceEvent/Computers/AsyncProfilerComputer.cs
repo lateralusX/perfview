@@ -6,6 +6,7 @@ using System.Collections.Generic;
 
 using FastSerialization;
 
+using Microsoft.Diagnostics.Tracing.Etlx;
 using Microsoft.Diagnostics.Tracing.Parsers;
 using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
 
@@ -51,18 +52,50 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     {
         private readonly ulong[] _methodIds;
         private readonly int[] _frameStates; // null for runtime callstacks
+        private CodeAddressIndex[] _codeAddresses; // per-frame resolved code address; null until symbolized
 
-        internal AsyncCallStackFrames(AsyncCallstackKind kind, ulong[] methodIds, int[] frameStates)
+        internal AsyncCallStackFrames(AsyncCallstackKind kind, ulong[] methodIds, int[] frameStates, int processId = 0)
         {
             Kind = kind;
             _methodIds = methodIds;
             _frameStates = frameStates;
+            ProcessId = processId;
         }
 
         public AsyncCallstackKind Kind { get; }
         public int FrameCount => _methodIds.Length;
         public ulong MethodIdAt(int index) => _methodIds[index];
         public int FrameStateAt(int index) => _frameStates != null ? _frameStates[index] : 0;
+
+        /// <summary>The process these frames were captured in. Build-time only (used to resolve addresses); not serialized.</summary>
+        internal int ProcessId { get; }
+
+        /// <summary>
+        /// The resolved <see cref="CodeAddressIndex"/> for frame <paramref name="index"/> (a location in a
+        /// method/module in <see cref="TraceLog.CodeAddresses"/>), or <see cref="CodeAddressIndex.Invalid"/> if the
+        /// frames were never symbolized or the frame's method could not be resolved. Use it with
+        /// <see cref="TraceLog.CodeAddresses"/> to obtain the method name lazily.
+        /// </summary>
+        public CodeAddressIndex CodeAddressAt(int index) =>
+            _codeAddresses != null && (uint)index < (uint)_codeAddresses.Length ? _codeAddresses[index] : CodeAddressIndex.Invalid;
+
+        /// <summary>
+        /// Assigns the resolved code address for frame <paramref name="index"/> (called by <see cref="TraceLog"/> at
+        /// build time as methods are discovered). Lazily allocates the per-frame array, defaulting unset frames to
+        /// <see cref="CodeAddressIndex.Invalid"/>.
+        /// </summary>
+        internal void SetCodeAddressAt(int index, CodeAddressIndex codeAddress)
+        {
+            if (_codeAddresses == null)
+            {
+                _codeAddresses = new CodeAddressIndex[_methodIds.Length];
+                for (int i = 0; i < _codeAddresses.Length; i++)
+                {
+                    _codeAddresses[i] = CodeAddressIndex.Invalid;
+                }
+            }
+            _codeAddresses[index] = codeAddress;
+        }
 
         internal void Write(Serializer serializer)
         {
@@ -82,6 +115,18 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 for (int i = 0; i < _frameStates.Length; i++)
                 {
                     serializer.Write(_frameStates[i]);
+                }
+            }
+            if (_codeAddresses == null)
+            {
+                serializer.Write(-1);
+            }
+            else
+            {
+                serializer.Write(_codeAddresses.Length);
+                for (int i = 0; i < _codeAddresses.Length; i++)
+                {
+                    serializer.Write((int)_codeAddresses[i]);
                 }
             }
         }
@@ -105,7 +150,18 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     frameStates[i] = deserializer.ReadInt();
                 }
             }
-            return new AsyncCallStackFrames(kind, methodIds, frameStates);
+            var frames = new AsyncCallStackFrames(kind, methodIds, frameStates);
+            int codeAddrCount = deserializer.ReadInt();
+            if (codeAddrCount >= 0)
+            {
+                var codeAddresses = new CodeAddressIndex[codeAddrCount];
+                for (int i = 0; i < codeAddrCount; i++)
+                {
+                    codeAddresses[i] = (CodeAddressIndex)deserializer.ReadInt();
+                }
+                frames._codeAddresses = codeAddresses;
+            }
+            return frames;
         }
     }
 
