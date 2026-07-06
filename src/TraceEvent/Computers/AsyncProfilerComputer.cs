@@ -358,6 +358,14 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         private AsyncEventsTraceData _currentRawEvent;
 
+        /// <summary>
+        /// Fired for each frame methodId as a resume/append callstack is processed (i.e. during the event stream,
+        /// before end-of-trace rundown), letting the host pre-register the frame's code address so a covering
+        /// method load/rundown binds it. This makes frames resolvable even for async call stacks that are only
+        /// committed later at <see cref="Finish"/> (still live at capture end). Args: processId, methodId, kind.
+        /// </summary>
+        public Action<int, ulong, AsyncCallstackKind> OnFrameObserved;
+
         // Clock state (QPC <-> UTC), from AsyncProfilerMetadata / AsyncProfilerSyncClock.
         private ulong _qpcFrequency;
         private ulong _qpcSync;
@@ -445,6 +453,20 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             else if (IsAppendCallstack(e.EventId))
             {
                 state.Top?.AddFrames(e);
+            }
+
+            // Pre-register each frame's code address now (during the event stream, before end-of-trace rundown),
+            // so a covering method load binds it even if this async call stack is only committed later by Finish().
+            if (OnFrameObserved != null && e.MethodIds != null)
+            {
+                int processId = _currentRawEvent != null ? _currentRawEvent.ProcessID : 0;
+                for (int i = 0; i < e.MethodIds.Length; i++)
+                {
+                    if (e.MethodIds[i] != 0)
+                    {
+                        OnFrameObserved(processId, e.MethodIds[i], e.Kind);
+                    }
+                }
             }
         }
 
@@ -542,6 +564,27 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             _index.Add(key, builder.Kind, builder.MethodIds.ToArray(), builder.FrameStates?.ToArray(),
                 builder.Depth, builder.ContinuationIndexBase, WrapperCount, builder.StartQpc, qpc,
                 builder.Completions.ToArray(), builder.WrapperResets.ToArray());
+        }
+
+        /// <summary>
+        /// Commits any async call stacks still open (resumed, but not yet closed by a suspend/complete context
+        /// event) when the event stream ends. These were live at capture end - the common case when a trace is
+        /// taken while async work is still running - so they are recorded as active through end of trace
+        /// (<c>EndQpc = long.MaxValue</c>) and stay queryable. Call once after all events have been processed.
+        /// </summary>
+        public void Finish()
+        {
+            foreach (KeyValuePair<AsyncThreadKey, AsyncCallStacks> kv in _threads)
+            {
+                AsyncCallStacks state = kv.Value;
+                while (state.Top != null)
+                {
+                    AsyncCallStackBuilder builder = state.Pop();
+                    _index.Add(kv.Key, builder.Kind, builder.MethodIds.ToArray(), builder.FrameStates?.ToArray(),
+                        builder.Depth, builder.ContinuationIndexBase, WrapperCount, builder.StartQpc, long.MaxValue,
+                        builder.Completions.ToArray(), builder.WrapperResets.ToArray());
+                }
+            }
         }
 
         /// <summary>Per-thread build state: the nesting stack of in-progress async call stacks.</summary>

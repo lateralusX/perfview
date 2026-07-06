@@ -2171,6 +2171,19 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
             // the common case for async-profiler captures, and the jittedMethods pass for real-time JIT.
             var asyncMethodStartByMethodId = new Dictionary<ulong, Address>();
             var asyncV1DependentsByMethodId = new Dictionary<ulong, List<(AsyncCallStackFrames Frames, int Slot)>>();
+            // StateMachine MethodDescs seen in an async call stack before their method loaded; registered once it does.
+            var asyncV1ObservedMethodIds = new HashSet<(int ProcessId, ulong MethodId)>();
+
+            // Unified resolution index: a frame identity -> its resolved CodeAddressIndex. The identity is the frame's
+            // methodId - a native IP for RuntimeAsync, or a MethodDesc (== ETW MethodID, per the runtime fix) for
+            // StateMachineAsync. We register and remember the code address as soon as the identity becomes resolvable
+            // while the trace is still being processed (RuntimeAsync IP when its callstack is seen; StateMachineAsync
+            // MethodDesc when its method loads), BEFORE ForAllUnresolvedCodeAddressesInRange resolves it and REMOVES it
+            // from the address->index map. Interning a frame set (at close, or at end-of-trace drain for async call
+            // stacks still live at capture end) then just reuses these indices, so drained frames stay resolved.
+            // Only the method identity matters here: a StateMachine frame's state selects a resume IP within the same
+            // method (not a different method name) and is preserved per frame separately, so keying by methodId is right.
+            var asyncFrameCodeAddressByMethodId = new Dictionary<(int ProcessId, ulong MethodId), CodeAddressIndex>();
 
             Func<int, Address, CodeAddressIndex> registerAsyncFrameAddress = delegate (int processId, Address address)
             {
@@ -2180,6 +2193,21 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
                 }
                 TraceProcess process = Processes.LastProcessWithID(processId);
                 return process != null ? codeAddresses.GetOrCreateCodeAddressIndex(process, address) : CodeAddressIndex.Invalid;
+            };
+
+            // Registers (once) and remembers the resolved code address for a frame identity (methodId), keyed so a
+            // later intern reuses it even after rundown removed the raw address from the address->index map.
+            Func<int, ulong, Address, CodeAddressIndex> rememberAsyncFrameCodeAddress = delegate (int processId, ulong methodId, Address address)
+            {
+                if (!asyncFrameCodeAddressByMethodId.TryGetValue((processId, methodId), out CodeAddressIndex codeAddress))
+                {
+                    codeAddress = registerAsyncFrameAddress(processId, address);
+                    if (codeAddress != CodeAddressIndex.Invalid)
+                    {
+                        asyncFrameCodeAddressByMethodId[(processId, methodId)] = codeAddress;
+                    }
+                }
+                return codeAddress;
             };
 
             asyncProfilerComputer.Index.OnFrameInterned = delegate (AsyncCallStackFrames frames)
@@ -2192,10 +2220,18 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
                         continue;
                     }
 
-                    if (frames.Kind == AsyncCallstackKind.RuntimeAsync)
+                    // Fast path: this identity was already resolved (IP observed, or MethodDesc's method loaded).
+                    if (asyncFrameCodeAddressByMethodId.TryGetValue((frames.ProcessId, methodId), out CodeAddressIndex codeAddress))
                     {
-                        // Native IP: register eagerly; the containing method's AddMethod binds it.
-                        CodeAddressIndex codeAddress = registerAsyncFrameAddress(frames.ProcessId, methodId);
+                        if (codeAddress != CodeAddressIndex.Invalid)
+                        {
+                            frames.SetCodeAddressAt(i, codeAddress);
+                        }
+                    }
+                    else if (frames.Kind == AsyncCallstackKind.RuntimeAsync)
+                    {
+                        // Native IP (normally already remembered when its callstack was observed; resolve as fallback).
+                        codeAddress = rememberAsyncFrameCodeAddress(frames.ProcessId, methodId, methodId);
                         if (codeAddress != CodeAddressIndex.Invalid)
                         {
                             frames.SetCodeAddressAt(i, codeAddress);
@@ -2203,8 +2239,8 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
                     }
                     else if (asyncMethodStartByMethodId.TryGetValue(methodId, out Address startAddress))
                     {
-                        // MethodDesc already discovered: resolve to its start address now.
-                        CodeAddressIndex codeAddress = registerAsyncFrameAddress(frames.ProcessId, startAddress);
+                        // StateMachine MethodDesc already discovered: resolve via its method start address.
+                        codeAddress = rememberAsyncFrameCodeAddress(frames.ProcessId, methodId, startAddress);
                         if (codeAddress != CodeAddressIndex.Invalid)
                         {
                             frames.SetCodeAddressAt(i, codeAddress);
@@ -2212,7 +2248,7 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
                     }
                     else
                     {
-                        // MethodDesc not yet discovered: record a dependency (resolved in onMethodDiscovered).
+                        // StateMachine MethodDesc not yet discovered: resolve when its method loads (onMethodDiscovered).
                         if (!asyncV1DependentsByMethodId.TryGetValue(methodId, out List<(AsyncCallStackFrames, int)> dependents))
                         {
                             dependents = new List<(AsyncCallStackFrames, int)>();
@@ -2220,6 +2256,31 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
                         }
                         dependents.Add((frames, i));
                     }
+                }
+            };
+
+            asyncProfilerComputer.OnFrameObserved = delegate (int processId, ulong methodId, AsyncCallstackKind kind)
+            {
+                // Register a frame identity as soon as it is seen in the event stream, so a covering method load /
+                // rundown binds it BEFORE interning - which for async call stacks still live at capture end happens
+                // only at Finish(). RuntimeAsync IPs can be registered immediately; a StateMachine MethodDesc needs
+                // its method's start address, so it is registered here if already loaded, else once it loads.
+                if (methodId == 0)
+                {
+                    return;
+                }
+
+                if (kind == AsyncCallstackKind.RuntimeAsync)
+                {
+                    rememberAsyncFrameCodeAddress(processId, methodId, methodId);
+                }
+                else if (asyncMethodStartByMethodId.TryGetValue(methodId, out Address startAddress))
+                {
+                    rememberAsyncFrameCodeAddress(processId, methodId, startAddress);
+                }
+                else
+                {
+                    asyncV1ObservedMethodIds.Add((processId, methodId));
                 }
             };
 
@@ -2233,11 +2294,19 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
                 ulong methodId = (ulong)data.MethodID;
                 asyncMethodStartByMethodId[methodId] = data.MethodStartAddress;
 
+                // Register+remember this method's code address now (before this load's AddMethod resolves & removes it)
+                // if a StateMachine async frame referenced it, so frames interned later (incl. at end-of-trace drain)
+                // reuse the resolved index rather than creating a fresh unresolved one.
+                if (asyncV1ObservedMethodIds.Remove((data.ProcessID, methodId)))
+                {
+                    rememberAsyncFrameCodeAddress(data.ProcessID, methodId, data.MethodStartAddress);
+                }
+
                 if (asyncV1DependentsByMethodId.TryGetValue(methodId, out List<(AsyncCallStackFrames Frames, int Slot)> dependents))
                 {
                     foreach ((AsyncCallStackFrames frames, int slot) in dependents)
                     {
-                        CodeAddressIndex codeAddress = registerAsyncFrameAddress(frames.ProcessId, data.MethodStartAddress);
+                        CodeAddressIndex codeAddress = rememberAsyncFrameCodeAddress(frames.ProcessId, methodId, data.MethodStartAddress);
                         if (codeAddress != CodeAddressIndex.Invalid)
                         {
                             frames.SetCodeAddressAt(slot, codeAddress);
@@ -2502,6 +2571,10 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
             {
                 eventsLost = rawEvents.EventsLost;
             }
+
+            // Commit any async call stacks still open (resumed but not yet suspended/completed) at end of the
+            // event stream - they were live when the trace ended, so they remain queryable through end of trace.
+            asyncProfilerComputer.Finish();
 
             // Capture the built async call stack index (null it out when empty so we don't persist nothing). Its
             // frames were symbolized incrementally during processing (see OnFrameInterned / onMethodDiscovered above).
@@ -4330,6 +4403,18 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
         }
 
         /// <summary>
+        /// Convenience overload of <see cref="GetAsyncCallStacks(ThreadIndex, long)"/> that takes a relative time in
+        /// milliseconds (e.g. a <see cref="StackSourceSample"/>'s <c>TimeRelativeMSec</c>, or any event's
+        /// <see cref="TraceEvent.TimeStampRelativeMSec"/>) and converts it to QPC via
+        /// <see cref="RelativeMSecToQPC(double)"/>. Because a relative-millisecond value is a <c>double</c> derived
+        /// from the original QPC (and <c>QPC - sessionStart</c> fits exactly in a <c>double</c> even for multi-hour
+        /// traces), this round-trip preserves the QPC to within a single QPC tick (~100 ns) — far finer than any
+        /// async call-stack interval — so callers that already hold a relative time need not deal with raw QPC.
+        /// </summary>
+        public IReadOnlyList<AsyncCallStack> GetAsyncCallStacks(ThreadIndex threadIndex, double timeRelativeMSec) =>
+            GetAsyncCallStacks(threadIndex, RelativeMSecToQPC(timeRelativeMSec));
+
+        /// <summary>
         /// Returns the async call stacks active on the OS thread <paramref name="osThreadId"/> in process
         /// <paramref name="processId"/> at <paramref name="timeQPC"/> (a raw QPC timestamp), ordered
         /// bottom-to-top (async call stacks nest, so several can be active at once). Uses QPC directly for full
@@ -4350,6 +4435,38 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
             }
 
             return index.GetAsyncCallStacks(new AsyncThreadKey(processId, osThreadId), timeQPC);
+        }
+
+        /// <summary>
+        /// Convenience overload of <see cref="GetAsyncCallStacks(int, ulong, long)"/> that takes a relative time in
+        /// milliseconds (e.g. a <see cref="StackSourceSample"/>'s <c>TimeRelativeMSec</c>, or any event's
+        /// <see cref="TraceEvent.TimeStampRelativeMSec"/>) and converts it to QPC via
+        /// <see cref="RelativeMSecToQPC(double)"/>. Because a relative-millisecond value is a <c>double</c> derived
+        /// from the original QPC (and <c>QPC - sessionStart</c> fits exactly in a <c>double</c> even for multi-hour
+        /// traces), this round-trip preserves the QPC to within a single QPC tick (~100 ns) — far finer than any
+        /// async call-stack interval — so callers that already hold a relative time need not deal with raw QPC.
+        /// </summary>
+        public IReadOnlyList<AsyncCallStack> GetAsyncCallStacks(int processId, ulong osThreadId, double timeRelativeMSec) =>
+            GetAsyncCallStacks(processId, osThreadId, RelativeMSecToQPC(timeRelativeMSec));
+
+        /// <summary>
+        /// Returns the async call stacks active on the thread that emitted <paramref name="anchorEvent"/> at that
+        /// event's instant, ordered bottom-to-top (async call stacks nest, so several can be active at once). The
+        /// process id, OS thread id, and QPC timestamp are taken directly from the event, so callers can align an
+        /// async call stack with any event they already have (e.g. a CPU sample from the sample profiler) without
+        /// handling raw QPC timestamps themselves. Returns an empty list if that thread has no async call stack
+        /// covering the event's instant or the trace had no async-profiler data. See <see cref="AsyncCallStack"/>.
+        /// </summary>
+        public IReadOnlyList<AsyncCallStack> GetAsyncCallStacks(TraceEvent anchorEvent)
+        {
+            if (anchorEvent == null)
+            {
+                throw new ArgumentNullException(nameof(anchorEvent));
+            }
+
+#pragma warning disable CS0618 // TimeStampQPC is discouraged for general use, but here we deliberately need the event's exact QPC to query the async index precisely; the discouraged property never leaves this assembly.
+            return GetAsyncCallStacks(anchorEvent.ProcessID, (ulong)anchorEvent.ThreadID, anchorEvent.TimeStampQPC);
+#pragma warning restore CS0618
         }
 
         // headerSize is the size we persist of TraceEventNativeMethods.EVENT_RECORD which is up to and
