@@ -1675,7 +1675,6 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
 
             Action<MethodLoadUnloadVerboseTraceData> onMethodStart = delegate (MethodLoadUnloadVerboseTraceData data)
                 {
-                    onMethodDiscovered?.Invoke(data);
                     // We only capture data on unload, because we collect the addresses first.
                     if (!data.IsDynamic && !data.IsJitted)
                     {
@@ -1727,7 +1726,6 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
 
             Action<MethodLoadUnloadVerboseTraceData> onMethodDCStop = delegate (MethodLoadUnloadVerboseTraceData data)
             {
-                onMethodDiscovered?.Invoke(data);   // let conversion-time consumers (async frame symbolization) react before AddMethod binds
                 codeAddresses.AddMethod(data);
                 bookKeepingEvent = true;
             };
@@ -2159,54 +2157,35 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
 
             // Symbolize the async call stack frames incrementally, driven by the frames actually present (not the total
             // method count). Each frame stores only a CodeAddressIndex, pointing into TraceLog's already-persisted
-            // CodeAddresses table.
-            //   * RuntimeAsync frames carry a native IP -> register the code address eagerly as the frame is interned.
-            //   * StateMachineAsync frames carry a MoveNext MethodDesc pointer (== the ETW MethodID) -> resolve it to
-            //     the method's start address immediately if that method was already discovered, otherwise record a
-            //     dependency and resolve when it is. (TraceLog keeps only address-keyed method lookups, so we remember
-            //     the MethodID -> start address pairing ourselves; this makes V1 order-independent like V2.)
-            // We do NOT subscribe our own method callbacks; instead SetupCallbacks' onMethodStart / onMethodDCStop
-            // invoke onMethodDiscovered (assigned here). The registered addresses are bound to methods by those
-            // handlers themselves - onMethodDCStop's AddMethod (invoked right after this hook) for rundown methods,
-            // the common case for async-profiler captures, and the jittedMethods pass for real-time JIT.
-            var asyncMethodStartByMethodId = new Dictionary<ulong, Address>();
-            var asyncV1DependentsByMethodId = new Dictionary<ulong, List<(AsyncCallStackFrames Frames, int Slot)>>();
-            // StateMachine MethodDescs seen in an async call stack before their method loaded; registered once it does.
-            var asyncV1ObservedMethodIds = new HashSet<(int ProcessId, ulong MethodId)>();
-
-            // Unified resolution index: a frame identity -> its resolved CodeAddressIndex. The identity is the frame's
-            // methodId - a native IP for RuntimeAsync, or a MethodDesc (== ETW MethodID, per the runtime fix) for
-            // StateMachineAsync. We register and remember the code address as soon as the identity becomes resolvable
-            // while the trace is still being processed (RuntimeAsync IP when its callstack is seen; StateMachineAsync
-            // MethodDesc when its method loads), BEFORE ForAllUnresolvedCodeAddressesInRange resolves it and REMOVES it
-            // from the address->index map. Interning a frame set (at close, or at end-of-trace drain for async call
-            // stacks still live at capture end) then just reuses these indices, so drained frames stay resolved.
-            // Only the method identity matters here: a StateMachine frame's state selects a resume IP within the same
-            // method (not a different method name) and is preserved per frame separately, so keying by methodId is right.
+            // CodeAddresses table. Every frame's methodId is a native code IP - a resume IP for RuntimeAsync, and the
+            // MoveNext body IP for StateMachineAsync (the runtime emits the method's code address as its id) - so both
+            // kinds resolve identically: register the IP as a code address and remember it, so a covering method load /
+            // rundown / ProcessSymbol binds it BEFORE ForAllUnresolvedCodeAddressesInRange resolves and REMOVES the raw
+            // address from the address->index map. Interning a frame set (at close, or at end-of-trace drain for async
+            // call stacks still live at capture end via Finish()) then just reuses the remembered index, so drained
+            // frames stay resolved. A StateMachine frame's state selects a resume IP within the same method (not a
+            // different method name) and is preserved per frame separately, so keying by methodId (the body IP) is right.
             var asyncFrameCodeAddressByMethodId = new Dictionary<(int ProcessId, ulong MethodId), CodeAddressIndex>();
 
-            Func<int, Address, CodeAddressIndex> registerAsyncFrameAddress = delegate (int processId, Address address)
+            // Registers (once) and remembers the resolved code address for a frame identity (its methodId == a code IP),
+            // keyed so a later intern reuses it even after rundown removed the raw address from the address->index map.
+            Func<int, ulong, CodeAddressIndex> rememberAsyncFrameCodeAddress = delegate (int processId, ulong methodId)
             {
-                if (address == 0)
+                if (methodId == 0)
                 {
                     return CodeAddressIndex.Invalid;
                 }
-                TraceProcess process = Processes.LastProcessWithID(processId);
-                return process != null ? codeAddresses.GetOrCreateCodeAddressIndex(process, address) : CodeAddressIndex.Invalid;
-            };
 
-            // Registers (once) and remembers the resolved code address for a frame identity (methodId), keyed so a
-            // later intern reuses it even after rundown removed the raw address from the address->index map.
-            Func<int, ulong, Address, CodeAddressIndex> rememberAsyncFrameCodeAddress = delegate (int processId, ulong methodId, Address address)
-            {
                 if (!asyncFrameCodeAddressByMethodId.TryGetValue((processId, methodId), out CodeAddressIndex codeAddress))
                 {
-                    codeAddress = registerAsyncFrameAddress(processId, address);
+                    TraceProcess process = Processes.LastProcessWithID(processId);
+                    codeAddress = process != null ? codeAddresses.GetOrCreateCodeAddressIndex(process, methodId) : CodeAddressIndex.Invalid;
                     if (codeAddress != CodeAddressIndex.Invalid)
                     {
                         asyncFrameCodeAddressByMethodId[(processId, methodId)] = codeAddress;
                     }
                 }
+
                 return codeAddress;
             };
 
@@ -2214,106 +2193,20 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
             {
                 for (int i = 0; i < frames.FrameCount; i++)
                 {
-                    ulong methodId = frames.MethodIdAt(i);
-                    if (methodId == 0)
+                    CodeAddressIndex codeAddress = rememberAsyncFrameCodeAddress(frames.ProcessId, frames.MethodIdAt(i));
+                    if (codeAddress != CodeAddressIndex.Invalid)
                     {
-                        continue;
-                    }
-
-                    // Fast path: this identity was already resolved (IP observed, or MethodDesc's method loaded).
-                    if (asyncFrameCodeAddressByMethodId.TryGetValue((frames.ProcessId, methodId), out CodeAddressIndex codeAddress))
-                    {
-                        if (codeAddress != CodeAddressIndex.Invalid)
-                        {
-                            frames.SetCodeAddressAt(i, codeAddress);
-                        }
-                    }
-                    else if (frames.Kind == AsyncCallstackKind.RuntimeAsync)
-                    {
-                        // Native IP (normally already remembered when its callstack was observed; resolve as fallback).
-                        codeAddress = rememberAsyncFrameCodeAddress(frames.ProcessId, methodId, methodId);
-                        if (codeAddress != CodeAddressIndex.Invalid)
-                        {
-                            frames.SetCodeAddressAt(i, codeAddress);
-                        }
-                    }
-                    else if (asyncMethodStartByMethodId.TryGetValue(methodId, out Address startAddress))
-                    {
-                        // StateMachine MethodDesc already discovered: resolve via its method start address.
-                        codeAddress = rememberAsyncFrameCodeAddress(frames.ProcessId, methodId, startAddress);
-                        if (codeAddress != CodeAddressIndex.Invalid)
-                        {
-                            frames.SetCodeAddressAt(i, codeAddress);
-                        }
-                    }
-                    else
-                    {
-                        // StateMachine MethodDesc not yet discovered: resolve when its method loads (onMethodDiscovered).
-                        if (!asyncV1DependentsByMethodId.TryGetValue(methodId, out List<(AsyncCallStackFrames, int)> dependents))
-                        {
-                            dependents = new List<(AsyncCallStackFrames, int)>();
-                            asyncV1DependentsByMethodId[methodId] = dependents;
-                        }
-                        dependents.Add((frames, i));
+                        frames.SetCodeAddressAt(i, codeAddress);
                     }
                 }
             };
 
             asyncProfilerComputer.OnFrameObserved = delegate (int processId, ulong methodId, AsyncCallstackKind kind)
             {
-                // Register a frame identity as soon as it is seen in the event stream, so a covering method load /
-                // rundown binds it BEFORE interning - which for async call stacks still live at capture end happens
-                // only at Finish(). RuntimeAsync IPs can be registered immediately; a StateMachine MethodDesc needs
-                // its method's start address, so it is registered here if already loaded, else once it loads.
-                if (methodId == 0)
-                {
-                    return;
-                }
-
-                if (kind == AsyncCallstackKind.RuntimeAsync)
-                {
-                    rememberAsyncFrameCodeAddress(processId, methodId, methodId);
-                }
-                else if (asyncMethodStartByMethodId.TryGetValue(methodId, out Address startAddress))
-                {
-                    rememberAsyncFrameCodeAddress(processId, methodId, startAddress);
-                }
-                else
-                {
-                    asyncV1ObservedMethodIds.Add((processId, methodId));
-                }
-            };
-
-            onMethodDiscovered = delegate (MethodLoadUnloadVerboseTraceData data)
-            {
-                if (data.MethodStartAddress == 0)
-                {
-                    return;
-                }
-
-                ulong methodId = (ulong)data.MethodID;
-                asyncMethodStartByMethodId[methodId] = data.MethodStartAddress;
-
-                // Register+remember this method's code address now (before this load's AddMethod resolves & removes it)
-                // if a StateMachine async frame referenced it, so frames interned later (incl. at end-of-trace drain)
-                // reuse the resolved index rather than creating a fresh unresolved one.
-                if (asyncV1ObservedMethodIds.Remove((data.ProcessID, methodId)))
-                {
-                    rememberAsyncFrameCodeAddress(data.ProcessID, methodId, data.MethodStartAddress);
-                }
-
-                if (asyncV1DependentsByMethodId.TryGetValue(methodId, out List<(AsyncCallStackFrames Frames, int Slot)> dependents))
-                {
-                    foreach ((AsyncCallStackFrames frames, int slot) in dependents)
-                    {
-                        CodeAddressIndex codeAddress = rememberAsyncFrameCodeAddress(frames.ProcessId, methodId, data.MethodStartAddress);
-                        if (codeAddress != CodeAddressIndex.Invalid)
-                        {
-                            frames.SetCodeAddressAt(slot, codeAddress);
-                        }
-                    }
-                    asyncV1DependentsByMethodId.Remove(methodId);
-                }
+                // Register a frame's code address as soon as it is seen in the event stream, so a covering method load /
+                // rundown / ProcessSymbol binds it BEFORE interning - which for async call stacks still live at capture
+                // end happens only at Finish().
+                rememberAsyncFrameCodeAddress(processId, methodId);
             };
 
             // Fix up MemInfoWS records so that we get one per process rather than one per machine
@@ -2577,7 +2470,7 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
             asyncProfilerComputer.Finish();
 
             // Capture the built async call stack index (null it out when empty so we don't persist nothing). Its
-            // frames were symbolized incrementally during processing (see OnFrameInterned / onMethodDiscovered above).
+            // frames were symbolized incrementally during processing (see OnFrameObserved / OnFrameInterned above).
             asyncCallStacks = asyncProfilerComputer.Index.IsEmpty ? null : asyncProfilerComputer.Index;
 
             if (maxEventCount != -1 && eventCount >= maxEventCount)
@@ -4518,11 +4411,6 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
         private List<MethodLoadUnloadJSTraceData> jsJittedMethods;
         private Dictionary<JavaScriptSourceKey, string> sourceFilesByID;
 
-        // General hook invoked from SetupCallbacks' method-load handlers (onMethodStart / onMethodDCStop) for each
-        // managed method as it is discovered (JIT load or rundown). It lets conversion-time consumers set up in
-        // CopyRawEvents react to method discovery without subscribing their own parallel method callbacks (used to
-        // symbolize async call stack frames). Null until assigned; transient (not serialized).
-        private Action<MethodLoadUnloadVerboseTraceData> onMethodDiscovered;
 
         private TraceModuleFiles moduleFiles;
         private GrowableArray<EventsToStackIndex> eventsToStacks;
