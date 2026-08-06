@@ -174,12 +174,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// </summary>
     public sealed class AsyncCallStack
     {
-        private readonly CompletionDelta[] _completions; // ascending by Qpc
-        private readonly long[] _wrapperResets;          // ascending
+        private readonly CompletionDelta[] _methodCompletions;    // ascending by Qpc; CompleteMethod events (delta 1)
+        private readonly CompletionDelta[] _exceptionCompletions; // ascending by Qpc; Unwind events (delta = unwound frame count)
+        private readonly long[] _wrapperResets;                   // ascending
 
         internal AsyncCallStack(int depth, AsyncCallStackFramesIndex framesIndex, AsyncCallStackFrames frames,
             byte continuationIndexBase, byte wrapperCount, long startQpc, long endQpc,
-            CompletionDelta[] completions, long[] wrapperResets)
+            CompletionDelta[] methodCompletions, CompletionDelta[] exceptionCompletions, long[] wrapperResets)
         {
             Depth = depth;
             FramesIndex = framesIndex;
@@ -188,7 +189,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             WrapperCount = wrapperCount;
             StartQpc = startQpc;
             EndQpc = endQpc;
-            _completions = completions;
+            _methodCompletions = methodCompletions;
+            _exceptionCompletions = exceptionCompletions;
             _wrapperResets = wrapperResets;
         }
 
@@ -213,18 +215,37 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         /// <summary>
         /// The exact number of leaf frames of <see cref="Frames"/> that have completed by <paramref name="qpc"/>,
-        /// derived from this async call stack's <c>CompleteMethod</c>/<c>Unwind</c> events. The still-live async stack
-        /// is the frames with these leaf frames trimmed. This is the precise "complete story" and is preferred
-        /// when those events are present.
+        /// derived from this async call stack's <c>CompleteMethod</c> and <c>Unwind</c> events (normal completions
+        /// plus exceptional unwinds). The still-live async stack is the frames with these leaf frames trimmed. This
+        /// is the precise "complete story" and is preferred when those events are present.
         /// </summary>
-        public int GetCompletedFrameCount(long qpc)
+        public int GetCompletedFrameCount(long qpc) =>
+            GetMethodCompletedFrameCount(qpc) + GetExceptionCompletedFrameCount(qpc);
+
+        /// <summary>
+        /// The number of leaf frames completed by <paramref name="qpc"/> via normal <c>CompleteMethod</c> events
+        /// (each contributes 1). Meaningful only when <c>CompleteMethod</c> events were emitted for this kind (see
+        /// <see cref="AsyncCallStacksIndex.MethodCompletionObserved"/>); otherwise this is 0 and the normal
+        /// completed count must be derived another way (the continuation-wrapper slot for V2, or the inline-resumed
+        /// frames on the sync stack for V1).
+        /// </summary>
+        public int GetMethodCompletedFrameCount(long qpc) => SumDeltasUpTo(_methodCompletions, qpc);
+
+        /// <summary>
+        /// The number of leaf frames completed by <paramref name="qpc"/> via <c>Unwind</c> (exception) events (each
+        /// contributes its unwound frame count). Exceptional completions leave the sync stack, so this is the only
+        /// way to observe them; add it to the normal completed count regardless of how the latter was derived.
+        /// </summary>
+        public int GetExceptionCompletedFrameCount(long qpc) => SumDeltasUpTo(_exceptionCompletions, qpc);
+
+        private static int SumDeltasUpTo(CompletionDelta[] deltas, long qpc)
         {
             int total = 0;
-            for (int i = 0; i < _completions.Length; i++)
+            for (int i = 0; i < deltas.Length; i++)
             {
-                if (_completions[i].Qpc <= qpc)
+                if (deltas[i].Qpc <= qpc)
                 {
-                    total += _completions[i].Delta;
+                    total += deltas[i].Delta;
                 }
                 else
                 {
@@ -235,16 +256,26 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         /// <summary>
-        /// The number of completed leaf frames derived from continuation-wrapper-index resets:
-        /// <c>GetWrapperResetCount(qpc) * WrapperCount + currentMethodIndex</c>. Wrapper resets only advance
-        /// every <see cref="WrapperCount"/> completions, so the caller supplies <paramref name="currentMethodIndex"/>
-        /// — the current wrapper slot read from the native sync callstack at <paramref name="qpc"/> — to refine
-        /// within the current window and fully align the native stack with the async call stack. Use this
-        /// overload when <c>CompleteMethod</c>/<c>Unwind</c> events are not available; otherwise prefer
+        /// The number of completed leaf frames derived from continuation-wrapper-index resets and the current
+        /// wrapper slot, relative to the wrapper slot captured at resume (<see cref="ContinuationIndexBase"/>):
+        /// <c>GetWrapperResetCount(qpc) * WrapperCount + currentMethodIndex - ContinuationIndexBase</c>
+        /// (clamped to &gt;= 0). Wrapper resets only advance every <see cref="WrapperCount"/> completions, so the
+        /// caller supplies <paramref name="currentMethodIndex"/> — the current wrapper slot read from the native
+        /// sync callstack at <paramref name="qpc"/> — to refine within the current window.
+        /// <para>
+        /// <see cref="ContinuationIndexBase"/> is the wrapper slot at resume: normally 0, but on late attach it is
+        /// the current slot, because the resets that advanced it before attach could not be observed. Subtracting
+        /// it makes the count start from that value, so only completions observed since resume are counted.
+        /// </para>
+        /// Use this overload when <c>CompleteMethod</c> events are not available for V2 (see
+        /// <see cref="AsyncCallStacksIndex.MethodCompletionObserved"/>); otherwise prefer
         /// <see cref="GetCompletedFrameCount(long)"/>.
         /// </summary>
-        public int GetCompletedFrameCount(long qpc, int currentMethodIndex) =>
-            GetWrapperResetCount(qpc) * WrapperCount + currentMethodIndex;
+        public int GetCompletedFrameCount(long qpc, int currentMethodIndex)
+        {
+            int completed = (GetWrapperResetCount(qpc) * WrapperCount) + currentMethodIndex - ContinuationIndexBase;
+            return completed > 0 ? completed : 0;
+        }
 
         /// <summary>
         /// The number of continuation-wrapper-index resets observed during this async call stack up to
@@ -277,11 +308,18 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             serializer.Write(StartQpc);
             serializer.Write(EndQpc);
 
-            serializer.Write(_completions.Length);
-            for (int i = 0; i < _completions.Length; i++)
+            serializer.Write(_methodCompletions.Length);
+            for (int i = 0; i < _methodCompletions.Length; i++)
             {
-                serializer.Write(_completions[i].Qpc);
-                serializer.Write(_completions[i].Delta);
+                serializer.Write(_methodCompletions[i].Qpc);
+                serializer.Write(_methodCompletions[i].Delta);
+            }
+
+            serializer.Write(_exceptionCompletions.Length);
+            for (int i = 0; i < _exceptionCompletions.Length; i++)
+            {
+                serializer.Write(_exceptionCompletions[i].Qpc);
+                serializer.Write(_exceptionCompletions[i].Delta);
             }
 
             serializer.Write(_wrapperResets.Length);
@@ -300,13 +338,22 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             long startQpc = deserializer.ReadInt64();
             long endQpc = deserializer.ReadInt64();
 
-            int completionCount = deserializer.ReadInt();
-            var completions = new CompletionDelta[completionCount];
-            for (int i = 0; i < completionCount; i++)
+            int methodCompletionCount = deserializer.ReadInt();
+            var methodCompletions = new CompletionDelta[methodCompletionCount];
+            for (int i = 0; i < methodCompletionCount; i++)
             {
                 long qpc = deserializer.ReadInt64();
                 int delta = deserializer.ReadInt();
-                completions[i] = new CompletionDelta(qpc, delta);
+                methodCompletions[i] = new CompletionDelta(qpc, delta);
+            }
+
+            int exceptionCompletionCount = deserializer.ReadInt();
+            var exceptionCompletions = new CompletionDelta[exceptionCompletionCount];
+            for (int i = 0; i < exceptionCompletionCount; i++)
+            {
+                long qpc = deserializer.ReadInt64();
+                int delta = deserializer.ReadInt();
+                exceptionCompletions[i] = new CompletionDelta(qpc, delta);
             }
 
             int wrapperResetCount = deserializer.ReadInt();
@@ -316,7 +363,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 wrapperResets[i] = deserializer.ReadInt64();
             }
 
-            return new AsyncCallStack(depth, framesIndex, resolveFrames(framesIndex), continuationIndexBase, wrapperCount, startQpc, endQpc, completions, wrapperResets);
+            return new AsyncCallStack(depth, framesIndex, resolveFrames(framesIndex), continuationIndexBase, wrapperCount, startQpc, endQpc, methodCompletions, exceptionCompletions, wrapperResets);
         }
 
         internal readonly struct CompletionDelta
@@ -370,6 +417,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         private ulong _qpcFrequency;
         private ulong _qpcSync;
         private ulong _utcSync;
+
+        // Set once the first AsyncProfilerMetadata sub-event is seen in the stream. Until then no thread is armed,
+        // so all thread-scoped sub-events are ignored. The metadata carries the manifest (framing/versioning) and,
+        // per the runtime contract, always precedes the reset wave for its config revision. Gating arming on it
+        // discards leftover buffered data from a PRIOR profiler session (config changes do NOT flush existing async
+        // buffers), which our session can neither frame nor attribute correctly.
+        private long _firstMetadataQpc = long.MaxValue;
 
         /// <summary>
         /// Binds the computer to a live parser: it decodes each raw <c>AsyncEvents</c> buffer (maintaining
@@ -472,15 +526,48 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         void IAsyncProfilerSubEventSink.OnMethodResume(in AsyncMethodEvent e) { /* a method began running; no frame change */ }
 
-        void IAsyncProfilerSubEventSink.OnMethodComplete(in AsyncMethodEvent e) => AddCompletion(ThreadKeyOf(e.OsThreadId), e.TimestampQpc, 1);
+        void IAsyncProfilerSubEventSink.OnMethodComplete(in AsyncMethodEvent e)
+        {
+            AsyncCallstackKind kind = e.IsStateMachine ? AsyncCallstackKind.StateMachineAsync : AsyncCallstackKind.RuntimeAsync;
+            _index.MarkMethodCompletionObserved(kind);
+            AddMethodCompletion(ThreadKeyOf(e.OsThreadId), e.TimestampQpc);
+        }
 
-        void IAsyncProfilerSubEventSink.OnException(in AsyncUnwindEvent e) => AddCompletion(ThreadKeyOf(e.OsThreadId), e.TimestampQpc, (int)e.UnwoundFrameCount);
+        void IAsyncProfilerSubEventSink.OnException(in AsyncUnwindEvent e)
+        {
+            AsyncCallstackKind kind = e.IsStateMachine ? AsyncCallstackKind.StateMachineAsync : AsyncCallstackKind.RuntimeAsync;
+            _index.MarkExceptionCompletionObserved(kind);
+            AddExceptionCompletion(ThreadKeyOf(e.OsThreadId), e.TimestampQpc, (int)e.UnwoundFrameCount);
+        }
 
         void IAsyncProfilerSubEventSink.OnResetThreadContext(in AsyncNeutralEvent e)
         {
-            // Arm the thread (start handling its events) and drop any in-progress async call stacks: subsequent
-            // full callstacks re-establish the state.
-            AsyncCallStacks state = GetOrCreate(ThreadKeyOf(e.OsThreadId));
+            // Ignore any reset whose timestamp precedes the first metadata sub-event (until the first metadata is
+            // seen, _firstMetadataQpc is long.MaxValue so every reset is gated). Without the manifest we cannot
+            // correctly frame the stream, and a reset before the first metadata's QPC belongs to a prior profiler
+            // session's leftover buffered data (config changes don't flush existing async buffers). The runtime emits
+            // a config revision's metadata before its reset wave, so every valid same-session reset has a QPC greater
+            // than (or, on coarse-resolution clocks, equal to) the first metadata's QPC. Gating on QPC rather than
+            // stream/delivery order drops foreign leftover even when its buffer is delivered after the metadata
+            // buffer (buffers are delivered by buffer timestamp, not force-flush order), while never dropping valid
+            // same-session data.
+            if (e.TimestampQpc < _firstMetadataQpc)
+            {
+                return;
+            }
+
+            // Commit any in-progress async call stacks at the reset timestamp before clearing, then arm the thread.
+            // Once armed, everything on the thread is our session's data (foreign prior-session leftover was gated
+            // out above, and nothing is ever pushed while unarmed), so an open activation was genuinely live from
+            // its resume up to this reset. Recording it as [StartQpc, resetQpc) preserves stitch coverage for CPU
+            // samples that land in that window instead of orphaning them. On the FIRST (arming) reset the nesting is
+            // empty, so this commit is a no-op there; subsequent full callstacks re-establish the state.
+            AsyncThreadKey key = ThreadKeyOf(e.OsThreadId);
+            AsyncCallStacks state = GetOrCreate(key);
+            if (state.Armed)
+            {
+                CommitOpenActivations(key, state, e.TimestampQpc);
+            }
             state.Armed = true;
             state.ClearNesting();
         }
@@ -497,6 +584,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         void IAsyncProfilerSubEventSink.OnMetadata(in AsyncMetadataEvent e)
         {
+            if (e.TimestampQpc < _firstMetadataQpc)
+            {
+                _firstMetadataQpc = e.TimestampQpc;
+            }
             _qpcFrequency = e.QpcFrequency;
             _qpcSync = e.QpcSync;
             _utcSync = e.UtcSync;
@@ -543,12 +634,21 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             return state;
         }
 
-        private void AddCompletion(AsyncThreadKey key, long qpc, int delta)
+        private void AddMethodCompletion(AsyncThreadKey key, long qpc)
         {
             AsyncCallStacks state = GetOrCreate(key);
-            if (state.Armed && delta > 0)
+            if (state.Armed)
             {
-                state.Top?.Completions.Add(new AsyncCallStack.CompletionDelta(qpc, delta));
+                state.Top?.MethodCompletions.Add(new AsyncCallStack.CompletionDelta(qpc, 1));
+            }
+        }
+
+        private void AddExceptionCompletion(AsyncThreadKey key, long qpc, int unwoundFrameCount)
+        {
+            AsyncCallStacks state = GetOrCreate(key);
+            if (state.Armed && unwoundFrameCount > 0)
+            {
+                state.Top?.ExceptionCompletions.Add(new AsyncCallStack.CompletionDelta(qpc, unwoundFrameCount));
             }
         }
 
@@ -563,7 +663,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             AsyncCallStackBuilder builder = state.Pop();
             _index.Add(key, builder.Kind, builder.MethodIds.ToArray(), builder.FrameStates?.ToArray(),
                 builder.Depth, builder.ContinuationIndexBase, WrapperCount, builder.StartQpc, qpc,
-                builder.Completions.ToArray(), builder.WrapperResets.ToArray());
+                builder.MethodCompletions.ToArray(), builder.ExceptionCompletions.ToArray(), builder.WrapperResets.ToArray());
         }
 
         /// <summary>
@@ -576,14 +676,23 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         {
             foreach (KeyValuePair<AsyncThreadKey, AsyncCallStacks> kv in _threads)
             {
-                AsyncCallStacks state = kv.Value;
-                while (state.Top != null)
-                {
-                    AsyncCallStackBuilder builder = state.Pop();
-                    _index.Add(kv.Key, builder.Kind, builder.MethodIds.ToArray(), builder.FrameStates?.ToArray(),
-                        builder.Depth, builder.ContinuationIndexBase, WrapperCount, builder.StartQpc, long.MaxValue,
-                        builder.Completions.ToArray(), builder.WrapperResets.ToArray());
-                }
+                CommitOpenActivations(kv.Key, kv.Value, long.MaxValue);
+            }
+        }
+
+        /// <summary>
+        /// Pops and records every in-progress async call stack still open on <paramref name="state"/>, closing each
+        /// at <paramref name="endQpc"/>. Used both at end of stream (<see cref="Finish"/>, endQpc = long.MaxValue)
+        /// and on an armed mid-session reset (endQpc = the reset timestamp).
+        /// </summary>
+        private void CommitOpenActivations(AsyncThreadKey key, AsyncCallStacks state, long endQpc)
+        {
+            while (state.Top != null)
+            {
+                AsyncCallStackBuilder builder = state.Pop();
+                _index.Add(key, builder.Kind, builder.MethodIds.ToArray(), builder.FrameStates?.ToArray(),
+                    builder.Depth, builder.ContinuationIndexBase, WrapperCount, builder.StartQpc, endQpc,
+                    builder.MethodCompletions.ToArray(), builder.ExceptionCompletions.ToArray(), builder.WrapperResets.ToArray());
             }
         }
 
@@ -621,7 +730,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             public int Depth;
             public readonly List<ulong> MethodIds = new List<ulong>();
             public List<int> FrameStates; // null unless a state-machine callstack contributed frames
-            public readonly List<AsyncCallStack.CompletionDelta> Completions = new List<AsyncCallStack.CompletionDelta>();
+            public readonly List<AsyncCallStack.CompletionDelta> MethodCompletions = new List<AsyncCallStack.CompletionDelta>();
+            public readonly List<AsyncCallStack.CompletionDelta> ExceptionCompletions = new List<AsyncCallStack.CompletionDelta>();
             public readonly List<long> WrapperResets = new List<long>();
 
             public AsyncCallStackBuilder(in AsyncCallstackEvent e)

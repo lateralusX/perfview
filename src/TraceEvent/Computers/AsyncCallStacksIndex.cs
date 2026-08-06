@@ -31,6 +31,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         private readonly Dictionary<FrameKey, AsyncCallStackFramesIndex> _frameKeyToIndex = new Dictionary<FrameKey, AsyncCallStackFramesIndex>();
         private readonly Dictionary<AsyncThreadKey, ThreadCallStacks> _threads = new Dictionary<AsyncThreadKey, ThreadCallStacks>();
 
+        private bool _methodCompletionObservedRuntimeAsync;
+        private bool _methodCompletionObservedStateMachineAsync;
+        private bool _exceptionCompletionObservedRuntimeAsync;
+        private bool _exceptionCompletionObservedStateMachineAsync;
+
         /// <summary>
         /// Invoked (if set) the first time a distinct <see cref="AsyncCallStackFrames"/> is interned, so a build-time
         /// consumer (<see cref="TraceLog"/>) can begin symbolizing its frames as they are discovered. Not used after load.
@@ -45,6 +50,67 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         /// <summary>The threads that have at least one recorded async call stack.</summary>
         public IEnumerable<AsyncThreadKey> Threads => _threads.Keys;
+
+        /// <summary>
+        /// True if the trace contained any <c>CompleteMethod</c> (normal completion) event for async call stacks of
+        /// the given <paramref name="kind"/>. These events are keyword-gated, so this distinguishes "CompleteMethod
+        /// events were not being emitted" from "they were emitted, but nothing has completed yet" — a distinction a
+        /// per-stack completion count cannot make. When true, <see cref="AsyncCallStack.GetMethodCompletedFrameCount"/>
+        /// is the authoritative normal-completed count (0 genuinely means "nothing completed yet"); when false, the
+        /// normal completed count must be derived another way (the continuation-wrapper slot for V2, or the
+        /// inline-resumed frames on the sync stack for V1). Exceptional completions are tracked separately (see
+        /// <see cref="ExceptionCompletionObserved"/>) because unwound frames leave the sync stack.
+        /// </summary>
+        public bool MethodCompletionObserved(AsyncCallstackKind kind) =>
+            kind == AsyncCallstackKind.StateMachineAsync
+                ? _methodCompletionObservedStateMachineAsync
+                : _methodCompletionObservedRuntimeAsync;
+
+        /// <summary>
+        /// True if the trace contained any <c>Unwind</c> (exceptional completion) event for async call stacks of the
+        /// given <paramref name="kind"/>. Exceptional completions leave the sync stack, so they can only be observed
+        /// from these events; <see cref="AsyncCallStack.GetExceptionCompletedFrameCount"/> should be added to the
+        /// normal completed count regardless of how the latter was derived.
+        /// </summary>
+        public bool ExceptionCompletionObserved(AsyncCallstackKind kind) =>
+            kind == AsyncCallstackKind.StateMachineAsync
+                ? _exceptionCompletionObservedStateMachineAsync
+                : _exceptionCompletionObservedRuntimeAsync;
+
+        /// <summary>
+        /// Records that a <c>CompleteMethod</c> (normal completion) event of the given <paramref name="kind"/> was
+        /// seen in the stream. Called by <see cref="AsyncProfilerComputer"/> as it processes events. This is a
+        /// stream-level, per-kind fact (the events are keyword-gated), so it is only reliable after the whole stream
+        /// has been processed — do not stamp it onto individual <see cref="AsyncCallStack"/>s at close time.
+        /// </summary>
+        internal void MarkMethodCompletionObserved(AsyncCallstackKind kind)
+        {
+            if (kind == AsyncCallstackKind.StateMachineAsync)
+            {
+                _methodCompletionObservedStateMachineAsync = true;
+            }
+            else
+            {
+                _methodCompletionObservedRuntimeAsync = true;
+            }
+        }
+
+        /// <summary>
+        /// Records that an <c>Unwind</c> (exceptional completion) event of the given <paramref name="kind"/> was seen
+        /// in the stream. Called by <see cref="AsyncProfilerComputer"/> as it processes events. Same stream-level,
+        /// per-kind semantics as <see cref="MarkMethodCompletionObserved"/>.
+        /// </summary>
+        internal void MarkExceptionCompletionObserved(AsyncCallstackKind kind)
+        {
+            if (kind == AsyncCallstackKind.StateMachineAsync)
+            {
+                _exceptionCompletionObservedStateMachineAsync = true;
+            }
+            else
+            {
+                _exceptionCompletionObservedRuntimeAsync = true;
+            }
+        }
 
         /// <summary>Resolves an interned frames handle to its frames (null if out of range).</summary>
         public AsyncCallStackFrames GetFrames(AsyncCallStackFramesIndex index)
@@ -78,10 +144,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// </summary>
         internal AsyncCallStack Add(AsyncThreadKey thread, AsyncCallstackKind kind, ulong[] methodIds, int[] frameStates,
             int depth, byte continuationIndexBase, byte wrapperCount, long startQpc, long endQpc,
-            AsyncCallStack.CompletionDelta[] completions, long[] wrapperResets)
+            AsyncCallStack.CompletionDelta[] methodCompletions, AsyncCallStack.CompletionDelta[] exceptionCompletions, long[] wrapperResets)
         {
             AsyncCallStackFramesIndex framesIndex = Intern(kind, methodIds, frameStates, thread.ProcessId, out AsyncCallStackFrames frames);
-            var callStack = new AsyncCallStack(depth, framesIndex, frames, continuationIndexBase, wrapperCount, startQpc, endQpc, completions, wrapperResets);
+            var callStack = new AsyncCallStack(depth, framesIndex, frames, continuationIndexBase, wrapperCount, startQpc, endQpc, methodCompletions, exceptionCompletions, wrapperResets);
             GetOrCreate(thread).Add(callStack);
             return callStack;
         }
@@ -136,6 +202,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     recorded[i].Write(serializer);
                 }
             }
+
+            serializer.Write(_methodCompletionObservedRuntimeAsync);
+            serializer.Write(_methodCompletionObservedStateMachineAsync);
+            serializer.Write(_exceptionCompletionObservedRuntimeAsync);
+            serializer.Write(_exceptionCompletionObservedStateMachineAsync);
         }
 
         void IFastSerializable.FromStream(Deserializer deserializer)
@@ -169,6 +240,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     callStacks.Add(AsyncCallStack.Read(deserializer, ResolveFrames));
                 }
             }
+
+            _methodCompletionObservedRuntimeAsync = deserializer.ReadBool();
+            _methodCompletionObservedStateMachineAsync = deserializer.ReadBool();
+            _exceptionCompletionObservedRuntimeAsync = deserializer.ReadBool();
+            _exceptionCompletionObservedStateMachineAsync = deserializer.ReadBool();
         }
 
         private AsyncCallStackFrames ResolveFrames(AsyncCallStackFramesIndex index) => _internedAsyncCallStackFrames[(int)index];

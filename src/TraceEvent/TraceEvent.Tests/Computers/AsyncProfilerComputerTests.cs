@@ -24,6 +24,16 @@ namespace TraceEventTests
         public static AsyncProfilerBufferBuilder Reset(this AsyncProfilerBufferBuilder b, long ts) =>
             b.ContextNoPayload(AsyncEventID.ResetAsyncThreadContext, ts);
 
+        /// <summary>
+        /// Emits an <c>AsyncProfilerMetadata</c> (establishing the manifest/clock so the computer starts handling
+        /// the stream) immediately followed by a <c>ResetAsyncThreadContext</c> that arms the thread. Mirrors the
+        /// real stream, where a config revision's metadata always precedes its reset wave; the computer ignores
+        /// resets seen before the first metadata.
+        /// </summary>
+        public static AsyncProfilerBufferBuilder Armed(this AsyncProfilerBufferBuilder b, long ts) =>
+            b.Metadata(ts, qpcFrequency: 10_000_000, qpcSync: 1, utcSync: 1, eventBufferSize: 0, wrapperCount: 32, new AsyncManifestEntry[0])
+             .Reset(ts);
+
         public static AsyncProfilerBufferBuilder ResumeStack(this AsyncProfilerBufferBuilder b, long ts, ulong dispatcher, ulong[] frames, int[] states = null, byte continuationIndex = 0) =>
             b.Callstack(AsyncEventID.ResumeStateMachineAsyncCallstack, ts, continuationIndex, 0, dispatcher, frames, states ?? new int[frames.Length]);
 
@@ -44,6 +54,16 @@ namespace TraceEventTests
 
         public static AsyncProfilerBufferBuilder WrapperReset(this AsyncProfilerBufferBuilder b, long ts) =>
             b.ContextNoPayload(AsyncEventID.ResetAsyncContinuationWrapperIndex, ts);
+
+        // V2 (RuntimeAsync) convenience wrappers. Runtime callstacks carry no per-frame state, so states is null.
+        public static AsyncProfilerBufferBuilder ResumeRuntimeStack(this AsyncProfilerBufferBuilder b, long ts, ulong dispatcher, ulong[] frames, byte continuationIndex = 0) =>
+            b.Callstack(AsyncEventID.ResumeRuntimeAsyncCallstack, ts, continuationIndex, 0, dispatcher, frames, null);
+
+        public static AsyncProfilerBufferBuilder SuspendRuntime(this AsyncProfilerBufferBuilder b, long ts) =>
+            b.ContextNoPayload(AsyncEventID.SuspendRuntimeAsyncContext, ts);
+
+        public static AsyncProfilerBufferBuilder CompleteRuntimeMethod(this AsyncProfilerBufferBuilder b, long ts) =>
+            b.Method(AsyncEventID.CompleteRuntimeAsyncMethod, ts);
     }
 
     /// <summary>
@@ -69,8 +89,10 @@ namespace TraceEventTests
         [Fact]
         public void EventsBeforeReset_AreIgnored()
         {
-            // No ResetAsyncThreadContext first: the thread is unarmed, so nothing is indexed.
+            // Metadata is seen, but with no ResetAsyncThreadContext the thread stays unarmed, so nothing is indexed:
+            // arming requires the reset, not merely the metadata.
             var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
+                .Metadata(Start, qpcFrequency: 10_000_000, qpcSync: 1, utcSync: 1, eventBufferSize: 0, wrapperCount: 32, new AsyncManifestEntry[0])
                 .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0x100 })
                 .Suspend(Start + 20));
 
@@ -79,10 +101,69 @@ namespace TraceEventTests
         }
 
         [Fact]
+        public void EventsBeforeMetadata_AreIgnored()
+        {
+            // A reset (and its episode) seen before the first metadata belongs to a prior profiler session's
+            // leftover buffered data (config changes don't flush async buffers). It must be ignored entirely.
+            // Once metadata arrives and re-arms the thread, indexing resumes normally.
+            var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
+                .Reset(Start)                                                   // pre-metadata: ignored
+                .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xDEAD }) // pre-metadata: ignored
+                .Suspend(Start + 20)
+                .Armed(Start + 30)                                              // metadata + reset: arms here
+                .ResumeStack(Start + 40, dispatcher: 2, new ulong[] { 0xBEEF })
+                .Suspend(Start + 50));
+
+            // The pre-metadata episode is not indexed.
+            Assert.Empty(computer.GetAsyncCallStacks(Key(ThreadA), Start + 15));
+            // The post-metadata episode is.
+            Assert.Equal(0xBEEFUL, Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 45)).Frames.MethodIdAt(0));
+            Assert.Equal(1, computer.DistinctFramesCount);
+        }
+
+        [Fact]
+        public void ResetAfterMetadataButEarlierQpc_IsIgnored()
+        {
+            // A reset delivered AFTER the first metadata (in stream/delivery order) but carrying an earlier QPC is
+            // prior-session leftover: config changes don't flush async buffers, and raw buffers are delivered by
+            // buffer timestamp, not force-flush order, so a foreign thread's leftover buffer can arrive after our
+            // metadata buffer while its events predate the metadata. Because every valid same-session reset has a
+            // QPC >= the first metadata's QPC, the computer must gate on QPC (not merely "metadata seen") and ignore
+            // such a reset and its episode. A later reset with a QPC at/after the metadata still arms normally.
+            var computer = new AsyncProfilerComputer();
+
+            // Our session on ThreadA: metadata + reset at Start establishes the first-metadata QPC and arms ThreadA.
+            computer.Process(new AsyncProfilerBufferBuilder(ThreadA)
+                .Armed(Start)
+                .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xAAA })
+                .Suspend(Start + 20)
+                .Build());
+
+            // Foreign leftover on ThreadB, delivered after our metadata but with QPCs before it: must be ignored.
+            computer.Process(new AsyncProfilerBufferBuilder(ThreadB)
+                .Reset(Start - 100)
+                .ResumeStack(Start - 90, dispatcher: 2, new ulong[] { 0xDEAD })
+                .Suspend(Start - 80)
+                .Build());
+
+            Assert.Empty(computer.GetAsyncCallStacks(Key(ThreadB), Start - 85));
+
+            // A valid ThreadB reset at/after the metadata QPC arms normally (the gate is purely QPC-based, not a
+            // permanent per-thread block).
+            computer.Process(new AsyncProfilerBufferBuilder(ThreadB)
+                .Reset(Start + 30)
+                .ResumeStack(Start + 40, dispatcher: 3, new ulong[] { 0xBEEF })
+                .Suspend(Start + 50)
+                .Build());
+
+            Assert.Equal(0xBEEFUL, Assert.Single(computer.GetAsyncCallStacks(Key(ThreadB), Start + 45)).Frames.MethodIdAt(0));
+        }
+
+        [Fact]
         public void ResumeSuspend_ProducesInterval()
         {
             var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
-                .Reset(Start)
+                .Armed(Start)
                 .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0x100, 0x200 })
                 .Suspend(Start + 20));
 
@@ -105,7 +186,7 @@ namespace TraceEventTests
         public void ResumeComplete_ProducesInterval()
         {
             var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
-                .Reset(Start)
+                .Armed(Start)
                 .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0x100 })
                 .Complete(Start + 20));
 
@@ -117,7 +198,7 @@ namespace TraceEventTests
         {
             // D1 [10,40) with D2 [20,30) nested inside it.
             var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
-                .Reset(Start)
+                .Armed(Start)
                 .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA })
                 .ResumeStack(Start + 20, dispatcher: 2, new ulong[] { 0xB })
                 .Suspend(Start + 30)   // pops D2
@@ -140,7 +221,7 @@ namespace TraceEventTests
         public void Append_ExtendsCallstack_FinalizedAtClose()
         {
             var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
-                .Reset(Start)
+                .Armed(Start)
                 .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA }, new[] { 0 })
                 .AppendStack(Start + 15, dispatcher: 1, new ulong[] { 0xB, 0xC }, new[] { 1, 2 })
                 .Suspend(Start + 20));
@@ -156,7 +237,7 @@ namespace TraceEventTests
         public void IdenticalCallstacks_AreDeduplicated()
         {
             var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
-                .Reset(Start)
+                .Armed(Start)
                 .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA, 0xB })
                 .Suspend(Start + 20)
                 .ResumeStack(Start + 30, dispatcher: 2, new ulong[] { 0xA, 0xB })
@@ -175,12 +256,12 @@ namespace TraceEventTests
         {
             var computer = new AsyncProfilerComputer();
             computer.Process(new AsyncProfilerBufferBuilder(ThreadA)
-                .Reset(Start)
+                .Armed(Start)
                 .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xAAA })
                 .Suspend(Start + 50)
                 .Build());
             computer.Process(new AsyncProfilerBufferBuilder(ThreadB)
-                .Reset(Start)
+                .Armed(Start)
                 .ResumeStack(Start + 20, dispatcher: 2, new ulong[] { 0xBBB })
                 .Suspend(Start + 30)
                 .Build());
@@ -194,23 +275,47 @@ namespace TraceEventTests
         }
 
         [Fact]
-        public void ResetMidEpisode_DiscardsInProgressActivation()
+        public void ResetMidEpisode_CommitsInProgressActivationAtResetQpc()
         {
             var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
-                .Reset(Start)
+                .Armed(Start)
                 .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA })
-                .Reset(Start + 15)      // clears the in-progress activation
+                .Reset(Start + 15)      // commits the in-progress activation as [Start+10, Start+15), then clears
                 .Suspend(Start + 20));  // nothing to pop
 
-            Assert.Empty(computer.GetAsyncCallStacks(Key(ThreadA), Start + 12));
+            // Inside the pre-reset window the activation is queryable (committed at the reset timestamp).
+            Assert.Equal(0xAUL, Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 12)).Frames.MethodIdAt(0));
+            // The interval is half-open [Start+10, Start+15): at/after the reset it is no longer active.
+            Assert.Empty(computer.GetAsyncCallStacks(Key(ThreadA), Start + 15));
             Assert.Empty(computer.GetAsyncCallStacks(Key(ThreadA), Start + 18));
+        }
+
+        [Fact]
+        public void MultipleResetsAndMetadataWhileArmed_CommitEachOpenActivation()
+        {
+            var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
+                .Armed(Start)
+                .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA })
+                .Reset(Start + 20)      // commits [10,20)
+                .ResumeStack(Start + 25, dispatcher: 2, new ulong[] { 0xB })
+                // A second metadata mid-session (higher QPC) must neither re-gate the stream nor drop data.
+                .Metadata(Start + 30, qpcFrequency: 10_000_000, qpcSync: 1, utcSync: 1, eventBufferSize: 0, wrapperCount: 32, new AsyncManifestEntry[0])
+                .Reset(Start + 40)      // commits [25,40)
+                .ResumeStack(Start + 45, dispatcher: 3, new ulong[] { 0xC })
+                .Suspend(Start + 50));  // commits [45,50)
+
+            Assert.Equal(0xAUL, Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 12)).Frames.MethodIdAt(0));
+            Assert.Equal(0xBUL, Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 30)).Frames.MethodIdAt(0));
+            Assert.Equal(0xCUL, Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 48)).Frames.MethodIdAt(0));
+            // Between a reset and the next resume nothing is active.
+            Assert.Empty(computer.GetAsyncCallStacks(Key(ThreadA), Start + 22));
         }
 
         [Fact]
         public void CompletedFrameCount_FromCompleteAndUnwind()
         {
             var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
-                .Reset(Start)
+                .Armed(Start)
                 .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA, 0xB, 0xC, 0xD })
                 .CompleteMethod(Start + 15)             // +1
                 .UnwindException(Start + 18, frames: 2) // +2
@@ -240,8 +345,81 @@ namespace TraceEventTests
             Assert.Equal(1, cs.GetWrapperResetCount(Start + 16));
             Assert.Equal(2, cs.GetWrapperResetCount(Start + 20));
 
-            // Completed-frame count via wrapper resets: resets*WrapperCount + currentMethodIndex.
-            Assert.Equal(2 * 32 + 7, cs.GetCompletedFrameCount(Start + 20, currentMethodIndex: 7));
+            // Completed-frame count via wrapper resets: resets*WrapperCount + currentMethodIndex, less the
+            // wrapper slot captured at resume (ContinuationIndexBase = 5 here).
+            Assert.Equal(2 * 32 + 7 - 5, cs.GetCompletedFrameCount(Start + 20, currentMethodIndex: 7));
+        }
+
+        [Fact]
+        public void CompletedFrameCount_WrapperSlot_SubtractsContinuationIndexBaseOnLateAttach()
+        {
+            // Early attach: base is 0, so the completed count is exactly the current wrapper slot.
+            var early = Compute(new AsyncProfilerBufferBuilder(ThreadA)
+                .Armed(Start)
+                .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA }, continuationIndex: 0)
+                .Suspend(Start + 30));
+            AsyncCallStack ce = Assert.Single(early.GetAsyncCallStacks(Key(ThreadA), Start + 20));
+            Assert.Equal((byte)0, ce.ContinuationIndexBase);
+            Assert.Equal(8, ce.GetCompletedFrameCount(Start + 20, currentMethodIndex: 8));
+
+            // Late attach: the resets that advanced the slot to 5 before attach could not be observed, so the
+            // count starts from that captured base. Only completions since resume are counted, and it clamps at 0.
+            var late = Compute(new AsyncProfilerBufferBuilder(ThreadB)
+                .Armed(Start)
+                .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA }, continuationIndex: 5)
+                .Suspend(Start + 30));
+            AsyncCallStack cl = Assert.Single(late.GetAsyncCallStacks(Key(ThreadB), Start + 20));
+            Assert.Equal((byte)5, cl.ContinuationIndexBase);
+            Assert.Equal(3, cl.GetCompletedFrameCount(Start + 20, currentMethodIndex: 8)); // 8 - 5
+            Assert.Equal(0, cl.GetCompletedFrameCount(Start + 20, currentMethodIndex: 5)); // 5 - 5
+            Assert.Equal(0, cl.GetCompletedFrameCount(Start + 20, currentMethodIndex: 3)); // clamp
+        }
+
+        [Fact]
+        public void MethodCompletionObserved_IsTrueOnlyForTheKindThatEmittedCompleteMethod()
+        {
+            // No completion events at all: neither kind is observed.
+            var none = Compute(new AsyncProfilerBufferBuilder(ThreadA)
+                .Armed(Start)
+                .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA })
+                .Suspend(Start + 30));
+            Assert.False(none.Index.MethodCompletionObserved(AsyncCallstackKind.StateMachineAsync));
+            Assert.False(none.Index.MethodCompletionObserved(AsyncCallstackKind.RuntimeAsync));
+
+            // V1 (StateMachine) CompleteMethod: only StateMachineAsync is observed.
+            var v1 = Compute(new AsyncProfilerBufferBuilder(ThreadA)
+                .Armed(Start)
+                .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA })
+                .CompleteMethod(Start + 15)
+                .Suspend(Start + 30));
+            Assert.True(v1.Index.MethodCompletionObserved(AsyncCallstackKind.StateMachineAsync));
+            Assert.False(v1.Index.MethodCompletionObserved(AsyncCallstackKind.RuntimeAsync));
+
+            // V2 (Runtime) CompleteMethod: only RuntimeAsync is observed.
+            var v2 = Compute(new AsyncProfilerBufferBuilder(ThreadA)
+                .Armed(Start)
+                .ResumeRuntimeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA })
+                .CompleteRuntimeMethod(Start + 15)
+                .SuspendRuntime(Start + 30));
+            Assert.True(v2.Index.MethodCompletionObserved(AsyncCallstackKind.RuntimeAsync));
+            Assert.False(v2.Index.MethodCompletionObserved(AsyncCallstackKind.StateMachineAsync));
+        }
+
+        [Fact]
+        public void UnwindException_SetsExceptionCompletionObserved_NotMethodCompletionObserved()
+        {
+            // Unwind (exception) is a separate mechanism: it sets ExceptionCompletionObserved for its kind, and must
+            // NOT set MethodCompletionObserved (which is CompleteMethod-only). This keeps the two independent so V1
+            // can still count normal completions from the sync stack while taking exceptional unwinds from events.
+            var v1 = Compute(new AsyncProfilerBufferBuilder(ThreadA)
+                .Armed(Start)
+                .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA, 0xB })
+                .UnwindException(Start + 15, frames: 1)
+                .Suspend(Start + 30));
+            Assert.True(v1.Index.ExceptionCompletionObserved(AsyncCallstackKind.StateMachineAsync));
+            Assert.False(v1.Index.MethodCompletionObserved(AsyncCallstackKind.StateMachineAsync));
+            Assert.False(v1.Index.ExceptionCompletionObserved(AsyncCallstackKind.RuntimeAsync));
+            Assert.False(v1.Index.MethodCompletionObserved(AsyncCallstackKind.RuntimeAsync));
         }
 
         [Fact]
@@ -274,7 +452,7 @@ namespace TraceEventTests
             // D1 and D2 are resumed at the SAME timestamp; emission order (D1 then D2) must be preserved so
             // D1 is the outer (depth 0) and D2 the inner (depth 1) activation.
             var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
-                .Reset(Start)
+                .Armed(Start)
                 .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA })
                 .ResumeStack(Start + 10, dispatcher: 2, new ulong[] { 0xB }) // same timestamp
                 .Suspend(Start + 20)   // pops D2 -> [10,20)
@@ -294,7 +472,7 @@ namespace TraceEventTests
             // Two CompleteMethod events share a timestamp; both must be counted at that instant, and none
             // before it.
             var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
-                .Reset(Start)
+                .Armed(Start)
                 .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA, 0xB, 0xC, 0xD })
                 .CompleteMethod(Start + 15)
                 .CompleteMethod(Start + 15) // same timestamp
@@ -313,7 +491,7 @@ namespace TraceEventTests
             // D2 is a zero-width [10,10) activation. A point query never returns it (half-open end), and it
             // must not disturb the outer D1 activation. D2 is still recorded/interned.
             var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
-                .Reset(Start)
+                .Armed(Start)
                 .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA })
                 .ResumeStack(Start + 10, dispatcher: 2, new ulong[] { 0xB })
                 .Suspend(Start + 10)   // pops D2 -> zero-width [10,10)
@@ -334,7 +512,7 @@ namespace TraceEventTests
             // activations that both occupied depth 1; neither is returned by a point query, so there is no
             // depth-tie ambiguity, and the outer D1 is returned coherently.
             var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
-                .Reset(Start)
+                .Armed(Start)
                 .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA })
                 .ResumeStack(Start + 10, dispatcher: 2, new ulong[] { 0xB })
                 .Suspend(Start + 10)   // pop D2 (zero-width, depth 1)

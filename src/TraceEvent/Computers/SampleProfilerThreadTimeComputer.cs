@@ -1,4 +1,5 @@
 ﻿using Microsoft.Diagnostics.Symbols;
+using Microsoft.Diagnostics.Tracing.Computers;
 using Microsoft.Diagnostics.Tracing.Etlx;
 using Microsoft.Diagnostics.Tracing.EventPipe;
 using Microsoft.Diagnostics.Tracing.Parsers;
@@ -20,10 +21,22 @@ namespace Microsoft.Diagnostics.Tracing
         /// <summary>
         /// Create a new ThreadTimeComputer
         /// </summary>
-        public SampleProfilerThreadTimeComputer(TraceLog eventLog, SymbolReader symbolReader)
+        /// <param name="eventLog">The trace to compute stacks over.</param>
+        /// <param name="symbolReader">Used to resolve managed method symbols.</param>
+        /// <param name="stitchAsyncCallStacks">
+        /// Opt-in: when true <b>and</b> the trace contains async-profiler data
+        /// (<see cref="TraceLog.AsyncCallStacks"/> is present), each CPU sample that has active async call stacks
+        /// is emitted as a native call stack with the suspended async continuation ancestry stitched in (see
+        /// <see cref="AsyncCpuStackStitcher"/>), bypassing the activity/TPL reconstruction for that sample. Samples
+        /// without active async segments (and all samples when the trace has no async-profiler data) keep the
+        /// normal behavior. This is off by default because the stitched view is only meaningful with async-profiler
+        /// data present.
+        /// </param>
+        public SampleProfilerThreadTimeComputer(TraceLog eventLog, SymbolReader symbolReader, bool stitchAsyncCallStacks = false)
         {
             m_eventLog = eventLog;
             m_symbolReader = symbolReader;
+            m_stitchAsyncCallStacks = stitchAsyncCallStacks;
 
             m_threadState = new ThreadState[eventLog.Threads.Count];
 
@@ -55,6 +68,16 @@ namespace Microsoft.Diagnostics.Tracing
         public bool IgnoreApplicationInsightsRequestsWithRelatedActivityId  { get; set; } = true;
 
         /// <summary>
+        /// True once <see cref="GenerateThreadTimeStacks"/> has run if async CPU stack stitching was both requested
+        /// (via the <c>stitchAsyncCallStacks</c> constructor argument) <b>and</b> the trace actually contained
+        /// async-profiler data (so stitching was performed). When stitching was requested but the trace had no
+        /// async-profiler data this stays false and the normal (non-stitched) path was used for every sample —
+        /// callers can use this to warn that <c>--async</c> had no effect. Always false when stitching was not
+        /// requested.
+        /// </summary>
+        public bool AsyncStitchActive => m_asyncStitchActive;
+
+        /// <summary>
         /// Generate the thread time stacks, outputting to 'stackSource'.  
         /// </summary>
         /// <param name="outputStackSource"></param>
@@ -66,6 +89,8 @@ namespace Microsoft.Diagnostics.Tracing
             m_nodeNameInternTable = new Dictionary<double, StackSourceFrameIndex>(10);
             m_ExternalFrameIndex = outputStackSource.Interner.FrameIntern("UNMANAGED_CODE_TIME");
             m_cpuFrameIndex = outputStackSource.Interner.FrameIntern("CPU_TIME");
+
+            InitializeAsyncStitchingIfRequested();
 
             TraceLogEventSource eventSource = traceEvents == null ? m_eventLog.Events.GetSource() :
                                                                      traceEvents.GetSource();
@@ -447,14 +472,188 @@ namespace Microsoft.Diagnostics.Tracing
         }
 
         /// <summary>
-        /// Get the call stack for 'data'  Note that you thread must be data.Thread().   We pass it just to save the lookup.  
+        /// Get the call stack for 'data'  Note that you thread must be data.Thread().   We pass it just to save the lookup.
         /// </summary>
         private StackSourceCallStackIndex GetCallStack(TraceEvent data, TraceThread thread)
         {
             Debug.Assert(data.Thread() == thread);
 
+            if (m_asyncStitchActive &&
+                TryGetStitchedCallStack(data, thread, out StackSourceCallStackIndex stitched) == StitchOutcome.Stitched)
+            {
+                return stitched;
+            }
+
+            // StitchOutcome.NoAsync (or async stitching inactive): fall through to the normal (non-async) path.
             return m_activityComputer.GetCallStack(m_outputStackSource, data, GetTopFramesForActivityComputerCase(data, thread));
         }
+
+        #region Async CPU stack stitching
+
+        /// <summary>
+        /// Sets up the async CPU stitching state if it was requested in the constructor and the trace actually
+        /// contains async-profiler data. When there is no async index there is nothing to stitch, so stitching
+        /// stays inactive and the normal path is used for every sample.
+        /// </summary>
+        private void InitializeAsyncStitchingIfRequested()
+        {
+            m_asyncStitchActive = false;
+            if (!m_stitchAsyncCallStacks)
+            {
+                return;
+            }
+
+            AsyncCallStacksIndex index = m_eventLog.AsyncCallStacks;
+            if (index == null)
+            {
+                return;
+            }
+
+            m_asyncIndex = index;
+            m_asyncBoundaries = new AsyncStitchBoundaryCache(m_eventLog.CodeAddresses);
+            m_asyncMethodOf = ca => m_eventLog.CodeAddresses.MethodIndex(ca);
+            m_asyncStitchDiagnostics = new StitchDiagnostics();
+            m_asyncStitchActive = true;
+        }
+
+        /// <summary>
+        /// Aggregate soft diagnostics from every stitched CPU sample of the last
+        /// <see cref="GenerateThreadTimeStacks"/> run, or null when async stitching was never active. All counters
+        /// at 0 indicates every stitched sample merged cleanly.
+        /// </summary>
+        public StitchDiagnostics AsyncStitchDiagnostics => m_asyncStitchDiagnostics;
+
+        /// <summary>
+        /// When true, each stitched sample records a per-segment happy-path trace step (kind / boundary / completed
+        /// count / spliced range) into <see cref="AsyncStitchDiagnostics"/>'s <c>Messages</c>, in addition to the
+        /// anomaly notes. Off by default; intended for debugging the stitch flow. Set before
+        /// <see cref="GenerateThreadTimeStacks"/>.
+        /// </summary>
+        public bool TraceAsyncStitchSteps { get; set; }
+
+        /// <summary>
+        /// The result of attempting to stitch async ancestry onto a CPU sample.
+        /// </summary>
+        private enum StitchOutcome
+        {
+            /// <summary>The sample's suspended async ancestry was stitched into the out stack.</summary>
+            Stitched,
+
+            /// <summary>The sample has no async ancestry; use the normal path (native sync stack emitted verbatim).</summary>
+            NoAsync,
+        }
+
+        /// <summary>
+        /// Attempts to produce a native call stack for <paramref name="data"/> with the suspended async ancestry
+        /// stitched in. Returns <see cref="StitchOutcome.Stitched"/> (with <paramref name="stitchedStack"/> set)
+        /// when the sampled thread has async call stacks active at the sample's instant, otherwise
+        /// <see cref="StitchOutcome.NoAsync"/> so the caller falls back to the normal (non-async) path - emitting the
+        /// native sync stack verbatim, so any async coverage gap stays plainly visible.
+        /// </summary>
+        private StitchOutcome TryGetStitchedCallStack(TraceEvent data, TraceThread thread, out StackSourceCallStackIndex stitchedStack)
+        {
+            stitchedStack = StackSourceCallStackIndex.Invalid;
+
+            IReadOnlyList<AsyncCallStack> segments = m_eventLog.GetAsyncCallStacks(data);
+            if (segments == null || segments.Count == 0)
+            {
+                // No async ancestry recorded for this thread at this instant: fall back to the normal path and emit
+                // the native sync stack as-is (including any continuation-wrapper / dispatch machinery). Keeping the
+                // frames verbatim makes the coverage gap visible instead of hiding it behind synthetic edits.
+                return StitchOutcome.NoAsync;
+            }
+
+            List<StitchSyncFrame> sync = MaterializeSyncLeafToRoot(data.CallStackIndex());
+
+#pragma warning disable CS0618 // We deliberately need the sample's exact QPC to align with the async index; it never leaves this assembly.
+            long qpc = data.TimeStampQPC;
+#pragma warning restore CS0618
+
+            StitchResult result = AsyncCpuStackStitcher.Stitch(sync, segments, qpc, m_asyncBoundaries, m_asyncIndex, m_asyncMethodOf, TraceAsyncStitchSteps);
+            AccumulateAsyncDiagnostics(result.Diagnostics);
+
+            // Root the stitched stack the SAME way the non-stitched path does (via the start-stop activity
+            // computer's top-frames), so the sample walks up through the identical Thread -> "Threads" -> process
+            // pseudo-nodes. Using GetCallStackForThread here would root Thread -> process directly (skipping the
+            // "Threads" node), producing a second, inconsistent thread/process representation for the same thread;
+            // exporters that group by thread name (e.g. speedscope) then see two roots for one thread and throw.
+            StackSourceCallStackIndex threadRoot = m_startStopActivities.GetCurrentStartStopActivityStack(m_outputStackSource, thread, thread);
+            stitchedStack = InternStitchedStack(result, threadRoot);
+            return StitchOutcome.Stitched;
+        }
+
+        /// <summary>
+        /// Walks the native call stack <paramref name="callStackIndex"/> (leaf-&gt;root) into
+        /// <see cref="StitchSyncFrame"/>s, resolving each frame's <see cref="MethodIndex"/> for the V1 identity
+        /// match. The thread/process pseudo-root is not part of the native walk; it is supplied during interning.
+        /// </summary>
+        private List<StitchSyncFrame> MaterializeSyncLeafToRoot(CallStackIndex callStackIndex)
+        {
+            var sync = new List<StitchSyncFrame>();
+            TraceCallStacks callStacks = m_eventLog.CallStacks;
+            TraceCodeAddresses codeAddresses = m_eventLog.CodeAddresses;
+
+            for (CallStackIndex csi = callStackIndex; csi != CallStackIndex.Invalid; csi = callStacks.Caller(csi))
+            {
+                CodeAddressIndex ca = callStacks.CodeAddressIndex(csi);
+                MethodIndex method = ca != CodeAddressIndex.Invalid ? codeAddresses.MethodIndex(ca) : MethodIndex.Invalid;
+                sync.Add(new StitchSyncFrame(ca, method));
+            }
+
+            return sync;
+        }
+
+        /// <summary>
+        /// Interns a <see cref="StitchResult"/> (leaf-&gt;root) into the output stack source on top of
+        /// <paramref name="threadRoot"/>, building the stack bottom-up (root-&gt;leaf) so the native leaf ends up on
+        /// top. Sync frames and symbolized async frames intern by <see cref="CodeAddressIndex"/>; unsymbolized
+        /// async frames get a synthetic placeholder frame named by their method id.
+        /// </summary>
+        private StackSourceCallStackIndex InternStitchedStack(StitchResult result, StackSourceCallStackIndex threadRoot)
+        {
+            IReadOnlyList<StitchedFrame> frames = result.Frames;
+            StackSourceCallStackIndex caller = threadRoot;
+
+            for (int i = frames.Count - 1; i >= 0; i--)
+            {
+                StitchedFrame frame = frames[i];
+                StackSourceFrameIndex frameIdx = frame.CodeAddress != CodeAddressIndex.Invalid
+                    ? m_outputStackSource.GetFrameIndex(frame.CodeAddress)
+                    : InternPlaceholderFrame(frame);
+                caller = m_outputStackSource.Interner.CallStackIntern(frameIdx, caller);
+            }
+
+            return caller;
+        }
+
+        /// <summary>
+        /// Interns a placeholder frame for an async frame whose <see cref="CodeAddressIndex"/> could not be
+        /// resolved (unsymbolized module or a synthetic 0-IP async frame), naming it by its method id so it stays
+        /// distinguishable. <see cref="StackSourceInterner.FrameIntern(string, StackSourceModuleIndex)"/> dedups by
+        /// name, so repeated method ids reuse the same frame.
+        /// </summary>
+        private StackSourceFrameIndex InternPlaceholderFrame(StitchedFrame frame)
+        {
+            string name = frame.Origin == StitchedFrameOrigin.AsyncRemaining && frame.Segment != null
+                ? "AsyncFrame(0x" + frame.Segment.MethodIdAt(frame.SegmentFrameIndex).ToString("x") + ")"
+                : "?!?";
+            return m_outputStackSource.Interner.FrameIntern(name);
+        }
+
+        private void AccumulateAsyncDiagnostics(StitchDiagnostics d)
+        {
+            m_asyncStitchDiagnostics.SegmentsProcessed += d.SegmentsProcessed;
+            m_asyncStitchDiagnostics.BoundariesNotFound += d.BoundariesNotFound;
+            m_asyncStitchDiagnostics.AdjacencyMismatches += d.AdjacencyMismatches;
+            m_asyncStitchDiagnostics.V2WrapperFallbackUsed += d.V2WrapperFallbackUsed;
+            m_asyncStitchDiagnostics.V1InlineFallbackUsed += d.V1InlineFallbackUsed;
+            if (d.Messages.Count != 0)
+            {
+                m_asyncStitchDiagnostics.Messages.AddRange(d.Messages);
+            }
+        }
+
+        #endregion
 
         /// <summary>
         /// Returns a function that figures out the top (closest to stack root) frames for an event.  Often
@@ -594,6 +793,14 @@ namespace Microsoft.Diagnostics.Tracing
         private MutableTraceEventStackSource m_outputStackSource; // The output source we are generating. 
         private TraceLog m_eventLog;                        // The event log associated with m_stackSource.  
         private SymbolReader m_symbolReader;
+
+        // Async CPU stack stitching (opt-in via the constructor; only active when the trace has async-profiler data).
+        private readonly bool m_stitchAsyncCallStacks;
+        private bool m_asyncStitchActive;
+        private AsyncCallStacksIndex m_asyncIndex;
+        private AsyncStitchBoundaryCache m_asyncBoundaries;
+        private Func<CodeAddressIndex, MethodIndex> m_asyncMethodOf;
+        private StitchDiagnostics m_asyncStitchDiagnostics;
 
         // These are boring caches of frame names which speed things up a bit.  
         private Dictionary<double, StackSourceFrameIndex> m_nodeNameInternTable;

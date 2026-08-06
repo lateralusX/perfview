@@ -34,7 +34,7 @@ namespace TraceEventTests
 
             // Async buffer on OsThreadId: D1 [+10,+40) with D2 [+20,+30) nested inside it.
             byte[] buffer = new AsyncProfilerBufferBuilder(OsThreadId, 0x0BADF00D, StartQpc)
-                .Reset(StartQpc)
+                .Armed(StartQpc)
                 .ResumeStack(StartQpc + 10, dispatcher: 1, new ulong[] { 0xA, 0xB }, new[] { 0, 1 })
                 .ResumeStack(StartQpc + 20, dispatcher: 2, new ulong[] { 0xC }, new[] { 2 })
                 .Suspend(StartQpc + 30)   // pop D2 -> [+20,+30)
@@ -49,7 +49,7 @@ namespace TraceEventTests
             // A second buffer whose header OS thread id is the "ghost" thread (no thread block entry). The index
             // keys by (carrying-event ProcessID, buffer-header OsThreadId), so this is reachable only by OS thread id.
             byte[] ghostBuffer = new AsyncProfilerBufferBuilder(GhostOsThreadId, 0x0BADBEEF, StartQpc)
-                .Reset(StartQpc)
+                .Armed(StartQpc)
                 .ResumeStack(StartQpc + 10, dispatcher: 1, new ulong[] { 0xE, 0xF }, new[] { 0, 1 })
                 .Suspend(StartQpc + 40)   // [+10,+40)
                 .Build();
