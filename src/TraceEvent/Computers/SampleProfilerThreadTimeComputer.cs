@@ -23,6 +23,16 @@ namespace Microsoft.Diagnostics.Tracing
         /// </summary>
         /// <param name="eventLog">The trace to compute stacks over.</param>
         /// <param name="symbolReader">Used to resolve managed method symbols.</param>
+        public SampleProfilerThreadTimeComputer(TraceLog eventLog, SymbolReader symbolReader)
+            : this(eventLog, symbolReader, false)
+        {
+        }
+
+        /// <summary>
+        /// Create a new ThreadTimeComputer, optionally enabling async CPU stack stitching.
+        /// </summary>
+        /// <param name="eventLog">The trace to compute stacks over.</param>
+        /// <param name="symbolReader">Used to resolve managed method symbols.</param>
         /// <param name="stitchAsyncCallStacks">
         /// Opt-in: when true <b>and</b> the trace contains async-profiler data
         /// (<see cref="TraceLog.AsyncCallStacks"/> is present), each CPU sample that has active async call stacks
@@ -32,7 +42,7 @@ namespace Microsoft.Diagnostics.Tracing
         /// normal behavior. This is off by default because the stitched view is only meaningful with async-profiler
         /// data present.
         /// </param>
-        public SampleProfilerThreadTimeComputer(TraceLog eventLog, SymbolReader symbolReader, bool stitchAsyncCallStacks = false)
+        public SampleProfilerThreadTimeComputer(TraceLog eventLog, SymbolReader symbolReader, bool stitchAsyncCallStacks)
         {
             m_eventLog = eventLog;
             m_symbolReader = symbolReader;
@@ -240,6 +250,14 @@ namespace Microsoft.Diagnostics.Tracing
                     // We don't care about EventPipe sample profiler events.  
                     if (data.ProviderGuid == SampleProfilerTraceEventParser.ProviderGuid)
                         return;
+
+                    // The raw AsyncEvents payload is consumed separately to build the async call stack index.
+                    // Treating it as an ordinary EventSource event would stringify its binary buffer into a giant
+                    // stack frame and incorrectly transition the emitting thread to the blocked state.
+                    if (data.ProviderGuid == AsyncProfilerTraceEventParser.ProviderGuid)
+                    {
+                        return;
+                    }
 
                     // We don't care about the TPL provider.  Too many events.  
                     if (data.ProviderGuid == TplEtwProviderTraceEventParser.ProviderGuid)
@@ -563,7 +581,13 @@ namespace Microsoft.Diagnostics.Tracing
                 return StitchOutcome.NoAsync;
             }
 
-            List<StitchSyncFrame> sync = MaterializeSyncLeafToRoot(data.CallStackIndex());
+            CallStackIndex callStackIndex = data.CallStackIndex();
+            if (callStackIndex == CallStackIndex.Invalid)
+            {
+                return StitchOutcome.NoAsync;
+            }
+
+            List<StitchSyncFrame> sync = MaterializeSyncLeafToRoot(callStackIndex);
 
 #pragma warning disable CS0618 // We deliberately need the sample's exact QPC to align with the async index; it never leaves this assembly.
             long qpc = data.TimeStampQPC;
@@ -572,12 +596,12 @@ namespace Microsoft.Diagnostics.Tracing
             StitchResult result = AsyncCpuStackStitcher.Stitch(sync, segments, qpc, m_asyncBoundaries, m_asyncIndex, m_asyncMethodOf, TraceAsyncStitchSteps);
             AccumulateAsyncDiagnostics(result.Diagnostics);
 
-            // Root the stitched stack the SAME way the non-stitched path does (via the start-stop activity
-            // computer's top-frames), so the sample walks up through the identical Thread -> "Threads" -> process
-            // pseudo-nodes. Using GetCallStackForThread here would root Thread -> process directly (skipping the
-            // "Threads" node), producing a second, inconsistent thread/process representation for the same thread;
-            // exporters that group by thread name (e.g. speedscope) then see two roots for one thread and throw.
-            StackSourceCallStackIndex threadRoot = m_startStopActivities.GetCurrentStartStopActivityStack(m_outputStackSource, thread, thread);
+            // When start-stop activity grouping is enabled, root the stitched stack through the same top-frames
+            // provider as the non-stitched path so both layouts share identical pseudo-nodes. When grouping is
+            // disabled, use the normal thread root rather than dereferencing an activity computer that was not built.
+            StackSourceCallStackIndex threadRoot = m_startStopActivities != null
+                ? m_startStopActivities.GetCurrentStartStopActivityStack(m_outputStackSource, thread, thread)
+                : m_outputStackSource.GetCallStackForThread(thread);
             stitchedStack = InternStitchedStack(result, threadRoot);
             return StitchOutcome.Stitched;
         }
@@ -647,6 +671,9 @@ namespace Microsoft.Diagnostics.Tracing
             m_asyncStitchDiagnostics.AdjacencyMismatches += d.AdjacencyMismatches;
             m_asyncStitchDiagnostics.V2WrapperFallbackUsed += d.V2WrapperFallbackUsed;
             m_asyncStitchDiagnostics.V1InlineFallbackUsed += d.V1InlineFallbackUsed;
+            m_asyncStitchDiagnostics.V2SyncLayoutUsed += d.V2SyncLayoutUsed;
+            m_asyncStitchDiagnostics.V2LeafWrapperDropped += d.V2LeafWrapperDropped;
+            m_asyncStitchDiagnostics.V2PlumbingFramesCollapsed += d.V2PlumbingFramesCollapsed;
             if (d.Messages.Count != 0)
             {
                 m_asyncStitchDiagnostics.Messages.AddRange(d.Messages);

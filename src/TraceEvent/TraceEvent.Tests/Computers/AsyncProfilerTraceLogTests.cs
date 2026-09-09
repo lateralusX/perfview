@@ -5,6 +5,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 
+using Microsoft.Diagnostics.Symbols;
 using Microsoft.Diagnostics.Tracing;
 using Microsoft.Diagnostics.Tracing.Computers;
 using Microsoft.Diagnostics.Tracing.Etlx;
@@ -23,6 +24,12 @@ namespace TraceEventTests
     /// </summary>
     public class AsyncProfilerTraceLogTests
     {
+        [Fact]
+        public void SampleProfilerThreadTimeComputer_PreservesTwoArgumentConstructor()
+        {
+            Assert.NotNull(typeof(SampleProfilerThreadTimeComputer).GetConstructor(new[] { typeof(TraceLog), typeof(SymbolReader) }));
+        }
+
         [Fact]
         public void EndToEnd_AsyncCallStacks_RoundTripThroughTraceLog()
         {
