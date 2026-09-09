@@ -394,5 +394,237 @@ namespace TraceEventTests
             Assert.Single(sink.Unknowns);   // id 24 in the data buffer was framed & skipped via the shared manifest
             Assert.Single(sink.Methods);
         }
+
+        [Fact]
+        public void Header_TotalSizeSmallerThanHeader_ReportsParseError()
+        {
+            byte[] buffer = new AsyncProfilerBufferBuilder().Build();
+            WriteUInt32At(buffer, 1, AsyncProfilerBufferHeader.Size - 1);
+
+            var sink = new CollectingSink();
+            AsyncProfilerTraceEventParser.ParseBuffer(buffer, sink);
+
+            Assert.Single(sink.Errors);
+            Assert.Empty(sink.Order);
+        }
+
+        [Fact]
+        public void Header_TotalSizeLargerThanPhysicalBuffer_ReportsParseError()
+        {
+            byte[] buffer = new AsyncProfilerBufferBuilder().Build();
+            WriteUInt32At(buffer, 1, (uint)buffer.Length + 1);
+
+            var sink = new CollectingSink();
+            AsyncProfilerTraceEventParser.ParseBuffer(buffer, sink);
+
+            Assert.Single(sink.Errors);
+            Assert.Empty(sink.Order);
+        }
+
+        [Fact]
+        public void PhysicalPaddingAfterTotalSize_IsIgnored()
+        {
+            byte[] logical = new AsyncProfilerBufferBuilder()
+                .Method(AsyncEventID.ResumeRuntimeAsyncMethod, StartQpc + 1)
+                .Build();
+            var padded = new byte[logical.Length + 4];
+            Array.Copy(logical, padded, logical.Length);
+            padded[logical.Length] = 0xFF;
+            padded[logical.Length + 1] = 0xEE;
+
+            var sink = new CollectingSink();
+            AsyncProfilerTraceEventParser.ParseBuffer(padded, sink);
+
+            Assert.Empty(sink.Errors);
+            Assert.Single(sink.Methods);
+        }
+
+        [Fact]
+        public void EventCountLargerThanContents_ReportsParseError()
+        {
+            byte[] buffer = new AsyncProfilerBufferBuilder()
+                .Method(AsyncEventID.ResumeRuntimeAsyncMethod, StartQpc + 1)
+                .Build();
+            WriteUInt32At(buffer, 17, 2);
+
+            var sink = new CollectingSink();
+            AsyncProfilerTraceEventParser.ParseBuffer(buffer, sink);
+
+            Assert.Single(sink.Errors);
+            Assert.Single(sink.Methods);
+        }
+
+        [Fact]
+        public void EventCountSmallerThanContents_ReportsParseErrorWithoutDecodingTrailingEvent()
+        {
+            byte[] buffer = new AsyncProfilerBufferBuilder()
+                .Method(AsyncEventID.ResumeRuntimeAsyncMethod, StartQpc + 1)
+                .Method(AsyncEventID.CompleteRuntimeAsyncMethod, StartQpc + 2)
+                .Build();
+            WriteUInt32At(buffer, 17, 1);
+
+            var sink = new CollectingSink();
+            AsyncProfilerTraceEventParser.ParseBuffer(buffer, sink);
+
+            Assert.Single(sink.Errors);
+            AsyncMethodEvent method = Assert.Single(sink.Methods);
+            Assert.Equal(AsyncEventID.ResumeRuntimeAsyncMethod, method.EventId);
+        }
+
+        [Fact]
+        public void TruncatedTimestampVarint_ReportsParseError()
+        {
+            byte[] buffer = new AsyncProfilerBufferBuilder()
+                .Method(AsyncEventID.ResumeRuntimeAsyncMethod, StartQpc + 1)
+                .Build();
+            buffer[AsyncProfilerBufferHeader.Size + 1] = 0x80;
+
+            var sink = new CollectingSink();
+            AsyncProfilerTraceEventParser.ParseBuffer(buffer, sink);
+
+            Assert.Single(sink.Errors);
+            Assert.Empty(sink.Order);
+        }
+
+        [Fact]
+        public void TruncatedUShortPayloadLength_ReportsParseError()
+        {
+            byte[] complete = new AsyncProfilerBufferBuilder()
+                .RawEvent((byte)AsyncEventID.AsyncProfilerMetadata, StartQpc + 1, PayloadLengthFieldSize.UShort, Array.Empty<byte>())
+                .Build();
+            var truncated = new byte[complete.Length - 1];
+            Array.Copy(complete, truncated, truncated.Length);
+            WriteUInt32At(truncated, 1, (uint)truncated.Length);
+
+            var sink = new CollectingSink();
+            AsyncProfilerTraceEventParser.ParseBuffer(truncated, sink);
+
+            Assert.Single(sink.Errors);
+            Assert.Empty(sink.Order);
+        }
+
+        [Fact]
+        public void TruncatedBytePayloadLength_ReportsParseError()
+        {
+            byte[] complete = new AsyncProfilerBufferBuilder()
+                .RawEvent((byte)AsyncEventID.ResumeRuntimeAsyncContext, StartQpc + 1, PayloadLengthFieldSize.Byte, Array.Empty<byte>())
+                .Build();
+            var truncated = new byte[complete.Length - 1];
+            Array.Copy(complete, truncated, truncated.Length);
+            WriteUInt32At(truncated, 1, (uint)truncated.Length);
+
+            var sink = new CollectingSink();
+            AsyncProfilerTraceEventParser.ParseBuffer(truncated, sink);
+
+            Assert.Single(sink.Errors);
+            Assert.Empty(sink.Order);
+        }
+
+        [Fact]
+        public void PayloadExtendsBeyondTotalSize_ReportsParseErrorWithoutDispatch()
+        {
+            byte[] buffer = new AsyncProfilerBufferBuilder()
+                .ResumeContext(AsyncEventID.ResumeRuntimeAsyncContext, StartQpc + 1, dispatcher: 0x42)
+                .Build();
+            WriteUInt32At(buffer, 1, AsyncProfilerBufferHeader.Size + 3); // id + delta + length prefix, no payload
+
+            var sink = new CollectingSink();
+            AsyncProfilerTraceEventParser.ParseBuffer(buffer, sink);
+
+            Assert.Single(sink.Errors);
+            Assert.Empty(sink.ContextResumes);
+        }
+
+        [Theory]
+        [InlineData(AsyncEventID.ResumeRuntimeAsyncContext)]
+        [InlineData(AsyncEventID.UnwindRuntimeAsyncException)]
+        [InlineData(AsyncEventID.ResumeRuntimeAsyncCallstack)]
+        [InlineData(AsyncEventID.AsyncProfilerSyncClock)]
+        public void UndersizedTypedPayload_ReportsErrorAndContinuesAtDeclaredEnd(AsyncEventID eventId)
+        {
+            byte[] payload = eventId == AsyncEventID.ResumeRuntimeAsyncCallstack ? new byte[] { 0 } : Array.Empty<byte>();
+            byte[] buffer = new AsyncProfilerBufferBuilder()
+                .RawEvent((byte)eventId, StartQpc + 1, AsyncEventInfo.GetPayloadLengthFieldSize(eventId), payload)
+                .Method(AsyncEventID.CompleteRuntimeAsyncMethod, StartQpc + 2)
+                .Build();
+
+            var sink = new CollectingSink();
+            AsyncProfilerTraceEventParser.ParseBuffer(buffer, sink);
+
+            Assert.Single(sink.Errors);
+            AsyncMethodEvent method = Assert.Single(sink.Methods);
+            Assert.Equal(AsyncEventID.CompleteRuntimeAsyncMethod, method.EventId);
+            Assert.Empty(sink.ContextResumes);
+            Assert.Empty(sink.Unwinds);
+            Assert.Empty(sink.Callstacks);
+            Assert.Empty(sink.SyncClocks);
+        }
+
+        [Fact]
+        public void UndersizedMetadata_DoesNotMutateManifest_AndContinuesAtDeclaredEnd()
+        {
+            var manifest = new AsyncProfilerManifest();
+            manifest.Apply(new[]
+            {
+                new AsyncManifestEntry((AsyncEventID)24, 3, PayloadLengthFieldSize.Byte),
+            });
+
+            // The metadata declares only qpcFrequency=1. Without payload bounds, the following context event's
+            // framing bytes form a valid-looking remainder of the metadata, including a manifest entry that
+            // changes event 24 to a UShort prefix.
+            byte[] buffer = new AsyncProfilerBufferBuilder()
+                .RawEvent((byte)AsyncEventID.AsyncProfilerMetadata, StartQpc + 1, PayloadLengthFieldSize.UShort, new byte[] { 1 })
+                .RawEvent((byte)AsyncEventID.CreateRuntimeAsyncContext, StartQpc + 2, PayloadLengthFieldSize.Byte,
+                    new byte[] { 32, 1, 24, 9, (byte)PayloadLengthFieldSize.UShort })
+                .RawEvent(24, StartQpc + 3, PayloadLengthFieldSize.Byte, new byte[] { 0xAA })
+                .Method(AsyncEventID.CompleteRuntimeAsyncMethod, StartQpc + 4)
+                .Build();
+
+            var sink = new CollectingSink();
+            AsyncProfilerTraceEventParser.ParseBuffer(buffer, manifest, sink);
+
+            Assert.Single(sink.Errors);
+            Assert.Empty(sink.Metadatas);
+            Assert.Single(sink.ContextCreates);
+            Assert.Single(sink.Unknowns);
+            Assert.Single(sink.Methods);
+            Assert.Equal((byte)3, manifest.GetVersion((AsyncEventID)24));
+            Assert.Equal(PayloadLengthFieldSize.Byte, manifest.GetPayloadLengthFieldSize((AsyncEventID)24));
+        }
+
+        [Fact]
+        public void Metadata_InvalidPayloadLengthFieldSize_DoesNotMutateManifest()
+        {
+            var manifest = new AsyncProfilerManifest();
+            manifest.Apply(new[]
+            {
+                new AsyncManifestEntry((AsyncEventID)24, 3, PayloadLengthFieldSize.Byte),
+            });
+
+            byte[] buffer = new AsyncProfilerBufferBuilder()
+                .Metadata(StartQpc + 1, qpcFrequency: 1, qpcSync: 1, utcSync: 1, eventBufferSize: 0,
+                    wrapperCount: 0, new[] { new AsyncManifestEntry((AsyncEventID)24, 9, (PayloadLengthFieldSize)3) })
+                .RawEvent(24, StartQpc + 2, PayloadLengthFieldSize.Byte, new byte[] { 0xAA })
+                .Method(AsyncEventID.CompleteRuntimeAsyncMethod, StartQpc + 3)
+                .Build();
+
+            var sink = new CollectingSink();
+            AsyncProfilerTraceEventParser.ParseBuffer(buffer, manifest, sink);
+
+            Assert.Single(sink.Errors);
+            Assert.Empty(sink.Metadatas);
+            Assert.Single(sink.Unknowns);
+            Assert.Single(sink.Methods);
+            Assert.Equal((byte)3, manifest.GetVersion((AsyncEventID)24));
+            Assert.Equal(PayloadLengthFieldSize.Byte, manifest.GetPayloadLengthFieldSize((AsyncEventID)24));
+        }
+
+        private static void WriteUInt32At(byte[] buffer, int offset, uint value)
+        {
+            buffer[offset] = (byte)value;
+            buffer[offset + 1] = (byte)(value >> 8);
+            buffer[offset + 2] = (byte)(value >> 16);
+            buffer[offset + 3] = (byte)(value >> 24);
+        }
     }
 }
