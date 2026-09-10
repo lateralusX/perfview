@@ -593,7 +593,8 @@ namespace Microsoft.Diagnostics.Tracing
             long qpc = data.TimeStampQPC;
 #pragma warning restore CS0618
 
-            StitchResult result = AsyncCpuStackStitcher.Stitch(sync, segments, qpc, m_asyncBoundaries, m_asyncIndex, m_asyncMethodOf, TraceAsyncStitchSteps);
+            StitchResult result = AsyncCpuStackStitcher.Stitch(sync, segments, qpc, m_asyncBoundaries, m_asyncIndex,
+                thread.Process.ProcessIndex, m_asyncMethodOf, TraceAsyncStitchSteps);
             AccumulateAsyncDiagnostics(result.Diagnostics);
 
             // When start-stop activity grouping is enabled, root the stitched stack through the same top-frames

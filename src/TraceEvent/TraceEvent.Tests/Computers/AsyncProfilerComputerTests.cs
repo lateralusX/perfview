@@ -76,8 +76,13 @@ namespace TraceEventTests
         private const ulong ThreadA = 0x1000;
         private const ulong ThreadB = 0x2000;
         private const long Start = 1_000_000;
+        private const ProcessIndex ProcessA = (ProcessIndex)1;
+        private const ProcessIndex ProcessB = (ProcessIndex)2;
 
-        private static AsyncThreadKey Key(ulong osThreadId) => new AsyncThreadKey(0, osThreadId);
+        private static AsyncThreadKey Key(ulong osThreadId) => Key((ProcessIndex)0, osThreadId);
+
+        private static AsyncThreadKey Key(ProcessIndex processIndex, ulong osThreadId) =>
+            new AsyncThreadKey(processIndex, osThreadId);
 
         private static AsyncProfilerComputer Compute(AsyncProfilerBufferBuilder builder)
         {
@@ -85,6 +90,9 @@ namespace TraceEventTests
             computer.Process(builder.Build());
             return computer;
         }
+
+        private static void Process(AsyncProfilerComputer computer, ProcessIndex processIndex, AsyncProfilerBufferBuilder builder) =>
+            computer.Process(builder.Build(), processIndex);
 
         [Fact]
         public void EventsBeforeReset_AreIgnored()
@@ -272,6 +280,127 @@ namespace TraceEventTests
             // Thread B is idle at t40; thread A is still active.
             Assert.Empty(computer.GetAsyncCallStacks(Key(ThreadB), Start + 40));
             Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 40));
+        }
+
+        [Fact]
+        public void Processes_UseIndependentManifestsAndThreadState()
+        {
+            var computer = new AsyncProfilerComputer();
+
+            // Process A advertises a byte-sized payload length for its resume-callstack event.
+            Process(computer, ProcessA, new AsyncProfilerBufferBuilder(ThreadA)
+                .Metadata(Start, qpcFrequency: 10_000_000, qpcSync: 1, utcSync: 1, eventBufferSize: 0, wrapperCount: 16,
+                    new[] { new AsyncManifestEntry(AsyncEventID.ResumeStateMachineAsyncCallstack, 1, PayloadLengthFieldSize.Byte) })
+                .Reset(Start + 1));
+            Process(computer, ProcessA, new AsyncProfilerBufferBuilder(ThreadA, startQpc: Start + 2)
+                .RawEvent((byte)AsyncEventID.ResumeStateMachineAsyncCallstack, Start + 10, PayloadLengthFieldSize.Byte,
+                    new byte[] { 0, 0, 1, 1, 0x2A, 0 })
+                .Suspend(Start + 20));
+
+            // Process B retains the built-in ushort framing for the same event id. Reusing process A's manifest
+            // would misframe this buffer, and sharing thread state would mix the two identical OS thread ids.
+            Process(computer, ProcessB, new AsyncProfilerBufferBuilder(ThreadA)
+                .Armed(Start)
+                .ResumeStack(Start + 10, dispatcher: 2, new ulong[] { 0x2B })
+                .Suspend(Start + 20));
+
+            Assert.Equal(0x2AUL, Assert.Single(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 15)).Frames.MethodIdAt(0));
+            Assert.Equal(0x2BUL, Assert.Single(computer.GetAsyncCallStacks(Key(ProcessB, ThreadA), Start + 15)).Frames.MethodIdAt(0));
+        }
+
+        [Fact]
+        public void MetadataGateAndClock_AreProcessScoped()
+        {
+            long utcA = new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc).ToFileTimeUtc();
+            long utcB = new DateTime(2026, 7, 2, 12, 0, 0, DateTimeKind.Utc).ToFileTimeUtc();
+            var computer = new AsyncProfilerComputer();
+
+            Process(computer, ProcessA, new AsyncProfilerBufferBuilder(ThreadA)
+                .Metadata(Start, qpcFrequency: 10_000_000, qpcSync: (ulong)Start, utcSync: (ulong)utcA, eventBufferSize: 0, wrapperCount: 16, new AsyncManifestEntry[0])
+                .Reset(Start)
+                .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA })
+                .Suspend(Start + 20));
+
+            // Process A's metadata must not arm process B.
+            Process(computer, ProcessB, new AsyncProfilerBufferBuilder(ThreadA)
+                .Reset(Start)
+                .ResumeStack(Start + 10, dispatcher: 2, new ulong[] { 0xDEAD })
+                .Suspend(Start + 20));
+            Assert.Empty(computer.GetAsyncCallStacks(Key(ProcessB, ThreadA), Start + 15));
+
+            Process(computer, ProcessB, new AsyncProfilerBufferBuilder(ThreadA)
+                .Metadata(Start + 30, qpcFrequency: 5_000_000, qpcSync: (ulong)(Start + 30), utcSync: (ulong)utcB, eventBufferSize: 0, wrapperCount: 32, new AsyncManifestEntry[0])
+                .Reset(Start + 30)
+                .ResumeStack(Start + 40, dispatcher: 3, new ulong[] { 0xB })
+                .Suspend(Start + 50));
+
+            Assert.Equal((byte)16, computer.GetWrapperCount(ProcessA));
+            Assert.Equal((byte)32, computer.GetWrapperCount(ProcessB));
+            Assert.Equal(new DateTime(2026, 7, 1, 12, 0, 1, DateTimeKind.Utc), computer.QpcToDateTime(ProcessA, Start + 10_000_000));
+            Assert.Equal(new DateTime(2026, 7, 2, 12, 0, 1, DateTimeKind.Utc), computer.QpcToDateTime(ProcessB, Start + 30 + 5_000_000));
+        }
+
+        [Fact]
+        public void CompletionAvailabilityAndFrameInterning_AreProcessScoped()
+        {
+            var computer = new AsyncProfilerComputer();
+
+            Process(computer, ProcessA, new AsyncProfilerBufferBuilder(ThreadA)
+                .Armed(Start)
+                .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA })
+                .CompleteMethod(Start + 15)
+                .Suspend(Start + 20));
+            Process(computer, ProcessB, new AsyncProfilerBufferBuilder(ThreadA)
+                .Armed(Start)
+                .ResumeStack(Start + 10, dispatcher: 2, new ulong[] { 0xA })
+                .Suspend(Start + 20));
+
+            Assert.True(computer.Index.MethodCompletionObserved(ProcessA, AsyncCallstackKind.StateMachineAsync));
+            Assert.False(computer.Index.MethodCompletionObserved(ProcessB, AsyncCallstackKind.StateMachineAsync));
+            Assert.Equal(2, computer.DistinctFramesCount);
+
+            AsyncCallStack processAStack = Assert.Single(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 15));
+            AsyncCallStack processBStack = Assert.Single(computer.GetAsyncCallStacks(Key(ProcessB, ThreadA), Start + 15));
+            Assert.NotEqual(processAStack.FramesIndex, processBStack.FramesIndex);
+            Assert.NotSame(processAStack.Frames, processBStack.Frames);
+        }
+
+        [Fact]
+        public void WrapperCount_IsCapturedWhenActivationStarts()
+        {
+            var computer = new AsyncProfilerComputer();
+            Process(computer, ProcessA, new AsyncProfilerBufferBuilder(ThreadA)
+                .Metadata(Start, qpcFrequency: 10_000_000, qpcSync: 1, utcSync: 1, eventBufferSize: 0, wrapperCount: 16, new AsyncManifestEntry[0])
+                .Reset(Start)
+                .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA })
+                .Metadata(Start + 15, qpcFrequency: 10_000_000, qpcSync: 1, utcSync: 1, eventBufferSize: 0, wrapperCount: 32, new AsyncManifestEntry[0])
+                .Reset(Start + 20));
+
+            AsyncCallStack stack = Assert.Single(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 15));
+            Assert.Equal((byte)16, stack.WrapperCount);
+        }
+
+        [Fact]
+        public void ProcessIsolation_SerializesAndDeserializes()
+        {
+            var computer = new AsyncProfilerComputer();
+            Process(computer, ProcessA, new AsyncProfilerBufferBuilder(ThreadA)
+                .Armed(Start)
+                .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA })
+                .CompleteMethod(Start + 15)
+                .Suspend(Start + 20));
+            Process(computer, ProcessB, new AsyncProfilerBufferBuilder(ThreadA)
+                .Armed(Start)
+                .ResumeStack(Start + 10, dispatcher: 2, new ulong[] { 0xA })
+                .Suspend(Start + 20));
+
+            AsyncCallStacksIndex reloaded = RoundTrip(computer.Index);
+
+            Assert.Single(reloaded.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 15));
+            Assert.Single(reloaded.GetAsyncCallStacks(Key(ProcessB, ThreadA), Start + 15));
+            Assert.True(reloaded.MethodCompletionObserved(ProcessA, AsyncCallstackKind.StateMachineAsync));
+            Assert.False(reloaded.MethodCompletionObserved(ProcessB, AsyncCallstackKind.StateMachineAsync));
+            Assert.Equal(2, reloaded.DistinctFramesCount);
         }
 
         [Fact]

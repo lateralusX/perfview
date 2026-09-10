@@ -162,7 +162,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// call stacks <paramref name="segmentsRootToLeaf"/> active at <paramref name="qpc"/> (as returned by
         /// <see cref="AsyncCallStacksIndex.GetAsyncCallStacks(AsyncThreadKey, long)"/>, i.e. depth-ascending =
         /// root-&gt;leaf). Convenience overload over
-        /// <see cref="Stitch(IReadOnlyList{StitchSyncFrame}, IReadOnlyList{AsyncCallStack}, long, Func{CodeAddressIndex, AsyncStitchBoundaryInfo}, Func{AsyncCallstackKind, bool}, Func{CodeAddressIndex, MethodIndex})"/>
+        /// <see cref="Stitch(IReadOnlyList{StitchSyncFrame}, IReadOnlyList{AsyncCallStack}, long, Func{CodeAddressIndex, AsyncStitchBoundaryInfo}, Func{AsyncCallstackKind, bool}, Func{CodeAddressIndex, MethodIndex}, bool)"/>
         /// that sources boundary classification from a <see cref="AsyncStitchBoundaryCache"/> and the
         /// completion-events-observed predicate from an <see cref="AsyncCallStacksIndex"/>.
         /// </summary>
@@ -171,7 +171,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// (they are reversed internally to leaf-&gt;root to walk in lockstep with the sync stack).</param>
         /// <param name="qpc">The sample time, in the trace's QPC domain.</param>
         /// <param name="boundaries">The per-trace boundary-method cache.</param>
-        /// <param name="index">The async index, queried for whether completion events were emitted per kind.</param>
+        /// <param name="index">The async index, queried for whether completion events were emitted per process and kind.</param>
+        /// <param name="processIndex">The process instance that emitted the sampled stack.</param>
         /// <param name="methodOf">Maps a <see cref="CodeAddressIndex"/> to its <see cref="MethodIndex"/>
         /// (typically <c>traceLog.CodeAddresses.MethodIndex</c>); used for the V1 identity match and V2 adjacency check.</param>
         /// <param name="trace">When true, a per-segment happy-path note (kind / boundary / completed count /
@@ -183,12 +184,14 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             long qpc,
             AsyncStitchBoundaryCache boundaries,
             AsyncCallStacksIndex index,
+            ProcessIndex processIndex,
             Func<CodeAddressIndex, MethodIndex> methodOf,
             bool trace = false)
         {
             if (boundaries is null) throw new ArgumentNullException(nameof(boundaries));
             if (index is null) throw new ArgumentNullException(nameof(index));
-            return Stitch(syncLeafToRoot, segmentsRootToLeaf, qpc, boundaries.Classify, index.MethodCompletionObserved, methodOf, trace);
+            return Stitch(syncLeafToRoot, segmentsRootToLeaf, qpc, boundaries.Classify,
+                kind => index.MethodCompletionObserved(processIndex, kind), methodOf, trace);
         }
 
         /// <summary>
@@ -203,7 +206,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <param name="qpc">The sample time, in the trace's QPC domain.</param>
         /// <param name="classify">Classifies a sync frame's <see cref="CodeAddressIndex"/> as an async dispatch boundary.</param>
         /// <param name="methodCompletionObserved">True if <c>CompleteMethod</c> (normal completion) events were
-        /// emitted for the given kind (see <see cref="AsyncCallStacksIndex.MethodCompletionObserved"/>). Exceptional
+        /// emitted for the given kind (see <see cref="AsyncCallStacksIndex.MethodCompletionObserved(ProcessIndex, AsyncCallstackKind)"/>). Exceptional
         /// unwinds are added unconditionally from the segment's <c>Unwind</c> deltas.</param>
         /// <param name="methodOf">Maps a <see cref="CodeAddressIndex"/> to its <see cref="MethodIndex"/>; used for
         /// the V1 identity match and V2 adjacency check.</param>

@@ -48,14 +48,12 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
 
         public AsyncProfilerTraceEventParser(TraceEventSource source) : base(source)
         {
-            ((ITraceParserServices)source).RegisterEventTemplate(AsyncEventsTemplate(OnRawAsyncEvents));
         }
 
         protected override string GetProviderName() => ProviderName;
 
         /// <summary>
-        /// Subscribe to the raw <c>AsyncEvents</c> event (the undecoded buffer). Most consumers should
-        /// instead use <see cref="ObserveSubEvents"/> to receive the decoded sub-events.
+        /// Subscribe to the raw <c>AsyncEvents</c> event (the undecoded buffer).
         /// </summary>
         public event Action<AsyncEventsTraceData> AsyncEvents
         {
@@ -67,21 +65,6 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
             {
                 source.UnregisterEventTemplate(value, AsyncEventsEventId, ProviderGuid);
             }
-        }
-
-        /// <summary>
-        /// Registers <paramref name="sink"/> to receive every decoded sub-event carried by each raw
-        /// <c>AsyncEvents</c> buffer. Multiple sinks may be registered; each is invoked in registration
-        /// order for every sub-event.
-        /// </summary>
-        public void ObserveSubEvents(IAsyncProfilerSubEventSink sink)
-        {
-            if (sink == null)
-            {
-                throw new ArgumentNullException(nameof(sink));
-            }
-
-            _sinks = _sinks == null ? new[] { sink } : Append(_sinks, sink);
         }
 
         /// <summary>
@@ -203,41 +186,6 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
         }
 
         #region private
-
-        private readonly AsyncProfilerManifest _manifest = new AsyncProfilerManifest();
-        private IAsyncProfilerSubEventSink[] _sinks;
-        private DispatchSink _dispatchSink;
-
-        /// <summary>
-        /// The live manifest this parser maintains across buffers (payload-length widths and schema versions
-        /// per event id). It reflects the most recent <c>AsyncProfilerMetadata</c> seen so far.
-        /// </summary>
-        public AsyncProfilerManifest Manifest => _manifest;
-
-        private void OnRawAsyncEvents(AsyncEventsTraceData data)
-        {
-            IAsyncProfilerSubEventSink[] sinks = _sinks;
-            if (sinks == null || sinks.Length == 0)
-            {
-                return;
-            }
-
-            if (_dispatchSink == null)
-            {
-                _dispatchSink = new DispatchSink();
-            }
-
-            _dispatchSink.Targets = sinks;
-            ParseBuffer(data.Buffer, _manifest, _dispatchSink);
-        }
-
-        private static IAsyncProfilerSubEventSink[] Append(IAsyncProfilerSubEventSink[] existing, IAsyncProfilerSubEventSink added)
-        {
-            var result = new IAsyncProfilerSubEventSink[existing.Length + 1];
-            Array.Copy(existing, result, existing.Length);
-            result[existing.Length] = added;
-            return result;
-        }
 
         protected internal override void EnumerateTemplates(Func<string, string, EventFilterResponse> eventsToObserve, Action<TraceEvent> callback)
         {
@@ -425,27 +373,6 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
         private static void ReportMalformedPayload(AsyncEventID eventId, int payloadStart, IAsyncProfilerSubEventSink sink)
         {
             sink.OnParseError(new AsyncProfilerParseError("Invalid or truncated payload for " + eventId, payloadStart));
-        }
-
-        // Fans a single decode out to a snapshot of the registered sinks.
-        private sealed class DispatchSink : IAsyncProfilerSubEventSink
-        {
-            public IAsyncProfilerSubEventSink[] Targets;
-
-            public void OnContextCreate(in AsyncContextEvent e) { foreach (var t in Targets) t.OnContextCreate(e); }
-            public void OnContextResume(in AsyncContextEvent e) { foreach (var t in Targets) t.OnContextResume(e); }
-            public void OnContextSuspend(in AsyncContextEvent e) { foreach (var t in Targets) t.OnContextSuspend(e); }
-            public void OnContextComplete(in AsyncContextEvent e) { foreach (var t in Targets) t.OnContextComplete(e); }
-            public void OnException(in AsyncUnwindEvent e) { foreach (var t in Targets) t.OnException(e); }
-            public void OnCallstack(in AsyncCallstackEvent e) { foreach (var t in Targets) t.OnCallstack(e); }
-            public void OnMethodResume(in AsyncMethodEvent e) { foreach (var t in Targets) t.OnMethodResume(e); }
-            public void OnMethodComplete(in AsyncMethodEvent e) { foreach (var t in Targets) t.OnMethodComplete(e); }
-            public void OnResetThreadContext(in AsyncNeutralEvent e) { foreach (var t in Targets) t.OnResetThreadContext(e); }
-            public void OnResetContinuationWrapperIndex(in AsyncNeutralEvent e) { foreach (var t in Targets) t.OnResetContinuationWrapperIndex(e); }
-            public void OnMetadata(in AsyncMetadataEvent e) { foreach (var t in Targets) t.OnMetadata(e); }
-            public void OnSyncClock(in AsyncSyncClockEvent e) { foreach (var t in Targets) t.OnSyncClock(e); }
-            public void OnUnknown(in AsyncUnknownEvent e) { foreach (var t in Targets) t.OnUnknown(e); }
-            public void OnParseError(in AsyncProfilerParseError e) { foreach (var t in Targets) t.OnParseError(e); }
         }
 
         #endregion

@@ -22,24 +22,24 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     }
 
     /// <summary>
-    /// Identifies the OS thread (within a process) an async call stack ran on. Async-context ids are
-    /// process-wide, so the process is part of the key to stay correct across multi-process traces.
+    /// Identifies the OS thread (within a process instance) an async call stack ran on. OS process ids can be
+    /// reused within a trace, so the unique <see cref="Etlx.ProcessIndex"/> is part of the key.
     /// </summary>
     public readonly struct AsyncThreadKey : IEquatable<AsyncThreadKey>
     {
-        public readonly int ProcessId;
+        public readonly ProcessIndex ProcessIndex;
         public readonly ulong OsThreadId;
 
-        public AsyncThreadKey(int processId, ulong osThreadId)
+        public AsyncThreadKey(ProcessIndex processIndex, ulong osThreadId)
         {
-            ProcessId = processId;
+            ProcessIndex = processIndex;
             OsThreadId = osThreadId;
         }
 
-        public bool Equals(AsyncThreadKey other) => ProcessId == other.ProcessId && OsThreadId == other.OsThreadId;
+        public bool Equals(AsyncThreadKey other) => ProcessIndex == other.ProcessIndex && OsThreadId == other.OsThreadId;
         public override bool Equals(object obj) => obj is AsyncThreadKey o && Equals(o);
-        public override int GetHashCode() => (ProcessId * 397) ^ OsThreadId.GetHashCode();
-        public override string ToString() => "pid=" + ProcessId + " tid=" + OsThreadId;
+        public override int GetHashCode() => ((int)ProcessIndex * 397) ^ OsThreadId.GetHashCode();
+        public override string ToString() => "processIndex=" + ProcessIndex + " tid=" + OsThreadId;
     }
 
     /// <summary>
@@ -54,12 +54,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         private readonly int[] _frameStates; // null for runtime callstacks
         private CodeAddressIndex[] _codeAddresses; // per-frame resolved code address; null until symbolized
 
-        internal AsyncCallStackFrames(AsyncCallstackKind kind, ulong[] methodIds, int[] frameStates, int processId = 0)
+        internal AsyncCallStackFrames(AsyncCallstackKind kind, ulong[] methodIds, int[] frameStates, ProcessIndex processIndex = 0)
         {
             Kind = kind;
             _methodIds = methodIds;
             _frameStates = frameStates;
-            ProcessId = processId;
+            ProcessIndex = processIndex;
         }
 
         public AsyncCallstackKind Kind { get; }
@@ -68,7 +68,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         public int FrameStateAt(int index) => _frameStates != null ? _frameStates[index] : 0;
 
         /// <summary>The process these frames were captured in. Build-time only (used to resolve addresses); not serialized.</summary>
-        internal int ProcessId { get; }
+        internal ProcessIndex ProcessIndex { get; }
 
         /// <summary>
         /// The resolved <see cref="CodeAddressIndex"/> for frame <paramref name="index"/> (a location in a
@@ -225,7 +225,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <summary>
         /// The number of leaf frames completed by <paramref name="qpc"/> via normal <c>CompleteMethod</c> events
         /// (each contributes 1). Meaningful only when <c>CompleteMethod</c> events were emitted for this kind (see
-        /// <see cref="AsyncCallStacksIndex.MethodCompletionObserved"/>); otherwise this is 0 and the normal
+        /// <see cref="AsyncCallStacksIndex.MethodCompletionObserved(ProcessIndex, AsyncCallstackKind)"/>); otherwise this is 0 and the normal
         /// completed count must be derived another way (the continuation-wrapper slot for V2, or the inline-resumed
         /// frames on the sync stack for V1).
         /// </summary>
@@ -268,7 +268,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// it makes the count start from that value, so only completions observed since resume are counted.
         /// </para>
         /// Use this overload when <c>CompleteMethod</c> events are not available for V2 (see
-        /// <see cref="AsyncCallStacksIndex.MethodCompletionObserved"/>); otherwise prefer
+        /// <see cref="AsyncCallStacksIndex.MethodCompletionObserved(ProcessIndex, AsyncCallstackKind)"/>); otherwise prefer
         /// <see cref="GetCompletedFrameCount(long)"/>.
         /// </summary>
         public int GetCompletedFrameCount(long qpc, int currentMethodIndex)
@@ -399,45 +399,35 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             id == AsyncEventID.AppendStateMachineAsyncCallstack;
 
         private readonly AsyncProfilerTraceEventParser _parser;
-        private readonly AsyncProfilerManifest _manifest = new AsyncProfilerManifest();
+        private readonly Func<AsyncEventsTraceData, ProcessIndex> _processIndexOf;
         private readonly AsyncCallStacksIndex _index = new AsyncCallStacksIndex();
         private readonly Dictionary<AsyncThreadKey, AsyncCallStacks> _threads = new Dictionary<AsyncThreadKey, AsyncCallStacks>();
+        private readonly Dictionary<ProcessIndex, ProcessState> _processes = new Dictionary<ProcessIndex, ProcessState>();
 
-        private AsyncEventsTraceData _currentRawEvent;
+        private ProcessIndex _currentProcessIndex;
 
         /// <summary>
         /// Fired for each frame methodId as a resume/append callstack is processed (i.e. during the event stream,
         /// before end-of-trace rundown), letting the host pre-register the frame's code address so a covering
         /// method load/rundown binds it. This makes frames resolvable even for async call stacks that are only
-        /// committed later at <see cref="Finish"/> (still live at capture end). Args: processId, methodId, kind.
+        /// committed later at <see cref="Finish"/> (still live at capture end). Args: processIndex, methodId, kind.
         /// </summary>
-        public Action<int, ulong, AsyncCallstackKind> OnFrameObserved;
-
-        // Clock state (QPC <-> UTC), from AsyncProfilerMetadata / AsyncProfilerSyncClock.
-        private ulong _qpcFrequency;
-        private ulong _qpcSync;
-        private ulong _utcSync;
-
-        // Set once the first AsyncProfilerMetadata sub-event is seen in the stream. Until then no thread is armed,
-        // so all thread-scoped sub-events are ignored. The metadata carries the manifest (framing/versioning) and,
-        // per the runtime contract, always precedes the reset wave for its config revision. Gating arming on it
-        // discards leftover buffered data from a PRIOR profiler session (config changes do NOT flush existing async
-        // buffers), which our session can neither frame nor attribute correctly.
-        private long _firstMetadataQpc = long.MaxValue;
+        public Action<ProcessIndex, ulong, AsyncCallstackKind> OnFrameObserved;
 
         /// <summary>
-        /// Binds the computer to a live parser: it decodes each raw <c>AsyncEvents</c> buffer (maintaining
-        /// the manifest across buffers) and feeds the sub-events into the index.
+        /// Binds the computer to a live parser: it resolves each carrying event to a process instance, decodes the
+        /// raw <c>AsyncEvents</c> buffer using that process's manifest, and feeds the sub-events into the index.
         /// </summary>
-        public AsyncProfilerComputer(AsyncProfilerTraceEventParser parser)
+        internal AsyncProfilerComputer(AsyncProfilerTraceEventParser parser, Func<AsyncEventsTraceData, ProcessIndex> processIndexOf)
         {
             _parser = parser ?? throw new ArgumentNullException(nameof(parser));
+            _processIndexOf = processIndexOf ?? throw new ArgumentNullException(nameof(processIndexOf));
             _parser.AsyncEvents += OnRawAsyncEvents;
         }
 
         /// <summary>
         /// Creates a computer with no parser binding, for unit tests or callers that drive the decoder
-        /// directly via <see cref="Process"/>.
+        /// directly via <see cref="Process(byte[])"/>.
         /// </summary>
         public AsyncProfilerComputer()
         {
@@ -447,10 +437,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         public AsyncCallStacksIndex Index => _index;
 
         /// <summary>True once an <c>AsyncProfilerMetadata</c> sub-event has established the QPC frequency.</summary>
-        public bool ClockKnown => _qpcFrequency != 0;
+        public bool ClockKnown => ClockKnownForProcess(0);
 
         /// <summary>The continuation-wrapper pool size (<c>ContinuationWrapper.COUNT</c>) from metadata; 0 until seen.</summary>
-        public byte WrapperCount { get; private set; }
+        public byte WrapperCount => GetWrapperCount(0);
 
         /// <summary>The number of distinct interned frame lists (useful for asserting dedup).</summary>
         public int DistinctFramesCount => _index.DistinctFramesCount;
@@ -458,7 +448,15 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <summary>Decodes an <c>AsyncEvents</c> buffer directly into the index (test / manual-drive path).</summary>
         public void Process(byte[] buffer)
         {
-            AsyncProfilerTraceEventParser.ParseBuffer(buffer, _manifest, this);
+            Process(buffer, 0);
+        }
+
+        /// <summary>Decodes an async-profiler buffer for one process instance into the index.</summary>
+        public void Process(byte[] buffer, ProcessIndex processIndex)
+        {
+            ProcessState process = GetOrCreateProcess(processIndex);
+            _currentProcessIndex = processIndex;
+            AsyncProfilerTraceEventParser.ParseBuffer(buffer, process.Manifest, this);
         }
 
         /// <summary>Resolves an interned frames handle to its frames.</summary>
@@ -473,12 +471,29 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <summary>Converts an absolute QPC timestamp to UTC using the current clock sync; null until <see cref="ClockKnown"/>.</summary>
         public DateTime? QpcToDateTime(long qpc)
         {
-            if (_qpcFrequency == 0)
+            return QpcToDateTime(0, qpc);
+        }
+
+        /// <summary>True once metadata has established the QPC frequency for <paramref name="processIndex"/>.</summary>
+        public bool ClockKnownForProcess(ProcessIndex processIndex) =>
+            _processes.TryGetValue(processIndex, out ProcessState process) && process.QpcFrequency != 0;
+
+        /// <summary>The continuation-wrapper pool size currently configured for <paramref name="processIndex"/>.</summary>
+        public byte GetWrapperCount(ProcessIndex processIndex) =>
+            _processes.TryGetValue(processIndex, out ProcessState process) ? process.WrapperCount : (byte)0;
+
+        /// <summary>
+        /// Converts an absolute QPC timestamp to UTC using the current clock synchronization for
+        /// <paramref name="processIndex"/>; returns null until that process has emitted metadata.
+        /// </summary>
+        public DateTime? QpcToDateTime(ProcessIndex processIndex, long qpc)
+        {
+            if (!_processes.TryGetValue(processIndex, out ProcessState process) || process.QpcFrequency == 0)
             {
                 return null;
             }
 
-            long utcTicks = (long)_utcSync + (qpc - (long)_qpcSync) * TimeSpan.TicksPerSecond / (long)_qpcFrequency;
+            long utcTicks = (long)process.UtcSync + (qpc - (long)process.QpcSync) * TimeSpan.TicksPerSecond / (long)process.QpcFrequency;
             return DateTime.FromFileTimeUtc(utcTicks);
         }
 
@@ -502,7 +517,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
             if (IsResumeCallstack(e.EventId))
             {
-                state.Push(new AsyncCallStackBuilder(e));
+                state.Push(new AsyncCallStackBuilder(e, CurrentProcess.WrapperCount));
             }
             else if (IsAppendCallstack(e.EventId))
             {
@@ -513,12 +528,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             // so a covering method load binds it even if this async call stack is only committed later by Finish().
             if (OnFrameObserved != null && e.MethodIds != null)
             {
-                int processId = _currentRawEvent != null ? _currentRawEvent.ProcessID : 0;
                 for (int i = 0; i < e.MethodIds.Length; i++)
                 {
                     if (e.MethodIds[i] != 0)
                     {
-                        OnFrameObserved(processId, e.MethodIds[i], e.Kind);
+                        OnFrameObserved(_currentProcessIndex, e.MethodIds[i], e.Kind);
                     }
                 }
             }
@@ -529,14 +543,14 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         void IAsyncProfilerSubEventSink.OnMethodComplete(in AsyncMethodEvent e)
         {
             AsyncCallstackKind kind = e.IsStateMachine ? AsyncCallstackKind.StateMachineAsync : AsyncCallstackKind.RuntimeAsync;
-            _index.MarkMethodCompletionObserved(kind);
+            _index.MarkMethodCompletionObserved(_currentProcessIndex, kind);
             AddMethodCompletion(ThreadKeyOf(e.OsThreadId), e.TimestampQpc);
         }
 
         void IAsyncProfilerSubEventSink.OnException(in AsyncUnwindEvent e)
         {
             AsyncCallstackKind kind = e.IsStateMachine ? AsyncCallstackKind.StateMachineAsync : AsyncCallstackKind.RuntimeAsync;
-            _index.MarkExceptionCompletionObserved(kind);
+            _index.MarkExceptionCompletionObserved(_currentProcessIndex, kind);
             AddExceptionCompletion(ThreadKeyOf(e.OsThreadId), e.TimestampQpc, (int)e.UnwoundFrameCount);
         }
 
@@ -551,7 +565,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             // stream/delivery order drops foreign leftover even when its buffer is delivered after the metadata
             // buffer (buffers are delivered by buffer timestamp, not force-flush order), while never dropping valid
             // same-session data.
-            if (e.TimestampQpc < _firstMetadataQpc)
+            ProcessState process = CurrentProcess;
+            if (e.TimestampQpc < process.FirstMetadataQpc)
             {
                 return;
             }
@@ -584,20 +599,22 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         void IAsyncProfilerSubEventSink.OnMetadata(in AsyncMetadataEvent e)
         {
-            if (e.TimestampQpc < _firstMetadataQpc)
+            ProcessState process = CurrentProcess;
+            if (e.TimestampQpc < process.FirstMetadataQpc)
             {
-                _firstMetadataQpc = e.TimestampQpc;
+                process.FirstMetadataQpc = e.TimestampQpc;
             }
-            _qpcFrequency = e.QpcFrequency;
-            _qpcSync = e.QpcSync;
-            _utcSync = e.UtcSync;
-            WrapperCount = e.WrapperCount;
+            process.QpcFrequency = e.QpcFrequency;
+            process.QpcSync = e.QpcSync;
+            process.UtcSync = e.UtcSync;
+            process.WrapperCount = e.WrapperCount;
         }
 
         void IAsyncProfilerSubEventSink.OnSyncClock(in AsyncSyncClockEvent e)
         {
-            _qpcSync = e.QpcSync;
-            _utcSync = e.UtcSync;
+            ProcessState process = CurrentProcess;
+            process.QpcSync = e.QpcSync;
+            process.UtcSync = e.UtcSync;
         }
 
         void IAsyncProfilerSubEventSink.OnUnknown(in AsyncUnknownEvent e) { }
@@ -610,19 +627,23 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         private void OnRawAsyncEvents(AsyncEventsTraceData data)
         {
-            _currentRawEvent = data;
-            try
-            {
-                AsyncProfilerTraceEventParser.ParseBuffer(data.Buffer, _manifest, this);
-            }
-            finally
-            {
-                _currentRawEvent = null;
-            }
+            Process(data.Buffer, _processIndexOf(data));
         }
 
         private AsyncThreadKey ThreadKeyOf(ulong osThreadId) =>
-            new AsyncThreadKey(_currentRawEvent != null ? _currentRawEvent.ProcessID : 0, osThreadId);
+            new AsyncThreadKey(_currentProcessIndex, osThreadId);
+
+        private ProcessState CurrentProcess => GetOrCreateProcess(_currentProcessIndex);
+
+        private ProcessState GetOrCreateProcess(ProcessIndex processIndex)
+        {
+            if (!_processes.TryGetValue(processIndex, out ProcessState process))
+            {
+                process = new ProcessState();
+                _processes[processIndex] = process;
+            }
+            return process;
+        }
 
         private AsyncCallStacks GetOrCreate(AsyncThreadKey key)
         {
@@ -662,7 +683,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
             AsyncCallStackBuilder builder = state.Pop();
             _index.Add(key, builder.Kind, builder.MethodIds.ToArray(), builder.FrameStates?.ToArray(),
-                builder.Depth, builder.ContinuationIndexBase, WrapperCount, builder.StartQpc, qpc,
+                builder.Depth, builder.ContinuationIndexBase, builder.WrapperCount, builder.StartQpc, qpc,
                 builder.MethodCompletions.ToArray(), builder.ExceptionCompletions.ToArray(), builder.WrapperResets.ToArray());
         }
 
@@ -691,7 +712,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             {
                 AsyncCallStackBuilder builder = state.Pop();
                 _index.Add(key, builder.Kind, builder.MethodIds.ToArray(), builder.FrameStates?.ToArray(),
-                    builder.Depth, builder.ContinuationIndexBase, WrapperCount, builder.StartQpc, endQpc,
+                    builder.Depth, builder.ContinuationIndexBase, builder.WrapperCount, builder.StartQpc, endQpc,
                     builder.MethodCompletions.ToArray(), builder.ExceptionCompletions.ToArray(), builder.WrapperResets.ToArray());
             }
         }
@@ -720,12 +741,23 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             public void ClearNesting() => _nesting.Clear();
         }
 
+        private sealed class ProcessState
+        {
+            public readonly AsyncProfilerManifest Manifest = new AsyncProfilerManifest();
+            public long FirstMetadataQpc = long.MaxValue;
+            public ulong QpcFrequency;
+            public ulong QpcSync;
+            public ulong UtcSync;
+            public byte WrapperCount;
+        }
+
         /// <summary>An in-progress async call stack being assembled on a thread's nesting stack.</summary>
         private sealed class AsyncCallStackBuilder
         {
             public readonly ulong DispatcherId;
             public readonly long StartQpc;
             public readonly byte ContinuationIndexBase;
+            public readonly byte WrapperCount;
             public readonly AsyncCallstackKind Kind;
             public int Depth;
             public readonly List<ulong> MethodIds = new List<ulong>();
@@ -734,11 +766,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             public readonly List<AsyncCallStack.CompletionDelta> ExceptionCompletions = new List<AsyncCallStack.CompletionDelta>();
             public readonly List<long> WrapperResets = new List<long>();
 
-            public AsyncCallStackBuilder(in AsyncCallstackEvent e)
+            public AsyncCallStackBuilder(in AsyncCallstackEvent e, byte wrapperCount)
             {
                 DispatcherId = e.DispatcherId;
                 StartQpc = e.TimestampQpc;
                 ContinuationIndexBase = e.ContinuationIndex;
+                WrapperCount = wrapperCount;
                 Kind = e.Kind;
                 AddFrames(e);
             }

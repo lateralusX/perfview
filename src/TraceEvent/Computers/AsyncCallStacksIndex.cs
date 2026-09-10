@@ -31,10 +31,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         private readonly Dictionary<FrameKey, AsyncCallStackFramesIndex> _frameKeyToIndex = new Dictionary<FrameKey, AsyncCallStackFramesIndex>();
         private readonly Dictionary<AsyncThreadKey, ThreadCallStacks> _threads = new Dictionary<AsyncThreadKey, ThreadCallStacks>();
 
-        private bool _methodCompletionObservedRuntimeAsync;
-        private bool _methodCompletionObservedStateMachineAsync;
-        private bool _exceptionCompletionObservedRuntimeAsync;
-        private bool _exceptionCompletionObservedStateMachineAsync;
+        private readonly Dictionary<ProcessIndex, CompletionAvailability> _completionAvailability =
+            new Dictionary<ProcessIndex, CompletionAvailability>();
 
         /// <summary>
         /// Invoked (if set) the first time a distinct <see cref="AsyncCallStackFrames"/> is interned, so a build-time
@@ -59,12 +57,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// is the authoritative normal-completed count (0 genuinely means "nothing completed yet"); when false, the
         /// normal completed count must be derived another way (the continuation-wrapper slot for V2, or the
         /// inline-resumed frames on the sync stack for V1). Exceptional completions are tracked separately (see
-        /// <see cref="ExceptionCompletionObserved"/>) because unwound frames leave the sync stack.
+        /// <see cref="ExceptionCompletionObserved(ProcessIndex, AsyncCallstackKind)"/>) because unwound frames leave the sync stack.
         /// </summary>
-        public bool MethodCompletionObserved(AsyncCallstackKind kind) =>
-            kind == AsyncCallstackKind.StateMachineAsync
-                ? _methodCompletionObservedStateMachineAsync
-                : _methodCompletionObservedRuntimeAsync;
+        public bool MethodCompletionObserved(AsyncCallstackKind kind) => MethodCompletionObserved(0, kind);
+
+        public bool MethodCompletionObserved(ProcessIndex processIndex, AsyncCallstackKind kind) =>
+            _completionAvailability.TryGetValue(processIndex, out CompletionAvailability availability) &&
+            availability.MethodObserved(kind);
 
         /// <summary>
         /// True if the trace contained any <c>Unwind</c> (exceptional completion) event for async call stacks of the
@@ -72,44 +71,33 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// from these events; <see cref="AsyncCallStack.GetExceptionCompletedFrameCount"/> should be added to the
         /// normal completed count regardless of how the latter was derived.
         /// </summary>
-        public bool ExceptionCompletionObserved(AsyncCallstackKind kind) =>
-            kind == AsyncCallstackKind.StateMachineAsync
-                ? _exceptionCompletionObservedStateMachineAsync
-                : _exceptionCompletionObservedRuntimeAsync;
+        public bool ExceptionCompletionObserved(AsyncCallstackKind kind) => ExceptionCompletionObserved(0, kind);
+
+        public bool ExceptionCompletionObserved(ProcessIndex processIndex, AsyncCallstackKind kind) =>
+            _completionAvailability.TryGetValue(processIndex, out CompletionAvailability availability) &&
+            availability.ExceptionObserved(kind);
 
         /// <summary>
         /// Records that a <c>CompleteMethod</c> (normal completion) event of the given <paramref name="kind"/> was
         /// seen in the stream. Called by <see cref="AsyncProfilerComputer"/> as it processes events. This is a
-        /// stream-level, per-kind fact (the events are keyword-gated), so it is only reliable after the whole stream
+        /// process-level, per-kind fact (the events are keyword-gated), so it is only reliable after the whole stream
         /// has been processed — do not stamp it onto individual <see cref="AsyncCallStack"/>s at close time.
         /// </summary>
-        internal void MarkMethodCompletionObserved(AsyncCallstackKind kind)
+        internal void MarkMethodCompletionObserved(ProcessIndex processIndex, AsyncCallstackKind kind)
         {
-            if (kind == AsyncCallstackKind.StateMachineAsync)
-            {
-                _methodCompletionObservedStateMachineAsync = true;
-            }
-            else
-            {
-                _methodCompletionObservedRuntimeAsync = true;
-            }
+            CompletionAvailability availability = GetCompletionAvailability(processIndex);
+            availability.MarkMethodObserved(kind);
         }
 
         /// <summary>
         /// Records that an <c>Unwind</c> (exceptional completion) event of the given <paramref name="kind"/> was seen
-        /// in the stream. Called by <see cref="AsyncProfilerComputer"/> as it processes events. Same stream-level,
-        /// per-kind semantics as <see cref="MarkMethodCompletionObserved"/>.
+        /// in the stream. Called by <see cref="AsyncProfilerComputer"/> as it processes events. Same process-level,
+        /// per-kind semantics as <see cref="MarkMethodCompletionObserved(ProcessIndex, AsyncCallstackKind)"/>.
         /// </summary>
-        internal void MarkExceptionCompletionObserved(AsyncCallstackKind kind)
+        internal void MarkExceptionCompletionObserved(ProcessIndex processIndex, AsyncCallstackKind kind)
         {
-            if (kind == AsyncCallstackKind.StateMachineAsync)
-            {
-                _exceptionCompletionObservedStateMachineAsync = true;
-            }
-            else
-            {
-                _exceptionCompletionObservedRuntimeAsync = true;
-            }
+            CompletionAvailability availability = GetCompletionAvailability(processIndex);
+            availability.MarkExceptionObserved(kind);
         }
 
         /// <summary>Resolves an interned frames handle to its frames (null if out of range).</summary>
@@ -146,15 +134,15 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             int depth, byte continuationIndexBase, byte wrapperCount, long startQpc, long endQpc,
             AsyncCallStack.CompletionDelta[] methodCompletions, AsyncCallStack.CompletionDelta[] exceptionCompletions, long[] wrapperResets)
         {
-            AsyncCallStackFramesIndex framesIndex = Intern(kind, methodIds, frameStates, thread.ProcessId, out AsyncCallStackFrames frames);
+            AsyncCallStackFramesIndex framesIndex = Intern(kind, methodIds, frameStates, thread.ProcessIndex, out AsyncCallStackFrames frames);
             var callStack = new AsyncCallStack(depth, framesIndex, frames, continuationIndexBase, wrapperCount, startQpc, endQpc, methodCompletions, exceptionCompletions, wrapperResets);
             GetOrCreate(thread).Add(callStack);
             return callStack;
         }
 
-        private AsyncCallStackFramesIndex Intern(AsyncCallstackKind kind, ulong[] methodIds, int[] frameStates, int processId, out AsyncCallStackFrames frames)
+        private AsyncCallStackFramesIndex Intern(AsyncCallstackKind kind, ulong[] methodIds, int[] frameStates, ProcessIndex processIndex, out AsyncCallStackFrames frames)
         {
-            var key = new FrameKey(kind, methodIds, frameStates);
+            var key = new FrameKey(processIndex, kind, methodIds, frameStates);
             if (_frameKeyToIndex.TryGetValue(key, out AsyncCallStackFramesIndex existing))
             {
                 frames = _internedAsyncCallStackFrames[(int)existing];
@@ -162,7 +150,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             var index = (AsyncCallStackFramesIndex)_internedAsyncCallStackFrames.Count;
-            frames = new AsyncCallStackFrames(kind, methodIds, frameStates, processId);
+            frames = new AsyncCallStackFrames(kind, methodIds, frameStates, processIndex);
             _internedAsyncCallStackFrames.Add(frames);
             _frameKeyToIndex[key] = index;
             OnFrameInterned?.Invoke(frames);
@@ -192,7 +180,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             serializer.Write(_threads.Count);
             foreach (KeyValuePair<AsyncThreadKey, ThreadCallStacks> pair in _threads)
             {
-                serializer.Write(pair.Key.ProcessId);
+                serializer.Write((int)pair.Key.ProcessIndex);
                 serializer.Write((long)pair.Key.OsThreadId);
 
                 List<AsyncCallStack> recorded = pair.Value.Recorded;
@@ -203,10 +191,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 }
             }
 
-            serializer.Write(_methodCompletionObservedRuntimeAsync);
-            serializer.Write(_methodCompletionObservedStateMachineAsync);
-            serializer.Write(_exceptionCompletionObservedRuntimeAsync);
-            serializer.Write(_exceptionCompletionObservedStateMachineAsync);
+            serializer.Write(_completionAvailability.Count);
+            foreach (KeyValuePair<ProcessIndex, CompletionAvailability> pair in _completionAvailability)
+            {
+                serializer.Write((int)pair.Key);
+                serializer.Write(pair.Value.Flags);
+            }
         }
 
         void IFastSerializable.FromStream(Deserializer deserializer)
@@ -220,6 +210,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             _internedAsyncCallStackFrames.Clear();
             _frameKeyToIndex.Clear();
             _threads.Clear();
+            _completionAvailability.Clear();
 
             int frameCount = deserializer.ReadInt();
             for (int i = 0; i < frameCount; i++)
@@ -230,9 +221,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             int threadCount = deserializer.ReadInt();
             for (int t = 0; t < threadCount; t++)
             {
-                int processId = deserializer.ReadInt();
+                ProcessIndex processIndex = (ProcessIndex)deserializer.ReadInt();
                 ulong osThreadId = (ulong)deserializer.ReadInt64();
-                ThreadCallStacks callStacks = GetOrCreate(new AsyncThreadKey(processId, osThreadId));
+                ThreadCallStacks callStacks = GetOrCreate(new AsyncThreadKey(processIndex, osThreadId));
 
                 int count = deserializer.ReadInt();
                 for (int i = 0; i < count; i++)
@@ -241,13 +232,60 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 }
             }
 
-            _methodCompletionObservedRuntimeAsync = deserializer.ReadBool();
-            _methodCompletionObservedStateMachineAsync = deserializer.ReadBool();
-            _exceptionCompletionObservedRuntimeAsync = deserializer.ReadBool();
-            _exceptionCompletionObservedStateMachineAsync = deserializer.ReadBool();
+            int processCount = deserializer.ReadInt();
+            for (int i = 0; i < processCount; i++)
+            {
+                ProcessIndex processIndex = (ProcessIndex)deserializer.ReadInt();
+                _completionAvailability[processIndex] = new CompletionAvailability(deserializer.ReadByte());
+            }
         }
 
         private AsyncCallStackFrames ResolveFrames(AsyncCallStackFramesIndex index) => _internedAsyncCallStackFrames[(int)index];
+
+        private CompletionAvailability GetCompletionAvailability(ProcessIndex processIndex)
+        {
+            if (!_completionAvailability.TryGetValue(processIndex, out CompletionAvailability availability))
+            {
+                availability = new CompletionAvailability();
+                _completionAvailability[processIndex] = availability;
+            }
+            return availability;
+        }
+
+        private sealed class CompletionAvailability
+        {
+            private const byte RuntimeMethod = 1 << 0;
+            private const byte StateMachineMethod = 1 << 1;
+            private const byte RuntimeException = 1 << 2;
+            private const byte StateMachineException = 1 << 3;
+
+            public CompletionAvailability()
+            {
+            }
+
+            public CompletionAvailability(byte flags)
+            {
+                Flags = flags;
+            }
+
+            public byte Flags { get; private set; }
+
+            public bool MethodObserved(AsyncCallstackKind kind) =>
+                (Flags & (kind == AsyncCallstackKind.StateMachineAsync ? StateMachineMethod : RuntimeMethod)) != 0;
+
+            public bool ExceptionObserved(AsyncCallstackKind kind) =>
+                (Flags & (kind == AsyncCallstackKind.StateMachineAsync ? StateMachineException : RuntimeException)) != 0;
+
+            public void MarkMethodObserved(AsyncCallstackKind kind)
+            {
+                Flags |= kind == AsyncCallstackKind.StateMachineAsync ? StateMachineMethod : RuntimeMethod;
+            }
+
+            public void MarkExceptionObserved(AsyncCallstackKind kind)
+            {
+                Flags |= kind == AsyncCallstackKind.StateMachineAsync ? StateMachineException : RuntimeException;
+            }
+        }
 
         /// <summary>Per-thread recorded async call stacks plus a lazily-built interval index for stabbing queries.</summary>
         private sealed class ThreadCallStacks
@@ -329,18 +367,20 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         private readonly struct FrameKey : IEquatable<FrameKey>
         {
+            private readonly ProcessIndex _processIndex;
             private readonly AsyncCallstackKind _kind;
             private readonly ulong[] _methodIds;
             private readonly int[] _frameStates;
             private readonly int _hash;
 
-            public FrameKey(AsyncCallstackKind kind, ulong[] methodIds, int[] frameStates)
+            public FrameKey(ProcessIndex processIndex, AsyncCallstackKind kind, ulong[] methodIds, int[] frameStates)
             {
+                _processIndex = processIndex;
                 _kind = kind;
                 _methodIds = methodIds;
                 _frameStates = frameStates;
 
-                int hash = (int)kind;
+                int hash = ((int)processIndex * 31) + (int)kind;
                 unchecked
                 {
                     for (int i = 0; i < methodIds.Length; i++)
@@ -360,7 +400,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
             public bool Equals(FrameKey other)
             {
-                if (_kind != other._kind || _hash != other._hash || _methodIds.Length != other._methodIds.Length)
+                if (_processIndex != other._processIndex || _kind != other._kind || _hash != other._hash || _methodIds.Length != other._methodIds.Length)
                 {
                     return false;
                 }

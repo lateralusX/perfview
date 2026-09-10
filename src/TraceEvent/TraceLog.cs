@@ -2153,7 +2153,9 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
             // the file's event timestamps, so no conversion is needed (the metadata qpcSync/utcSync is only
             // for correlating with events from a different file).
             var asyncProfilerParser = new AsyncProfilerTraceEventParser(rawEvents);
-            var asyncProfilerComputer = new AsyncProfilerComputer(asyncProfilerParser);
+            var asyncProfilerComputer = new AsyncProfilerComputer(
+                asyncProfilerParser,
+                data => Processes.GetOrCreateProcess(data.ProcessID, data.TimeStampQPC).ProcessIndex);
 
             // Symbolize the async call stack frames incrementally, driven by the frames actually present (not the total
             // method count). Each frame stores only a CodeAddressIndex, pointing into TraceLog's already-persisted
@@ -2165,24 +2167,24 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
             // call stacks still live at capture end via Finish()) then just reuses the remembered index, so drained
             // frames stay resolved. A StateMachine frame's state selects a resume IP within the same method (not a
             // different method name) and is preserved per frame separately, so keying by methodId (the body IP) is right.
-            var asyncFrameCodeAddressByMethodId = new Dictionary<(int ProcessId, ulong MethodId), CodeAddressIndex>();
+            var asyncFrameCodeAddressByMethodId = new Dictionary<(ProcessIndex ProcessIndex, ulong MethodId), CodeAddressIndex>();
 
             // Registers (once) and remembers the resolved code address for a frame identity (its methodId == a code IP),
             // keyed so a later intern reuses it even after rundown removed the raw address from the address->index map.
-            Func<int, ulong, CodeAddressIndex> rememberAsyncFrameCodeAddress = delegate (int processId, ulong methodId)
+            Func<ProcessIndex, ulong, CodeAddressIndex> rememberAsyncFrameCodeAddress = delegate (ProcessIndex processIndex, ulong methodId)
             {
                 if (methodId == 0)
                 {
                     return CodeAddressIndex.Invalid;
                 }
 
-                if (!asyncFrameCodeAddressByMethodId.TryGetValue((processId, methodId), out CodeAddressIndex codeAddress))
+                if (!asyncFrameCodeAddressByMethodId.TryGetValue((processIndex, methodId), out CodeAddressIndex codeAddress))
                 {
-                    TraceProcess process = Processes.LastProcessWithID(processId);
+                    TraceProcess process = Processes[processIndex];
                     codeAddress = process != null ? codeAddresses.GetOrCreateCodeAddressIndex(process, methodId) : CodeAddressIndex.Invalid;
                     if (codeAddress != CodeAddressIndex.Invalid)
                     {
-                        asyncFrameCodeAddressByMethodId[(processId, methodId)] = codeAddress;
+                        asyncFrameCodeAddressByMethodId[(processIndex, methodId)] = codeAddress;
                     }
                 }
 
@@ -2193,7 +2195,7 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
             {
                 for (int i = 0; i < frames.FrameCount; i++)
                 {
-                    CodeAddressIndex codeAddress = rememberAsyncFrameCodeAddress(frames.ProcessId, frames.MethodIdAt(i));
+                    CodeAddressIndex codeAddress = rememberAsyncFrameCodeAddress(frames.ProcessIndex, frames.MethodIdAt(i));
                     if (codeAddress != CodeAddressIndex.Invalid)
                     {
                         frames.SetCodeAddressAt(i, codeAddress);
@@ -2201,12 +2203,12 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
                 }
             };
 
-            asyncProfilerComputer.OnFrameObserved = delegate (int processId, ulong methodId, AsyncCallstackKind kind)
+            asyncProfilerComputer.OnFrameObserved = delegate (ProcessIndex processIndex, ulong methodId, AsyncCallstackKind kind)
             {
                 // Register a frame's code address as soon as it is seen in the event stream, so a covering method load /
                 // rundown / ProcessSymbol binds it BEFORE interning - which for async call stacks still live at capture
                 // end happens only at Finish().
-                rememberAsyncFrameCodeAddress(processId, methodId);
+                rememberAsyncFrameCodeAddress(processIndex, methodId);
             };
 
             // Fix up MemInfoWS records so that we get one per process rather than one per machine
@@ -4291,7 +4293,7 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
             }
 
             TraceThread traceThread = Threads[threadIndex];
-            var key = new AsyncThreadKey(traceThread.Process.ProcessID, (ulong)traceThread.ThreadID);
+            var key = new AsyncThreadKey(traceThread.Process.ProcessIndex, (ulong)traceThread.ThreadID);
             return index.GetAsyncCallStacks(key, timeQPC);
         }
 
@@ -4327,7 +4329,13 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
                 return Array.Empty<AsyncCallStack>();
             }
 
-            return index.GetAsyncCallStacks(new AsyncThreadKey(processId, osThreadId), timeQPC);
+            TraceProcess process = Processes.GetProcess(processId, timeQPC);
+            if (process == null)
+            {
+                return Array.Empty<AsyncCallStack>();
+            }
+
+            return index.GetAsyncCallStacks(new AsyncThreadKey(process.ProcessIndex, osThreadId), timeQPC);
         }
 
         /// <summary>

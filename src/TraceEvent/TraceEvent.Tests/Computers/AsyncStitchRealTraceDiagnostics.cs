@@ -67,7 +67,7 @@ namespace TraceEventTests
                     int totalSegments = 0, openSegments = 0;
                     foreach (AsyncThreadKey key in index.Threads)
                     {
-                        keySet.Add((key.ProcessId, key.OsThreadId));
+                        keySet.Add(((int)key.ProcessIndex, key.OsThreadId));
                         IReadOnlyList<AsyncCallStack> segs = index.GetAsyncCallStacks(key);
                         totalSegments += segs.Count;
                         foreach (AsyncCallStack s in segs)
@@ -86,7 +86,7 @@ namespace TraceEventTests
                         long mn = segs.Count > 0 ? segs.Min(s => s.StartQpc) : 0;
                         long mx = segs.Count > 0 ? segs.Max(s => s.EndQpc == long.MaxValue ? s.StartQpc : s.EndQpc) : 0;
                         int open = segs.Count(s => s.EndQpc == long.MaxValue);
-                        sb.AppendLine($"  pid={key.ProcessId} tid={key.OsThreadId} segs={segs.Count} open={open} qpc[{mn}..{mx}]");
+                        sb.AppendLine($"  processIndex={key.ProcessIndex} tid={key.OsThreadId} segs={segs.Count} open={open} qpc[{mn}..{mx}]");
                     }
 
                     // ---- Iterate CPU samples exactly like the computer (SampleProfilerTraceEventParser.ThreadSample). ----
@@ -104,7 +104,7 @@ namespace TraceEventTests
                     var tHasOpen = new Dictionary<(int, ulong), bool>();
                     foreach (AsyncThreadKey key in index.Threads)
                     {
-                        var k = (key.ProcessId, key.OsThreadId);
+                        var k = ((int)key.ProcessIndex, key.OsThreadId);
                         IReadOnlyList<AsyncCallStack> segs2 = index.GetAsyncCallStacks(key);
                         tMinStart[k] = segs2.Count > 0 ? segs2.Min(s => s.StartQpc) : 0;
                         tMaxClosedEnd[k] = segs2.Where(s => s.EndQpc != long.MaxValue).Select(s => s.EndQpc).DefaultIfEmpty(long.MinValue).Max();
@@ -138,7 +138,8 @@ namespace TraceEventTests
                         if (qpc < smpMinQpc) smpMinQpc = qpc;
                         if (qpc > smpMaxQpc) smpMaxQpc = qpc;
 
-                        var tkey = (data.ProcessID, (ulong)data.ThreadID);
+                        TraceProcess sampleProcess = traceLog.Processes.GetProcess(data.ProcessID, data.TimeStampRelativeMSec);
+                        var tkey = ((int)sampleProcess.ProcessIndex, (ulong)data.ThreadID);
                         sampleTids.Add(tkey);
                         bool threadInIndex = keySet.Contains(tkey);
                         if (threadInIndex) onAsyncThread++;
@@ -174,7 +175,8 @@ namespace TraceEventTests
 
                             // Run the REAL stitcher and measure how many async-ancestry frames it actually splices.
                             List<StitchSyncFrame> sync = MaterializeSync(data.CallStackIndex(), callStacks, codeAddresses);
-                            StitchResult result = AsyncCpuStackStitcher.Stitch(sync, segs, qpc, boundaries, index, methodOf, false);
+                            StitchResult result = AsyncCpuStackStitcher.Stitch(sync, segs, qpc, boundaries, index,
+                                sampleProcess.ProcessIndex, methodOf, false);
                             int asyncFrames = result.Frames.Count(f => f.Origin == StitchedFrameOrigin.AsyncRemaining);
                             if (asyncFrames > 0) stitchWithAncestry++;
                             else stitchNoAncestry++;
@@ -182,7 +184,7 @@ namespace TraceEventTests
                             if (asyncFrames == 0 && stitchExamples.Count < 15)
                             {
                                 AsyncCallStack leaf = segs[segs.Count - 1]; // depth-ascending -> last is innermost
-                                bool compObs = index.MethodCompletionObserved(leaf.Frames.Kind);
+                                bool compObs = index.MethodCompletionObserved(sampleProcess.ProcessIndex, leaf.Frames.Kind);
                                 int completedByEvents = leaf.GetCompletedFrameCount(qpc);
                                 int wrapReset = leaf.GetWrapperResetCount(qpc);
                                 var g = new StringBuilder();
