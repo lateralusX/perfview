@@ -187,6 +187,31 @@ namespace TraceEventTests
         }
 
         [Fact]
+        public void EmptySegment_PreservesPhysicalSyncBoundaries()
+        {
+            var s = new Scenario();
+            AsyncCallStack empty = s.Segment(
+                AsyncCallstackKind.RuntimeAsync,
+                frameCodeAddrs: Array.Empty<int>(),
+                frameMethods: Array.Empty<int>());
+            var sync = new[]
+            {
+                s.Sync(70, 50),
+                s.Boundary(71, Wrapper(0)),
+                s.Boundary(72, DispatchContinuation),
+                s.Sync(73, 98),
+            };
+
+            StitchResult result = s.Run(sync, new[] { empty });
+
+            Assert.Equal(4, result.Frames.Count);
+            Assert.All(result.Frames, frame => Assert.Equal(StitchedFrameOrigin.Sync, frame.Origin));
+            Assert.Equal(new[] { Scenario.CA(70), Scenario.CA(71), Scenario.CA(72), Scenario.CA(73) },
+                result.Frames.Select(frame => frame.CodeAddress));
+            Assert.Equal(0, result.Diagnostics.SegmentsProcessed);
+        }
+
+        [Fact]
         public void V2_CompletionEvents_SplicesRemainingAncestryAndKeepsCurrentFromSync()
         {
             // Segment (leaf-first): [C0, C1, Mcur, A1, A2]; completed=2 -> current=Mcur (frames[2]); ancestry=A1,A2.
@@ -674,4 +699,3 @@ namespace TraceEventTests
         }
     }
 }
-

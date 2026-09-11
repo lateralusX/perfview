@@ -515,13 +515,29 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 return;
             }
 
+            bool accepted;
             if (IsResumeCallstack(e.EventId))
             {
                 state.Push(new AsyncCallStackBuilder(e, CurrentProcess.WrapperCount));
+                accepted = true;
             }
             else if (IsAppendCallstack(e.EventId))
             {
-                state.Top?.AddFrames(e);
+                AsyncCallStackBuilder top = state.Top;
+                accepted = top != null && top.Kind == e.Kind && top.DispatcherId == e.DispatcherId;
+                if (accepted)
+                {
+                    top.AddFrames(e);
+                }
+            }
+            else
+            {
+                accepted = false;
+            }
+
+            if (!accepted)
+            {
+                return;
             }
 
             // Pre-register each frame's code address now (during the event stream, before end-of-trace rundown),
@@ -542,16 +558,33 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         void IAsyncProfilerSubEventSink.OnMethodComplete(in AsyncMethodEvent e)
         {
+            AsyncThreadKey key = ThreadKeyOf(e.OsThreadId);
+            AsyncCallStacks state = GetOrCreate(key);
+            if (!state.Armed)
+            {
+                return;
+            }
+
             AsyncCallstackKind kind = e.IsStateMachine ? AsyncCallstackKind.StateMachineAsync : AsyncCallstackKind.RuntimeAsync;
             _index.MarkMethodCompletionObserved(_currentProcessIndex, kind);
-            AddMethodCompletion(ThreadKeyOf(e.OsThreadId), e.TimestampQpc);
+            state.Top?.MethodCompletions.Add(new AsyncCallStack.CompletionDelta(e.TimestampQpc, 1));
         }
 
         void IAsyncProfilerSubEventSink.OnException(in AsyncUnwindEvent e)
         {
+            AsyncThreadKey key = ThreadKeyOf(e.OsThreadId);
+            AsyncCallStacks state = GetOrCreate(key);
+            if (!state.Armed)
+            {
+                return;
+            }
+
             AsyncCallstackKind kind = e.IsStateMachine ? AsyncCallstackKind.StateMachineAsync : AsyncCallstackKind.RuntimeAsync;
             _index.MarkExceptionCompletionObserved(_currentProcessIndex, kind);
-            AddExceptionCompletion(ThreadKeyOf(e.OsThreadId), e.TimestampQpc, (int)e.UnwoundFrameCount);
+            if (e.UnwoundFrameCount > 0)
+            {
+                state.Top?.ExceptionCompletions.Add(new AsyncCallStack.CompletionDelta(e.TimestampQpc, (int)e.UnwoundFrameCount));
+            }
         }
 
         void IAsyncProfilerSubEventSink.OnResetThreadContext(in AsyncNeutralEvent e)
@@ -653,24 +686,6 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 _threads[key] = state;
             }
             return state;
-        }
-
-        private void AddMethodCompletion(AsyncThreadKey key, long qpc)
-        {
-            AsyncCallStacks state = GetOrCreate(key);
-            if (state.Armed)
-            {
-                state.Top?.MethodCompletions.Add(new AsyncCallStack.CompletionDelta(qpc, 1));
-            }
-        }
-
-        private void AddExceptionCompletion(AsyncThreadKey key, long qpc, int unwoundFrameCount)
-        {
-            AsyncCallStacks state = GetOrCreate(key);
-            if (state.Armed && unwoundFrameCount > 0)
-            {
-                state.Top?.ExceptionCompletions.Add(new AsyncCallStack.CompletionDelta(qpc, unwoundFrameCount));
-            }
         }
 
         private void CloseTop(AsyncThreadKey key, long qpc)

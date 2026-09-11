@@ -229,11 +229,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             var diagnostics = new StitchDiagnostics();
             var output = new List<StitchedFrame>(syncLeafToRoot.Count + 8);
 
-            // No async segment covers this sample: there is no suspended ancestry to splice, so the stitched stack is
-            // simply the sync stack, emitted verbatim. Nothing is dropped or collapsed - keeping the native frames
-            // as-is (including any continuation-wrapper / dispatch machinery) makes the coverage gaps plainly visible
-            // rather than hiding them behind synthetic edits.
-            if (segmentsRootToLeaf is null || segmentsRootToLeaf.Count == 0)
+            // With no segment there is no suspended ancestry to splice. An empty segment is also unusable: it may
+            // identify an active async context, but it has no current frame with which to align a physical boundary.
+            // In either case emit the sync stack verbatim so no continuation-wrapper or dispatcher frame is removed
+            // without logical ancestry to replace it.
+            if (segmentsRootToLeaf is null || segmentsRootToLeaf.Count == 0 || HasEmptySegment(segmentsRootToLeaf))
             {
                 for (int i = 0; i < syncLeafToRoot.Count; i++)
                 {
@@ -374,6 +374,18 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 leafToRoot[i] = rootToLeaf[rootToLeaf.Count - 1 - i];
             }
             return leafToRoot;
+        }
+
+        private static bool HasEmptySegment(IReadOnlyList<AsyncCallStack> segments)
+        {
+            for (int i = 0; i < segments.Count; i++)
+            {
+                if (segments[i].Frames.FrameCount == 0)
+                {
+                    return true;
+                }
+            }
+            return false;
         }
 
         /// <summary>

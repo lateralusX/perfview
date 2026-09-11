@@ -64,6 +64,9 @@ namespace TraceEventTests
 
         public static AsyncProfilerBufferBuilder CompleteRuntimeMethod(this AsyncProfilerBufferBuilder b, long ts) =>
             b.Method(AsyncEventID.CompleteRuntimeAsyncMethod, ts);
+
+        public static AsyncProfilerBufferBuilder UnwindRuntimeException(this AsyncProfilerBufferBuilder b, long ts, uint frames) =>
+            b.Unwind(AsyncEventID.UnwindRuntimeAsyncException, ts, frames);
     }
 
     /// <summary>
@@ -549,6 +552,43 @@ namespace TraceEventTests
             Assert.False(v1.Index.MethodCompletionObserved(AsyncCallstackKind.StateMachineAsync));
             Assert.False(v1.Index.ExceptionCompletionObserved(AsyncCallstackKind.RuntimeAsync));
             Assert.False(v1.Index.MethodCompletionObserved(AsyncCallstackKind.RuntimeAsync));
+        }
+
+        [Fact]
+        public void CompletionEventsBeforeArming_DoNotSetCompletionAvailability()
+        {
+            var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
+                .CompleteMethod(Start)
+                .UnwindException(Start + 1, frames: 1)
+                .CompleteRuntimeMethod(Start + 2)
+                .UnwindRuntimeException(Start + 3, frames: 1)
+                .Metadata(Start + 10, qpcFrequency: 10_000_000, qpcSync: 1, utcSync: 1, eventBufferSize: 0, wrapperCount: 32, new AsyncManifestEntry[0])
+                .CompleteMethod(Start + 11)
+                .UnwindException(Start + 12, frames: 1)
+                .CompleteRuntimeMethod(Start + 13)
+                .UnwindRuntimeException(Start + 14, frames: 1)
+                .Reset(Start + 20)
+                .ResumeStack(Start + 30, dispatcher: 1, new ulong[] { 0xA })
+                .Suspend(Start + 40));
+
+            Assert.False(computer.Index.MethodCompletionObserved(AsyncCallstackKind.StateMachineAsync));
+            Assert.False(computer.Index.ExceptionCompletionObserved(AsyncCallstackKind.StateMachineAsync));
+            Assert.False(computer.Index.MethodCompletionObserved(AsyncCallstackKind.RuntimeAsync));
+            Assert.False(computer.Index.ExceptionCompletionObserved(AsyncCallstackKind.RuntimeAsync));
+        }
+
+        [Fact]
+        public void AppendWithDifferentDispatcher_DoesNotMutateCurrentActivation()
+        {
+            var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
+                .Armed(Start)
+                .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA })
+                .AppendStack(Start + 15, dispatcher: 2, new ulong[] { 0xB })
+                .Suspend(Start + 20));
+
+            AsyncCallStack stack = Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 18));
+            Assert.Equal(1, stack.Frames.FrameCount);
+            Assert.Equal(0xAUL, stack.Frames.MethodIdAt(0));
         }
 
         [Fact]
