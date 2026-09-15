@@ -66,9 +66,16 @@ namespace TraceEventTests
         // V1 dispatcher (non-merged/standalone wrapper) -- recognized type-qualified
         [InlineData("System.Private.CoreLib!System.Runtime.CompilerServices.AsyncStateMachineDispatcher.MoveNext()", AsyncStitchBoundaryKind.V1Dispatcher, -1)]
         [InlineData("System.Runtime.CompilerServices.AsyncStateMachineDispatcher.MoveNext", AsyncStitchBoundaryKind.V1Dispatcher, -1)] // no module
+        // V1 dispatcher infrastructure (type-family based, not method-name based)
+        [InlineData("System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder+AsyncStateMachineBox`1.MoveNext()", AsyncStitchBoundaryKind.V1DispatcherInfrastructure, -1)]
+        [InlineData("System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder+AsyncProfilerAsyncStateMachineBox`1.InstrumentedMoveNext()", AsyncStitchBoundaryKind.V1DispatcherInfrastructure, -1)]
+        [InlineData("System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder+ProfilerAsyncStateMachineBox`1.ExecuteDirectly()", AsyncStitchBoundaryKind.V1DispatcherInfrastructure, -1)]
+        [InlineData("System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder+DebugFinalizableAsyncStateMachineBox`1.MoveNext()", AsyncStitchBoundaryKind.V1DispatcherInfrastructure, -1)]
+        [InlineData("System.Private.CoreLib!System.Runtime.CompilerServices.AsyncStateMachineDispatcher.ExecuteDirectly()", AsyncStitchBoundaryKind.V1DispatcherInfrastructure, -1)]
         // Not a boundary
         [InlineData("System.Private.CoreLib!System.Threading.Tasks.Task.RunContinuations(System.Object)", AsyncStitchBoundaryKind.None, -1)]
         [InlineData("MyApp!MyApp.Program.MoveNext()", AsyncStitchBoundaryKind.None, -1)]
+        [InlineData("MyApp!MyApp.AsyncStateMachineBox`1.MoveNext()", AsyncStitchBoundaryKind.None, -1)]
         // A bare "MoveNext" (or on any other type) must NOT be mistaken for the non-merged dispatcher.
         [InlineData("System.Private.CoreLib!Some.Other.StateMachineBox`1.MoveNext()", AsyncStitchBoundaryKind.None, -1)]
         [InlineData("MoveNext", AsyncStitchBoundaryKind.None, -1)]
@@ -91,6 +98,7 @@ namespace TraceEventTests
             Assert.Equal("InstrumentedDispatchContinuations", AsyncStitchBoundary.InstrumentedDispatchContinuationsName);
             Assert.Equal("MoveNextAsDispatcher", AsyncStitchBoundary.MoveNextAsDispatcherName);
             Assert.Equal("AsyncStateMachineDispatcher", AsyncStitchBoundary.AsyncStateMachineDispatcherTypeName);
+            Assert.Equal("AsyncStateMachineBox", AsyncStitchBoundary.AsyncStateMachineBoxTypeSuffix);
             Assert.Equal("MoveNext", AsyncStitchBoundary.AsyncStateMachineDispatcherMethodName);
             Assert.Equal("System.Private.CoreLib", AsyncStitchBoundary.HostModuleName);
         }

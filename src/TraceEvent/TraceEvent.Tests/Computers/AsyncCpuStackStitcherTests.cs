@@ -99,6 +99,8 @@ namespace TraceEventTests
         private static AsyncStitchBoundaryInfo Wrapper(int index) => new AsyncStitchBoundaryInfo(AsyncStitchBoundaryKind.V2ContinuationWrapper, index);
         private static readonly AsyncStitchBoundaryInfo DispatchContinuation = new AsyncStitchBoundaryInfo(AsyncStitchBoundaryKind.V2DispatchContinuation, -1);
         private static readonly AsyncStitchBoundaryInfo V1Dispatcher = new AsyncStitchBoundaryInfo(AsyncStitchBoundaryKind.V1Dispatcher, -1);
+        private static readonly AsyncStitchBoundaryInfo V1Infrastructure =
+            new AsyncStitchBoundaryInfo(AsyncStitchBoundaryKind.V1DispatcherInfrastructure, -1);
 
         private static AsyncCallStack.CompletionDelta[] Completed(int count) =>
             new[] { new AsyncCallStack.CompletionDelta(Qpc, count) };
@@ -320,15 +322,42 @@ namespace TraceEventTests
 
             StitchResult result = s.Run(sync, new[] { seg });
 
-            // Expected: [A(Sync), B(Sync), C(Sync), P1(Async), root(Sync)].
-            Assert.Equal(5, result.Frames.Count);
-            Assert.Equal(new[] { Scenario.CA(40), Scenario.CA(41), Scenario.CA(42) }, result.Frames.Take(3).Select(f => f.CodeAddress));
-            Assert.All(result.Frames.Take(3), f => Assert.Equal(StitchedFrameOrigin.Sync, f.Origin));
-            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[3].Origin);
-            Assert.Equal(Scenario.CA(503), result.Frames[3].CodeAddress); // P1 ancestry
-            Assert.Equal(Scenario.CA(44), result.Frames[4].CodeAddress);  // root
+            // Expected: [A(AsyncCurrent), P1(Async), root(Sync)]. Completed B/C and their physical
+            // transition chain are replaced by the logical ancestry.
+            Assert.Equal(3, result.Frames.Count);
+            Assert.Equal(StitchedFrameOrigin.AsyncCurrent, result.Frames[0].Origin);
+            Assert.Equal(Scenario.CA(40), result.Frames[0].CodeAddress);
+            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
+            Assert.Equal(Scenario.CA(503), result.Frames[1].CodeAddress); // P1 ancestry
+            Assert.Equal(Scenario.CA(44), result.Frames[2].CodeAddress);  // root
             Assert.Equal(1, result.Diagnostics.V1InlineFallbackUsed);
             Assert.Equal(0, result.Diagnostics.BoundariesNotFound);
+        }
+
+        [Fact]
+        public void V1_CollapsesContiguousBoxInfrastructureRootwardOfDispatcher()
+        {
+            var s = new Scenario();
+            AsyncCallStack seg = s.Segment(AsyncCallstackKind.StateMachineAsync,
+                frameCodeAddrs: new[] { 500, 501 }, frameMethods: new[] { 30, 31 });
+
+            var sync = new[]
+            {
+                s.Sync(40, 30),
+                s.Boundary(41, V1Dispatcher),
+                s.Boundary(42, V1Infrastructure),
+                s.Boundary(43, V1Infrastructure),
+                s.Sync(44, 90), // first non-box frame: preserve and stop collapsing
+                s.Sync(45, 91),
+            };
+
+            StitchResult result = s.Run(sync, new[] { seg });
+
+            Assert.Equal(new[] { Scenario.CA(40), Scenario.CA(501), Scenario.CA(44), Scenario.CA(45) },
+                result.Frames.Select(frame => frame.CodeAddress));
+            Assert.Equal(StitchedFrameOrigin.AsyncCurrent, result.Frames[0].Origin);
+            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
+            Assert.Equal(2, result.Diagnostics.V1InfrastructureFramesCollapsed);
         }
 
         [Fact]
@@ -417,13 +446,71 @@ namespace TraceEventTests
 
             StitchResult result = s.Run(sync, new[] { seg });
 
-            // Expected: [A(Sync), C(Sync), P1(Async), root(Sync)]. completed=2 (1 inline + 1 unwind).
-            Assert.Equal(4, result.Frames.Count);
+            // Expected: [A(AsyncCurrent), P1(Async), root(Sync)]. C completed inline and B unwound, so both
+            // physical transition frames are replaced by the logical ancestry.
+            Assert.Equal(3, result.Frames.Count);
+            Assert.Equal(StitchedFrameOrigin.AsyncCurrent, result.Frames[0].Origin);
             Assert.Equal(Scenario.CA(40), result.Frames[0].CodeAddress);
-            Assert.Equal(Scenario.CA(42), result.Frames[1].CodeAddress);
-            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[2].Origin);
-            Assert.Equal(Scenario.CA(503), result.Frames[2].CodeAddress); // P1 ancestry
-            Assert.Equal(Scenario.CA(44), result.Frames[3].CodeAddress);
+            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
+            Assert.Equal(Scenario.CA(503), result.Frames[1].CodeAddress); // P1 ancestry
+            Assert.Equal(Scenario.CA(44), result.Frames[2].CodeAddress);
+            Assert.Equal(1, result.Diagnostics.V1InlineFallbackUsed);
+        }
+
+        [Fact]
+        public void V1_ExceptionBeforeInlineCompletion_AlignsPastUnwoundFrame()
+        {
+            // A unwound first, then B completed inline while C became current. The physical stack contains B/C
+            // but not A, so the matcher must use the one exception as a bounded missing async frame before it can
+            // match B and C in order.
+            var s = new Scenario();
+            AsyncCallStack seg = s.Segment(AsyncCallstackKind.StateMachineAsync,
+                frameCodeAddrs: new[] { 500, 501, 502, 503 }, // A(unwound), B(completed), C(current), P
+                frameMethods: new[] { 30, 31, 32, 33 },
+                exceptionCompletions: Unwound(1));
+
+            var sync = new[]
+            {
+                s.Sync(40, 32),                  // C current
+                s.Sync(41, 31),                  // B completed inline
+                s.Boundary(42, V1Dispatcher),
+                s.Sync(43, 99),
+            };
+
+            StitchResult result = s.Run(sync, new[] { seg });
+
+            Assert.Equal(new[] { Scenario.CA(40), Scenario.CA(503), Scenario.CA(43) },
+                result.Frames.Select(frame => frame.CodeAddress));
+            Assert.Equal(StitchedFrameOrigin.AsyncCurrent, result.Frames[0].Origin);
+            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
+            Assert.Equal(1, result.Diagnostics.V1InlineFallbackUsed);
+        }
+
+        [Fact]
+        public void V1_UnresolvedExceptionBeforeInlineCompletion_AlignsPastUnwoundFrame()
+        {
+            // The exceptionally unwound frame has no code-address identity. Its Unwind event still proves that one
+            // leading async frame may be skipped before matching the normally completed B and current C frames.
+            var s = new Scenario();
+            AsyncCallStack seg = s.Segment(AsyncCallstackKind.StateMachineAsync,
+                frameCodeAddrs: new[] { -1, 501, 502, 503 }, // A(unresolved/unwound), B(completed), C(current), P
+                frameMethods: new[] { 0, 31, 32, 33 },
+                exceptionCompletions: Unwound(1));
+
+            var sync = new[]
+            {
+                s.Sync(40, 32),                  // C current
+                s.Sync(41, 31),                  // B completed inline
+                s.Boundary(42, V1Dispatcher),
+                s.Sync(43, 99),
+            };
+
+            StitchResult result = s.Run(sync, new[] { seg });
+
+            Assert.Equal(new[] { Scenario.CA(40), Scenario.CA(503), Scenario.CA(43) },
+                result.Frames.Select(frame => frame.CodeAddress));
+            Assert.Equal(StitchedFrameOrigin.AsyncCurrent, result.Frames[0].Origin);
+            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
             Assert.Equal(1, result.Diagnostics.V1InlineFallbackUsed);
         }
 
@@ -544,6 +631,185 @@ namespace TraceEventTests
             Assert.Equal(Scenario.CA(801), result.Frames[3].CodeAddress);
             Assert.Equal(Scenario.CA(54), result.Frames[4].CodeAddress);
             Assert.Equal(2, result.Diagnostics.SegmentsProcessed);
+            Assert.Equal(0, result.Diagnostics.BoundariesNotFound);
+        }
+
+        [Fact]
+        public void MixedV1AndV2Segments_PreserveSynchronousAndNativeBridge()
+        {
+            var s = new Scenario();
+            s.MarkMethodCompletionObserved(AsyncCallstackKind.RuntimeAsync);
+            AsyncCallStack outer = s.Segment(AsyncCallstackKind.RuntimeAsync,
+                frameCodeAddrs: new[] { 800, 801 }, frameMethods: new[] { 20, 21 }, completions: Completed(0));
+            AsyncCallStack inner = s.Segment(AsyncCallstackKind.StateMachineAsync,
+                frameCodeAddrs: new[] { 500, 501 }, frameMethods: new[] { 10, 11 });
+
+            var sync = new[]
+            {
+                s.Sync(50, 90),                       // synchronous work inside the inner V1 method
+                s.Sync(51, 10),                       // inner V1 current
+                s.Sync(52, 91),                       // AsyncStateMachineBox.ExecutionContextCallback
+                s.Sync(53, 92),                       // ExecutionContext.RunInternal
+                s.Sync(54, 93),                       // AsyncStateMachineBox.MoveNext(Thread,Flags)
+                s.Boundary(55, V1Dispatcher),         // MoveNextAsDispatcher
+                s.Boundary(56, V1Infrastructure),     // known V1 box infrastructure
+                s.Boundary(57, V1Infrastructure),     // known V1 box infrastructure
+                s.Sync(58, 94),                       // unclassified scheduling frame: collapse stops
+                s.Sync(59, 95),                       // native bridge frame
+                s.Sync(60, 96),                       // synchronous bridge frame
+                s.Sync(61, 20),                       // outer V2 current
+                s.Boundary(62, Wrapper(0)),
+                s.Boundary(63, DispatchContinuation),
+                s.Boundary(64, DispatchContinuation),
+                s.Sync(65, 97),                       // ThreadPool dispatch anchor
+                s.Sync(66, 98),                       // thread root
+            };
+
+            // Index order is outer/root -> inner/leaf.
+            StitchResult result = s.Run(sync, new[] { outer, inner });
+
+            Assert.Equal(10, result.Frames.Count);
+            Assert.Equal(new[]
+            {
+                Scenario.CA(50), Scenario.CA(51), Scenario.CA(501),
+                Scenario.CA(58), Scenario.CA(59), Scenario.CA(60), Scenario.CA(61), Scenario.CA(801),
+                Scenario.CA(65), Scenario.CA(66),
+            }, result.Frames.Select(frame => frame.CodeAddress));
+            Assert.Equal(StitchedFrameOrigin.AsyncCurrent, result.Frames[1].Origin);
+            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[2].Origin);
+            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[7].Origin);
+            Assert.Equal(2, result.Diagnostics.SegmentsProcessed);
+            Assert.Equal(2, result.Diagnostics.V2PlumbingFramesCollapsed);
+            Assert.Equal(2, result.Diagnostics.V1InfrastructureFramesCollapsed);
+            Assert.Equal(1, result.Diagnostics.V1InlineFallbackUsed);
+            Assert.Equal(0, result.Diagnostics.BoundariesNotFound);
+        }
+
+        [Fact]
+        public void MixedV2InnerAndV1Outer_PreservesUnclassifiedBridge()
+        {
+            var s = new Scenario();
+            AsyncCallStack outer = s.Segment(AsyncCallstackKind.StateMachineAsync,
+                frameCodeAddrs: new[] { 800, 801 }, frameMethods: new[] { 20, 21 });
+            AsyncCallStack inner = s.Segment(AsyncCallstackKind.RuntimeAsync,
+                frameCodeAddrs: new[] { 700, 701 }, frameMethods: new[] { 10, 11 });
+
+            var sync = new[]
+            {
+                s.Sync(50, 90),
+                s.Sync(51, 10),
+                s.Boundary(52, Wrapper(0)),
+                s.Boundary(53, DispatchContinuation),
+                s.Boundary(54, DispatchContinuation),
+                s.Sync(55, 91),                       // unclassified scheduling frame
+                s.Sync(56, 92),                       // native bridge
+                s.Sync(57, 93),                       // synchronous bridge
+                s.Sync(58, 20),
+                s.Sync(59, 94),                       // V1 leaf transition
+                s.Boundary(60, V1Dispatcher),
+                s.Boundary(61, V1Infrastructure),
+                s.Sync(62, 95),
+                s.Sync(63, 96),
+            };
+
+            StitchResult result = s.Run(sync, new[] { outer, inner });
+
+            Assert.Equal(new[]
+            {
+                Scenario.CA(50), Scenario.CA(51), Scenario.CA(701),
+                Scenario.CA(55), Scenario.CA(56), Scenario.CA(57),
+                Scenario.CA(58), Scenario.CA(801), Scenario.CA(62), Scenario.CA(63),
+            }, result.Frames.Select(frame => frame.CodeAddress));
+            Assert.Equal(2, result.Diagnostics.V2PlumbingFramesCollapsed);
+            Assert.Equal(1, result.Diagnostics.V1InfrastructureFramesCollapsed);
+            Assert.Equal(1, result.Diagnostics.V1InlineFallbackUsed);
+            Assert.Equal(0, result.Diagnostics.BoundariesNotFound);
+        }
+
+        [Fact]
+        public void NestedV1Segments_PreserveUnclassifiedBridge()
+        {
+            var s = new Scenario();
+            AsyncCallStack outer = s.Segment(AsyncCallstackKind.StateMachineAsync,
+                frameCodeAddrs: new[] { 800, 801 }, frameMethods: new[] { 20, 21 });
+            AsyncCallStack inner = s.Segment(AsyncCallstackKind.StateMachineAsync,
+                frameCodeAddrs: new[] { 500, 501 }, frameMethods: new[] { 10, 11 });
+
+            var sync = new[]
+            {
+                s.Sync(50, 90),
+                s.Sync(51, 10),
+                s.Sync(52, 91),
+                s.Boundary(53, V1Dispatcher),
+                s.Boundary(54, V1Infrastructure),
+                s.Sync(55, 92),                       // unclassified scheduling frame
+                s.Sync(56, 93),                       // native/synchronous bridge
+                s.Sync(57, 20),
+                s.Sync(58, 94),
+                s.Boundary(59, V1Dispatcher),
+                s.Boundary(60, V1Infrastructure),
+                s.Sync(61, 95),
+                s.Sync(62, 96),
+            };
+
+            StitchResult result = s.Run(sync, new[] { outer, inner });
+
+            Assert.Equal(new[]
+            {
+                Scenario.CA(50), Scenario.CA(51), Scenario.CA(501),
+                Scenario.CA(55), Scenario.CA(56), Scenario.CA(57), Scenario.CA(801),
+                Scenario.CA(61), Scenario.CA(62),
+            }, result.Frames.Select(frame => frame.CodeAddress));
+            Assert.Equal(2, result.Diagnostics.V1InfrastructureFramesCollapsed);
+            Assert.Equal(2, result.Diagnostics.V1InlineFallbackUsed);
+            Assert.Equal(0, result.Diagnostics.BoundariesNotFound);
+        }
+
+        [Fact]
+        public void MixedV1AndV2Segments_ApplyCompletionHistoryIndependently()
+        {
+            var s = new Scenario();
+            AsyncCallStack outer = s.Segment(AsyncCallstackKind.RuntimeAsync,
+                frameCodeAddrs: new[] { 800, 801, 802 }, frameMethods: new[] { 20, 21, 22 });
+            AsyncCallStack inner = s.Segment(AsyncCallstackKind.StateMachineAsync,
+                frameCodeAddrs: new[] { 500, 501, 502 }, frameMethods: new[] { 10, 11, 12 });
+
+            var sync = new[]
+            {
+                s.Sync(50, 90),                       // inner synchronous leaf work
+                s.Sync(51, 11),                       // inner current = segment[1]
+                s.Sync(52, 91),                       // current transition machinery
+                s.Sync(53, 10),                       // inner completed = segment[0]
+                s.Sync(54, 92),                       // completed transition machinery
+                s.Boundary(55, V1Dispatcher),
+                s.Boundary(56, V1Infrastructure),     // known V1 box infrastructure
+                s.Boundary(57, V1Infrastructure),     // known V1 box infrastructure
+                s.Sync(58, 93),                       // unclassified scheduling frame: collapse stops
+                s.Sync(59, 94),                       // native bridge frame
+                s.Sync(60, 95),                       // synchronous bridge frame
+                s.Sync(61, 21),                       // outer current = segment[1]
+                s.Boundary(62, Wrapper(1)),           // outer completed count = 1
+                s.Boundary(63, DispatchContinuation),
+                s.Boundary(64, DispatchContinuation),
+                s.Sync(65, 96),                       // ThreadPool dispatch anchor
+                s.Sync(66, 97),                       // root
+            };
+
+            StitchResult result = s.Run(sync, new[] { outer, inner });
+
+            Assert.Equal(new[]
+            {
+                Scenario.CA(50), Scenario.CA(51), Scenario.CA(502),
+                Scenario.CA(58), Scenario.CA(59), Scenario.CA(60), Scenario.CA(61), Scenario.CA(802),
+                Scenario.CA(65), Scenario.CA(66),
+            }, result.Frames.Select(frame => frame.CodeAddress));
+            Assert.Equal(StitchedFrameOrigin.AsyncCurrent, result.Frames[1].Origin);
+            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[2].Origin);
+            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[7].Origin);
+            Assert.Equal(2, result.Diagnostics.SegmentsProcessed);
+            Assert.Equal(1, result.Diagnostics.V1InlineFallbackUsed);
+            Assert.Equal(2, result.Diagnostics.V2PlumbingFramesCollapsed);
+            Assert.Equal(2, result.Diagnostics.V1InfrastructureFramesCollapsed);
             Assert.Equal(0, result.Diagnostics.BoundariesNotFound);
         }
 

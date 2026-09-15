@@ -3,6 +3,7 @@ using Microsoft.Diagnostics.Tracing.Computers;
 using Microsoft.Diagnostics.Tracing.Etlx;
 using Microsoft.Diagnostics.Tracing.EventPipe;
 using Microsoft.Diagnostics.Tracing.Parsers;
+using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
 using Microsoft.Diagnostics.Tracing.Session;
 using Microsoft.Diagnostics.Tracing.Stacks;
 using System;
@@ -86,6 +87,13 @@ namespace Microsoft.Diagnostics.Tracing
         /// requested.
         /// </summary>
         public bool AsyncStitchActive => m_asyncStitchActive;
+
+        /// <summary>
+        /// Optional presentation filter applied after an async stack has been structurally stitched. Return
+        /// <c>true</c> to retain a frame or <c>false</c> to hide it. The filter does not participate in dispatcher
+        /// boundary discovery or segment alignment; when null, every structurally retained frame is emitted.
+        /// </summary>
+        public Func<StitchedFrame, bool> AsyncStitchFrameFilter { get; set; }
 
         /// <summary>
         /// Generate the thread time stacks, outputting to 'stackSource'.  
@@ -642,13 +650,71 @@ namespace Microsoft.Diagnostics.Tracing
             for (int i = frames.Count - 1; i >= 0; i--)
             {
                 StitchedFrame frame = frames[i];
-                StackSourceFrameIndex frameIdx = frame.CodeAddress != CodeAddressIndex.Invalid
-                    ? m_outputStackSource.GetFrameIndex(frame.CodeAddress)
-                    : InternPlaceholderFrame(frame);
+                if (AsyncStitchFrameFilter != null && !AsyncStitchFrameFilter(frame))
+                {
+                    continue;
+                }
+
+                StackSourceFrameIndex frameIdx = InternStitchedFrame(frame);
                 caller = m_outputStackSource.Interner.CallStackIntern(frameIdx, caller);
             }
 
             return caller;
+        }
+
+        private StackSourceFrameIndex InternStitchedFrame(StitchedFrame frame)
+        {
+            if (frame.Origin != StitchedFrameOrigin.Sync &&
+                frame.Segment?.Kind == AsyncCallstackKind.StateMachineAsync &&
+                frame.CodeAddress != CodeAddressIndex.Invalid)
+            {
+                TraceCodeAddress codeAddress = m_eventLog.CodeAddresses[frame.CodeAddress];
+                if (TryGetLogicalStateMachineMethodName(codeAddress.FullMethodName, out string logicalName))
+                {
+                    StackSourceModuleIndex module = m_outputStackSource.Interner.ModuleIntern(codeAddress.ModuleName);
+                    return m_outputStackSource.Interner.FrameIntern(logicalName, module);
+                }
+            }
+
+            return frame.CodeAddress != CodeAddressIndex.Invalid
+                ? m_outputStackSource.GetFrameIndex(frame.CodeAddress)
+                : InternPlaceholderFrame(frame);
+        }
+
+        private static bool TryGetLogicalStateMachineMethodName(string methodName, out string logicalName)
+        {
+            logicalName = null;
+            if (string.IsNullOrEmpty(methodName))
+            {
+                return false;
+            }
+
+            int moveNext = methodName.IndexOf(".MoveNext", StringComparison.Ordinal);
+            if (moveNext < 0)
+            {
+                return false;
+            }
+
+            int stateMachineSuffix = methodName.LastIndexOf(">d__", moveNext, StringComparison.Ordinal);
+            if (stateMachineSuffix < 0)
+            {
+                stateMachineSuffix = methodName.LastIndexOf(">d", moveNext, StringComparison.Ordinal);
+            }
+            if (stateMachineSuffix < 0)
+            {
+                return false;
+            }
+
+            int methodStart = methodName.LastIndexOf("+<", stateMachineSuffix, StringComparison.Ordinal);
+            if (methodStart < 0 || methodStart + 2 >= stateMachineSuffix)
+            {
+                return false;
+            }
+
+            string declaringType = methodName.Substring(0, methodStart).Replace('+', '.');
+            string sourceMethod = methodName.Substring(methodStart + 2, stateMachineSuffix - methodStart - 2);
+            logicalName = declaringType + "." + sourceMethod;
+            return true;
         }
 
         /// <summary>
@@ -675,6 +741,7 @@ namespace Microsoft.Diagnostics.Tracing
             m_asyncStitchDiagnostics.V2SyncLayoutUsed += d.V2SyncLayoutUsed;
             m_asyncStitchDiagnostics.V2LeafWrapperDropped += d.V2LeafWrapperDropped;
             m_asyncStitchDiagnostics.V2PlumbingFramesCollapsed += d.V2PlumbingFramesCollapsed;
+            m_asyncStitchDiagnostics.V1InfrastructureFramesCollapsed += d.V1InfrastructureFramesCollapsed;
             if (d.Messages.Count != 0)
             {
                 m_asyncStitchDiagnostics.Messages.AddRange(d.Messages);
@@ -693,6 +760,11 @@ namespace Microsoft.Diagnostics.Tracing
         private Func<TraceThread, StackSourceCallStackIndex> GetTopFramesForActivityComputerCase(TraceEvent data, TraceThread thread, bool getAtCreationTime = false)
         {
             Debug.Assert(m_activityComputer != null);
+            if (m_startStopActivities == null)
+            {
+                return topThread => m_outputStackSource.GetCallStackForThread(topThread);
+            }
+
             return (topThread => m_startStopActivities.GetCurrentStartStopActivityStack(m_outputStackSource, thread, topThread, getAtCreationTime));
         }
 

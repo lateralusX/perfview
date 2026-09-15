@@ -15,6 +15,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <summary>A real frame taken verbatim from the native (CPU-sample) sync stack.</summary>
         Sync = 0,
 
+        /// <summary>The physically present current V1 state-machine frame. It retains the native code address
+        /// for identity/source correlation, but the emitter may present it as the logical async method.</summary>
+        AsyncCurrent,
+
         /// <summary>A suspended-ancestry frame spliced in from an async call stack segment (an async frame that
         /// is <b>not</b> physically present on the native sync stack because it is awaiting).</summary>
         AsyncRemaining,
@@ -55,10 +59,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <summary>The frame's code address, or <see cref="CodeAddressIndex.Invalid"/> for an unsymbolized async frame.</summary>
         public readonly CodeAddressIndex CodeAddress;
 
-        /// <summary>For an <see cref="StitchedFrameOrigin.AsyncRemaining"/> frame, the source async segment; otherwise null.</summary>
+        /// <summary>For an async-origin frame, the source async segment; otherwise null.</summary>
         public readonly AsyncCallStackFrames Segment;
 
-        /// <summary>For an <see cref="StitchedFrameOrigin.AsyncRemaining"/> frame, its index within <see cref="Segment"/>; otherwise -1.</summary>
+        /// <summary>For an async-origin frame, its index within <see cref="Segment"/>; otherwise -1.</summary>
         public readonly int SegmentFrameIndex;
 
         private StitchedFrame(StitchedFrameOrigin origin, CodeAddressIndex codeAddress, AsyncCallStackFrames segment, int segmentFrameIndex)
@@ -71,6 +75,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         internal static StitchedFrame Sync(CodeAddressIndex codeAddress) =>
             new StitchedFrame(StitchedFrameOrigin.Sync, codeAddress, null, -1);
+
+        internal static StitchedFrame AsyncCurrent(
+            CodeAddressIndex codeAddress, AsyncCallStackFrames segment, int segmentFrameIndex) =>
+            new StitchedFrame(StitchedFrameOrigin.AsyncCurrent, codeAddress, segment, segmentFrameIndex);
 
         internal static StitchedFrame Async(AsyncCallStackFrames segment, int segmentFrameIndex) =>
             new StitchedFrame(StitchedFrameOrigin.AsyncRemaining, segment.CodeAddressAt(segmentFrameIndex), segment, segmentFrameIndex);
@@ -113,6 +121,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <c>DispatchContinuations</c>) collapsed root-ward of a stitched continuation-wrapper, since the spliced
         /// logical ancestry already represents that machinery.</summary>
         public int V2PlumbingFramesCollapsed;
+
+        /// <summary>V1 CoreLib async-state-machine-box frames collapsed contiguously root-ward of a consumed
+        /// dispatcher boundary.</summary>
+        public int V1InfrastructureFramesCollapsed;
 
         /// <summary>Human-readable notes: the anomalies above, plus per-segment happy-path trace steps when
         /// stitching is run with tracing enabled.</summary>
@@ -305,15 +317,29 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     diagnostics.Note($"No {kind} dispatch boundary found at or root-ward of sync frame {pSync}; splicing remaining ancestry append-only.");
                 }
 
-                // Emit the real sync frames leaf-ward of the boundary: they physically hold the segment's completed
-                // frames plus its currently-running frame.
-                for (int i = pSync; i < boundaryPos; i++)
-                {
-                    output.Add(StitchedFrame.Sync(syncLeafToRoot[i].CodeAddress));
-                }
-
                 int completed = ComputeCompletedCount(segment, frames, kind, boundaryInfo, qpc,
                     syncLeafToRoot, pSync, boundaryPos, methodCompletionObserved, methodOf, diagnostics);
+
+                int currentSyncPos = kind == AsyncCallstackKind.StateMachineAsync
+                    ? FindCurrentV1SyncFrame(frames, completed, syncLeafToRoot, pSync, boundaryPos, methodOf)
+                    : -1;
+
+                // Emit the real sync frames leaf-ward of the boundary. The current V1 MoveNext frame remains tied
+                // to its physical code address, but carries its async identity so the emitter can display the
+                // logical source method rather than compiler-generated state-machine plumbing. Once that current
+                // frame has been found, the remaining V1 frames through the dispatcher boundary are the physical
+                // inline-transition chain represented by the logical ancestry and are not emitted.
+                for (int i = pSync; i < boundaryPos; i++)
+                {
+                    if (kind == AsyncCallstackKind.StateMachineAsync && currentSyncPos >= 0 && i > currentSyncPos)
+                    {
+                        continue;
+                    }
+
+                    output.Add(i == currentSyncPos
+                        ? StitchedFrame.AsyncCurrent(syncLeafToRoot[i].CodeAddress, frames, completed)
+                        : StitchedFrame.Sync(syncLeafToRoot[i].CodeAddress));
+                }
 
                 // The current (running) frame is segment[completed]; it is physically present on the sync stack
                 // (emitted above), so it is never re-emitted here. Splice only the root-ward suspended ancestry.
@@ -342,18 +368,29 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
                 // Skip the boundary frame itself (the dispatch machinery the ancestry replaces); keep other frames.
                 pSync = boundaryFound ? boundaryPos + 1 : boundaryPos;
-            }
-
-            // Async segments exhausted. When a V2 continuation-wrapper was stitched (Case 1), the dispatch-continuation
-            // plumbing frames (InstrumentedDispatchContinuations / DispatchContinuations) that sat directly root-ward of
-            // the wrapper are the machinery the spliced logical ancestry already represents; collapse them so the physical
-            // anchor (e.g. ThreadPoolWorkQueue.Dispatch) follows the logical stack directly. These frames only appear
-            // root-ward of a consumed wrapper, so this is a no-op for V1 and for the append-only degradation path.
-            while (pSync < syncLeafToRoot.Count &&
-                   classify(syncLeafToRoot[pSync].CodeAddress).Kind == AsyncStitchBoundaryKind.V2DispatchContinuation)
-            {
-                pSync++;
-                diagnostics.V2PlumbingFramesCollapsed++;
+                if (boundaryFound && kind == AsyncCallstackKind.StateMachineAsync)
+                {
+                    while (pSync < syncLeafToRoot.Count &&
+                           classify(syncLeafToRoot[pSync].CodeAddress).Kind ==
+                               AsyncStitchBoundaryKind.V1DispatcherInfrastructure)
+                    {
+                        pSync++;
+                        diagnostics.V1InfrastructureFramesCollapsed++;
+                    }
+                }
+                else if (boundaryFound && kind == AsyncCallstackKind.RuntimeAsync)
+                {
+                    // Collapse the dispatch-continuation plumbing for this segment immediately, rather than waiting
+                    // until all segments are exhausted. An inner V2 segment may be followed by a preserved bridge
+                    // and then an outer V1/V2 segment; leaking these frames into that bridge breaks lockstep alignment.
+                    while (pSync < syncLeafToRoot.Count &&
+                           classify(syncLeafToRoot[pSync].CodeAddress).Kind ==
+                               AsyncStitchBoundaryKind.V2DispatchContinuation)
+                    {
+                        pSync++;
+                        diagnostics.V2PlumbingFramesCollapsed++;
+                    }
+                }
             }
 
             // Emit the clean sync tail (includes the thread/process root).
@@ -504,7 +541,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 {
                     // No CompleteMethod events: the normal completions are the inline-resumed MoveNext frames
                     // physically on the sync stack.
-                    normal = CountV1Completed(frames, sync, pSync, boundaryPos, methodOf);
+                    normal = CountV1Completed(frames, sync, pSync, boundaryPos,
+                        segment.GetExceptionCompletedFrameCount(qpc), methodOf);
                     diagnostics.V1InlineFallbackUsed++;
                 }
 
@@ -527,47 +565,101 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         /// <summary>
         /// Counts the V1 completed frames by matching the segment's already-completed frames against the
-        /// inline-resumed <c>MoveNext</c> frames on the sync stack. In a V1 inline-resume cascade the currently
-        /// running frame is the physical sync leaf (<c>sync[pSync]</c>); the frames that already completed sit
-        /// between it and the dispatch boundary (root-ward), with <c>segment[0]</c> — the first frame the dispatcher
-        /// resumed — adjacent to the boundary on its leaf-ward side. We therefore match <c>segment[0,1,2,...]</c>
-        /// against the sync frames strictly root-ward of the leaf (from <c>boundaryPos-1</c> down to <c>pSync+1</c>),
-        /// skipping intervening machinery / inner user code; each match is one completed frame. This ordered
+        /// inline-resumed <c>MoveNext</c> frames on the sync stack. In a V1 inline-resume cascade the segment frames
+        /// appear in order from the dispatch boundary toward the physical leaf. The final matched state-machine
+        /// frame is current; every earlier match has completed. We therefore match <c>segment[0,1,2,...]</c>
+        /// against the complete boundary slice (from <c>boundaryPos-1</c> through <c>pSync</c>), skipping
+        /// synchronous calls and transition machinery; the completed count is <c>matchedCount - 1</c>. This ordered
         /// (positional) match is robust to a state machine legitimately recurring within one segment, unlike a
         /// set-membership count.
         /// <para>
-        /// The current (running) frame is anchored to the sync leaf and its identity is taken from the sync stack,
-        /// so its async-side IP is never consulted — this is what lets a <c>0</c>-IP async current/leaf frame
-        /// resolve correctly (the real IP comes from the running sync frame, which the walk emits verbatim). If an
-        /// already-completed async frame cannot be verified (a <c>0</c>-IP completed frame — rare), matching stops
-        /// conservatively, leaving the remaining frames as async ancestry.
+        /// Exceptionally completed frames are absent from the physical stack. The known exception count is therefore
+        /// used as a bounded number of async frames that may be skipped while aligning the next physical match.
+        /// This supports exceptions before or between normally completed inline frames without allowing an
+        /// unbounded search through unrelated async ancestry.
+        /// </para>
+        /// <para>
+        /// If an async frame cannot be verified (for example a <c>0</c>-IP frame), matching stops conservatively,
+        /// leaving the remaining frames as async ancestry.
         /// </para>
         /// </summary>
         private static int CountV1Completed(
             AsyncCallStackFrames frames, IReadOnlyList<StitchSyncFrame> sync, int pSync, int boundaryPos,
-            Func<CodeAddressIndex, MethodIndex> methodOf)
+            int exceptionCompleted, Func<CodeAddressIndex, MethodIndex> methodOf)
         {
             int frameCount = frames.FrameCount;
-            int seg = 0;
+            int nextSegmentFrame = 0;
+            int matched = 0;
+            int exceptionsSkipped = 0;
 
-            // Match only the completed frames: the sync frames strictly root-ward of the physical leaf (sync[pSync]).
-            // The leaf is the current running frame, resolved from the sync stack, so its async IP is never used here.
-            for (int i = boundaryPos - 1; i > pSync && seg < frameCount; i--)
+            for (int i = boundaryPos - 1; i >= pSync && nextSegmentFrame < frameCount; i--)
             {
-                MethodIndex expected = methodOf(frames.CodeAddressAt(seg));
-                if (expected == MethodIndex.Invalid)
+                int candidate = nextSegmentFrame;
+                int candidateExceptions = 0;
+                int availableExceptions = exceptionCompleted - exceptionsSkipped;
+                while (candidate < frameCount && candidateExceptions <= availableExceptions)
                 {
-                    break; // unverifiable completed frame; stop conservatively (keeps the rest as async ancestry).
-                }
+                    MethodIndex expected = methodOf(frames.CodeAddressAt(candidate));
+                    if (expected == MethodIndex.Invalid)
+                    {
+                        if (candidateExceptions < availableExceptions)
+                        {
+                            candidate++;
+                            candidateExceptions++;
+                            continue;
+                        }
 
-                if (sync[i].Method == expected)
-                {
-                    seg++;
+                        // The next verifiable physical frame cannot identify this async frame. Every previously
+                        // matched frame completed; preserve the physical slice because the current frame is unknown.
+                        return matched;
+                    }
+
+                    if (sync[i].Method == expected)
+                    {
+                        exceptionsSkipped += candidateExceptions;
+                        nextSegmentFrame = candidate + 1;
+                        matched++;
+                        break;
+                    }
+
+                    candidate++;
+                    candidateExceptions++;
                 }
             }
 
-            // 'seg' is the number of completed frames matched; the current frame is the sync leaf (segment[seg]).
-            return seg;
+            // The final matched physical state-machine frame is current; every earlier match completed normally.
+            // Exceptionally completed frames were skipped only to align identities and are added separately.
+            return Math.Max(0, matched - 1);
+        }
+
+        private static int FindCurrentV1SyncFrame(
+            AsyncCallStackFrames frames, int completed, IReadOnlyList<StitchSyncFrame> sync,
+            int pSync, int boundaryPos, Func<CodeAddressIndex, MethodIndex> methodOf)
+        {
+            if (completed < 0 || completed >= frames.FrameCount)
+            {
+                return -1;
+            }
+
+            MethodIndex current = methodOf(frames.CodeAddressAt(completed));
+            if (current == MethodIndex.Invalid)
+            {
+                // Without a current-method identity we cannot distinguish synchronous leaf calls from the V1
+                // transition chain. Preserve the complete physical slice rather than risk deleting user frames.
+                return -1;
+            }
+
+            // Pick the leaf-most matching physical frame. Completed copies of the same state machine, if any,
+            // occur root-ward during an inline-resume cascade.
+            for (int i = pSync; i < boundaryPos; i++)
+            {
+                if (sync[i].Method == current)
+                {
+                    return i;
+                }
+            }
+
+            return -1;
         }
 
         /// <summary>

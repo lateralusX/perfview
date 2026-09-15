@@ -41,6 +41,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// the inline <c>MoveNext</c> frames from the first resumed state-machine frame down to this boundary.
         /// </summary>
         V1Dispatcher,
+
+        /// <summary>
+        /// A frame declared on the CoreLib <c>System.Runtime.CompilerServices.*AsyncStateMachineBox</c> type
+        /// family. These frames are V1 dispatcher plumbing when they occur contiguously root-ward of a consumed
+        /// <see cref="V1Dispatcher"/> boundary; they are not themselves splice boundaries.
+        /// </summary>
+        V1DispatcherInfrastructure,
     }
 
     /// <summary>
@@ -66,7 +73,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         public static readonly AsyncStitchBoundaryInfo None = new AsyncStitchBoundaryInfo(AsyncStitchBoundaryKind.None, -1);
 
         /// <summary>True if this method is an async dispatch boundary.</summary>
-        public bool IsBoundary => Kind != AsyncStitchBoundaryKind.None;
+        public bool IsBoundary =>
+            Kind == AsyncStitchBoundaryKind.V2ContinuationWrapper ||
+            Kind == AsyncStitchBoundaryKind.V2DispatchContinuation ||
+            Kind == AsyncStitchBoundaryKind.V1Dispatcher;
     }
 
     /// <summary>
@@ -125,6 +135,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// wrapper task that dispatches an inner box rather than being merged into a state-machine box.</summary>
         public const string AsyncStateMachineDispatcherTypeName = "AsyncStateMachineDispatcher";
 
+        /// <summary>The common type-name suffix for the V1 async-state-machine box family.</summary>
+        public const string AsyncStateMachineBoxTypeSuffix = "AsyncStateMachineBox";
+
         /// <summary>The V1 async-state-machine-dispatcher method name (<c>AsyncStateMachineDispatcher.MoveNext</c>).
         /// Because this bare name is not unique (every state machine has a <c>MoveNext</c>), the dispatcher is
         /// recognized type-qualified via <see cref="AsyncStateMachineDispatcherTypeName"/>.</summary>
@@ -177,7 +190,39 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 return AsyncStitchBoundaryKind.V1Dispatcher;
             }
 
+            if (IsV1DispatcherInfrastructure(frameName))
+            {
+                return AsyncStitchBoundaryKind.V1DispatcherInfrastructure;
+            }
+
             return AsyncStitchBoundaryKind.None;
+        }
+
+        private static bool IsV1DispatcherInfrastructure(string frameName)
+        {
+            int qualifiedStart = frameName.IndexOf('!');
+            qualifiedStart = qualifiedStart >= 0 ? qualifiedStart + 1 : 0;
+            const string namespacePrefix = "System.Runtime.CompilerServices.";
+            if (frameName.Length - qualifiedStart < namespacePrefix.Length ||
+                string.CompareOrdinal(frameName, qualifiedStart, namespacePrefix, 0, namespacePrefix.Length) != 0)
+            {
+                return false;
+            }
+
+            string declaringType = GetDeclaringTypeName(frameName);
+            if (declaringType is null)
+            {
+                return false;
+            }
+
+            int genericArity = declaringType.IndexOf('`');
+            if (genericArity >= 0)
+            {
+                declaringType = declaringType.Substring(0, genericArity);
+            }
+
+            return declaringType.EndsWith(AsyncStateMachineBoxTypeSuffix, StringComparison.Ordinal) ||
+                   declaringType == AsyncStateMachineDispatcherTypeName;
         }
 
         /// <summary>
@@ -313,7 +358,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     {
         private readonly TraceCodeAddresses _codeAddresses;
 
-        // Only boundary methods are stored; any MethodIndex absent from the map is AsyncStitchBoundaryInfo.None.
+        // Only recognized boundary/infrastructure methods are stored; any absent MethodIndex is None.
         private readonly Dictionary<MethodIndex, AsyncStitchBoundaryInfo> _boundaries = new Dictionary<MethodIndex, AsyncStitchBoundaryInfo>();
         private bool _built;
 
@@ -324,8 +369,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             _codeAddresses = codeAddresses ?? throw new ArgumentNullException(nameof(codeAddresses));
         }
 
-        /// <summary>The number of distinct methods classified as async boundaries (valid after the first
-        /// classify call, which triggers the one-time scan).</summary>
+        /// <summary>The number of distinct methods classified as async boundaries or dispatcher infrastructure
+        /// (valid after the first classify call, which triggers the one-time scan).</summary>
         public int BoundaryMethodCount
         {
             get
