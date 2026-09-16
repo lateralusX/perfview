@@ -7,8 +7,6 @@ using System.Collections.Generic;
 using Microsoft.Diagnostics.Tracing.Parsers;
 using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
 
-using Xunit;
-
 namespace TraceEventTests
 {
     /// <summary>Default header values used by <see cref="AsyncProfilerBufferBuilder"/> and the parser tests.</summary>
@@ -190,10 +188,16 @@ namespace TraceEventTests
             switch (AsyncEventInfo.GetPayloadLengthFieldSize(id))
             {
                 case PayloadLengthFieldSize.None:
-                    Assert.Empty(payload);
+                    if (payload.Count != 0)
+                    {
+                        throw new InvalidOperationException("An event with no payload-length field cannot carry a payload.");
+                    }
                     break;
                 case PayloadLengthFieldSize.Byte:
-                    Assert.True(payload.Count <= byte.MaxValue);
+                    if (payload.Count > byte.MaxValue)
+                    {
+                        throw new InvalidOperationException("The payload does not fit in its one-byte length field.");
+                    }
                     _bytes.Add((byte)payload.Count);
                     break;
                 default: // UShort

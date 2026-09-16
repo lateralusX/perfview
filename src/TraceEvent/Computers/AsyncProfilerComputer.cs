@@ -403,6 +403,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         private readonly AsyncCallStacksIndex _index = new AsyncCallStacksIndex();
         private readonly Dictionary<AsyncThreadKey, AsyncCallStacks> _threads = new Dictionary<AsyncThreadKey, AsyncCallStacks>();
         private readonly Dictionary<ProcessIndex, ProcessState> _processes = new Dictionary<ProcessIndex, ProcessState>();
+        private readonly Stack<AsyncCallStackBuilder> _builderPool = new Stack<AsyncCallStackBuilder>();
 
         private ProcessIndex _currentProcessIndex;
 
@@ -518,7 +519,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             bool accepted;
             if (IsResumeCallstack(e.EventId))
             {
-                state.Push(new AsyncCallStackBuilder(e, CurrentProcess.WrapperCount));
+                state.Push(RentBuilder(e, CurrentProcess.WrapperCount));
                 accepted = true;
             }
             else if (IsAppendCallstack(e.EventId))
@@ -697,9 +698,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             AsyncCallStackBuilder builder = state.Pop();
-            _index.Add(key, builder.Kind, builder.MethodIds.ToArray(), builder.FrameStates?.ToArray(),
-                builder.Depth, builder.ContinuationIndexBase, builder.WrapperCount, builder.StartQpc, qpc,
-                builder.MethodCompletions.ToArray(), builder.ExceptionCompletions.ToArray(), builder.WrapperResets.ToArray());
+            Commit(key, builder, qpc);
         }
 
         /// <summary>
@@ -726,10 +725,38 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             while (state.Top != null)
             {
                 AsyncCallStackBuilder builder = state.Pop();
-                _index.Add(key, builder.Kind, builder.MethodIds.ToArray(), builder.FrameStates?.ToArray(),
-                    builder.Depth, builder.ContinuationIndexBase, builder.WrapperCount, builder.StartQpc, endQpc,
-                    builder.MethodCompletions.ToArray(), builder.ExceptionCompletions.ToArray(), builder.WrapperResets.ToArray());
+                Commit(key, builder, endQpc);
             }
+        }
+
+        private void Commit(AsyncThreadKey key, AsyncCallStackBuilder builder, long endQpc)
+        {
+            ulong[] methodIds = builder.GetMethodIds();
+            int[] frameStates = builder.GetFrameStates();
+            AsyncCallStack.CompletionDelta[] methodCompletions = builder.GetMethodCompletions();
+            AsyncCallStack.CompletionDelta[] exceptionCompletions = builder.GetExceptionCompletions();
+            long[] wrapperResets = builder.GetWrapperResets();
+
+            try
+            {
+                _index.Add(key, builder.Kind, methodIds, frameStates,
+                    builder.Depth, builder.ContinuationIndexBase, builder.WrapperCount, builder.StartQpc, endQpc,
+                    methodCompletions, exceptionCompletions, wrapperResets);
+            }
+            finally
+            {
+                builder.Clear();
+                _builderPool.Push(builder);
+            }
+        }
+
+        private AsyncCallStackBuilder RentBuilder(in AsyncCallstackEvent e, byte wrapperCount)
+        {
+            AsyncCallStackBuilder builder = _builderPool.Count != 0
+                ? _builderPool.Pop()
+                : new AsyncCallStackBuilder();
+            builder.Initialize(e, wrapperCount);
+            return builder;
         }
 
         /// <summary>Per-thread build state: the nesting stack of in-progress async call stacks.</summary>
@@ -769,26 +796,31 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <summary>An in-progress async call stack being assembled on a thread's nesting stack.</summary>
         private sealed class AsyncCallStackBuilder
         {
-            public readonly ulong DispatcherId;
-            public readonly long StartQpc;
-            public readonly byte ContinuationIndexBase;
-            public readonly byte WrapperCount;
-            public readonly AsyncCallstackKind Kind;
+            public ulong DispatcherId;
+            public long StartQpc;
+            public byte ContinuationIndexBase;
+            public byte WrapperCount;
+            public AsyncCallstackKind Kind;
             public int Depth;
-            public readonly List<ulong> MethodIds = new List<ulong>();
-            public List<int> FrameStates; // null unless a state-machine callstack contributed frames
-            public readonly List<AsyncCallStack.CompletionDelta> MethodCompletions = new List<AsyncCallStack.CompletionDelta>();
-            public readonly List<AsyncCallStack.CompletionDelta> ExceptionCompletions = new List<AsyncCallStack.CompletionDelta>();
-            public readonly List<long> WrapperResets = new List<long>();
 
-            public AsyncCallStackBuilder(in AsyncCallstackEvent e, byte wrapperCount)
+            public List<AsyncCallStack.CompletionDelta> MethodCompletions =>
+                _methodCompletions ?? (_methodCompletions = new List<AsyncCallStack.CompletionDelta>());
+
+            public List<AsyncCallStack.CompletionDelta> ExceptionCompletions =>
+                _exceptionCompletions ?? (_exceptionCompletions = new List<AsyncCallStack.CompletionDelta>());
+
+            public List<long> WrapperResets =>
+                _wrapperResets ?? (_wrapperResets = new List<long>());
+
+            public void Initialize(in AsyncCallstackEvent e, byte wrapperCount)
             {
                 DispatcherId = e.DispatcherId;
                 StartQpc = e.TimestampQpc;
                 ContinuationIndexBase = e.ContinuationIndex;
                 WrapperCount = wrapperCount;
                 Kind = e.Kind;
-                AddFrames(e);
+                _methodIds = e.MethodIds ?? Array.Empty<ulong>();
+                _frameStates = e.FrameStates;
             }
 
             public void AddFrames(in AsyncCallstackEvent e)
@@ -799,25 +831,83 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 }
 
                 bool hasState = e.FrameStates != null;
-                if (hasState && FrameStates == null)
+                if (_methodIdsBuilder == null)
                 {
-                    // Back-fill zero states for frames already added without state so arrays stay aligned.
-                    FrameStates = new List<int>(MethodIds.Count + e.MethodIds.Length);
-                    for (int i = 0; i < MethodIds.Count; i++)
+                    _methodIdsBuilder = new List<ulong>(_methodIds.Length + e.MethodIds.Length);
+                    _methodIdsBuilder.AddRange(_methodIds);
+
+                    if (_frameStates != null || hasState)
                     {
-                        FrameStates.Add(0);
+                        // Back-fill zero states for frames previously added without state so arrays stay aligned.
+                        _frameStatesBuilder = new List<int>(_methodIds.Length + e.MethodIds.Length);
+                        if (_frameStates != null)
+                        {
+                            _frameStatesBuilder.AddRange(_frameStates);
+                        }
+                        else
+                        {
+                            for (int i = 0; i < _methodIds.Length; i++)
+                            {
+                                _frameStatesBuilder.Add(0);
+                            }
+                        }
+                    }
+                }
+                else if (hasState && _frameStatesBuilder == null)
+                {
+                    _frameStatesBuilder = new List<int>(_methodIdsBuilder.Count + e.MethodIds.Length);
+                    for (int i = 0; i < _methodIdsBuilder.Count; i++)
+                    {
+                        _frameStatesBuilder.Add(0);
                     }
                 }
 
                 for (int i = 0; i < e.MethodIds.Length; i++)
                 {
-                    MethodIds.Add(e.MethodIds[i]);
-                    if (FrameStates != null)
+                    _methodIdsBuilder.Add(e.MethodIds[i]);
+                    if (_frameStatesBuilder != null)
                     {
-                        FrameStates.Add(hasState ? e.FrameStates[i] : 0);
+                        _frameStatesBuilder.Add(hasState ? e.FrameStates[i] : 0);
                     }
                 }
             }
+
+            public ulong[] GetMethodIds() => _methodIdsBuilder?.ToArray() ?? _methodIds;
+
+            public int[] GetFrameStates() => _frameStatesBuilder?.ToArray() ?? _frameStates;
+
+            public AsyncCallStack.CompletionDelta[] GetMethodCompletions() =>
+                _methodCompletions?.ToArray() ?? Array.Empty<AsyncCallStack.CompletionDelta>();
+
+            public AsyncCallStack.CompletionDelta[] GetExceptionCompletions() =>
+                _exceptionCompletions?.ToArray() ?? Array.Empty<AsyncCallStack.CompletionDelta>();
+
+            public long[] GetWrapperResets() => _wrapperResets?.ToArray() ?? Array.Empty<long>();
+
+            public void Clear()
+            {
+                DispatcherId = 0;
+                StartQpc = 0;
+                ContinuationIndexBase = 0;
+                WrapperCount = 0;
+                Kind = default;
+                Depth = 0;
+                _methodIds = null;
+                _frameStates = null;
+                _methodIdsBuilder = null;
+                _frameStatesBuilder = null;
+                _methodCompletions?.Clear();
+                _exceptionCompletions?.Clear();
+                _wrapperResets?.Clear();
+            }
+
+            private ulong[] _methodIds;
+            private int[] _frameStates;
+            private List<ulong> _methodIdsBuilder;
+            private List<int> _frameStatesBuilder;
+            private List<AsyncCallStack.CompletionDelta> _methodCompletions;
+            private List<AsyncCallStack.CompletionDelta> _exceptionCompletions;
+            private List<long> _wrapperResets;
         }
 
         #endregion

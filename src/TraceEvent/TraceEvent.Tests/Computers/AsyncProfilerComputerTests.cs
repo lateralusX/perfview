@@ -245,6 +245,29 @@ namespace TraceEventTests
         }
 
         [Fact]
+        public void ReusedBuilder_DoesNotRetainFramesOrCompletionHistory()
+        {
+            var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
+                .Armed(Start)
+                .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA }, new[] { 1 })
+                .AppendStack(Start + 11, dispatcher: 1, new ulong[] { 0xB }, new[] { 2 })
+                .CompleteMethod(Start + 12)
+                .UnwindException(Start + 13, 1)
+                .WrapperReset(Start + 14)
+                .Suspend(Start + 15)
+                .ResumeStack(Start + 20, dispatcher: 2, new ulong[] { 0xC }, new[] { 3 })
+                .Suspend(Start + 25));
+
+            AsyncCallStack second = Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 22));
+            Assert.Equal(1, second.Frames.FrameCount);
+            Assert.Equal(0xCUL, second.Frames.MethodIdAt(0));
+            Assert.Equal(3, second.Frames.FrameStateAt(0));
+            Assert.Equal(0, second.GetMethodCompletedFrameCount(Start + 22));
+            Assert.Equal(0, second.GetExceptionCompletedFrameCount(Start + 22));
+            Assert.Equal(0, second.GetWrapperResetCount(Start + 22));
+        }
+
+        [Fact]
         public void IdenticalCallstacks_AreDeduplicated()
         {
             var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)

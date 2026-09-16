@@ -537,8 +537,16 @@ namespace Microsoft.Diagnostics.Tracing
 
             m_asyncIndex = index;
             m_asyncBoundaries = new AsyncStitchBoundaryCache(m_eventLog.CodeAddresses);
+            m_asyncClassify = m_asyncBoundaries.Classify;
+            m_asyncMethodCompletionObserved = m_asyncIndex.MethodCompletionObserved;
             m_asyncMethodOf = ca => m_eventLog.CodeAddresses.MethodIndex(ca);
             m_asyncStitchDiagnostics = new StitchDiagnostics();
+            m_asyncSampleDiagnostics = new StitchDiagnostics();
+            m_asyncSegments = new List<AsyncCallStack>();
+            m_asyncSyncFrames = new List<StitchSyncFrame>();
+            m_asyncStitchedFrames = new List<StitchedFrame>();
+            m_asyncLogicalFrameByCodeAddress = new Dictionary<CodeAddressIndex, StackSourceFrameIndex>();
+            m_asyncPlaceholderFrameByMethodId = new Dictionary<ulong, StackSourceFrameIndex>();
             m_asyncStitchActive = true;
         }
 
@@ -580,8 +588,20 @@ namespace Microsoft.Diagnostics.Tracing
         {
             stitchedStack = StackSourceCallStackIndex.Invalid;
 
-            IReadOnlyList<AsyncCallStack> segments = m_eventLog.GetAsyncCallStacks(data);
-            if (segments == null || segments.Count == 0)
+            CallStackIndex callStackIndex = data.CallStackIndex();
+            if (callStackIndex == CallStackIndex.Invalid)
+            {
+                return StitchOutcome.NoAsync;
+            }
+
+#pragma warning disable CS0618 // We deliberately need the sample's exact QPC to align with the async index; it never leaves this assembly.
+            long qpc = data.TimeStampQPC;
+#pragma warning restore CS0618
+
+            ProcessIndex processIndex = thread.Process.ProcessIndex;
+            m_asyncIndex.GetAsyncCallStacks(
+                new AsyncThreadKey(processIndex, (ulong)thread.ThreadID), qpc, m_asyncSegments);
+            if (m_asyncSegments.Count == 0)
             {
                 // No async ancestry recorded for this thread at this instant: fall back to the normal path and emit
                 // the native sync stack as-is (including any continuation-wrapper / dispatch machinery). Keeping the
@@ -589,21 +609,13 @@ namespace Microsoft.Diagnostics.Tracing
                 return StitchOutcome.NoAsync;
             }
 
-            CallStackIndex callStackIndex = data.CallStackIndex();
-            if (callStackIndex == CallStackIndex.Invalid)
-            {
-                return StitchOutcome.NoAsync;
-            }
+            MaterializeSyncLeafToRoot(callStackIndex, m_asyncSyncFrames);
 
-            List<StitchSyncFrame> sync = MaterializeSyncLeafToRoot(callStackIndex);
-
-#pragma warning disable CS0618 // We deliberately need the sample's exact QPC to align with the async index; it never leaves this assembly.
-            long qpc = data.TimeStampQPC;
-#pragma warning restore CS0618
-
-            StitchResult result = AsyncCpuStackStitcher.Stitch(sync, segments, qpc, m_asyncBoundaries, m_asyncIndex,
-                thread.Process.ProcessIndex, m_asyncMethodOf, TraceAsyncStitchSteps);
-            AccumulateAsyncDiagnostics(result.Diagnostics);
+            m_asyncSampleDiagnostics.MessageLimit = m_asyncStitchDiagnostics.RemainingMessageCapacity;
+            AsyncCpuStackStitcher.StitchInto(
+                m_asyncSyncFrames, m_asyncSegments, qpc, m_asyncClassify, m_asyncMethodCompletionObserved,
+                processIndex, m_asyncMethodOf, TraceAsyncStitchSteps, m_asyncStitchedFrames, m_asyncSampleDiagnostics);
+            m_asyncSampleDiagnostics.AddTo(m_asyncStitchDiagnostics);
 
             // When start-stop activity grouping is enabled, root the stitched stack through the same top-frames
             // provider as the non-stitched path so both layouts share identical pseudo-nodes. When grouping is
@@ -611,7 +623,7 @@ namespace Microsoft.Diagnostics.Tracing
             StackSourceCallStackIndex threadRoot = m_startStopActivities != null
                 ? m_startStopActivities.GetCurrentStartStopActivityStack(m_outputStackSource, thread, thread)
                 : m_outputStackSource.GetCallStackForThread(thread);
-            stitchedStack = InternStitchedStack(result, threadRoot);
+            stitchedStack = InternStitchedStack(m_asyncStitchedFrames, threadRoot);
             return StitchOutcome.Stitched;
         }
 
@@ -620,9 +632,9 @@ namespace Microsoft.Diagnostics.Tracing
         /// <see cref="StitchSyncFrame"/>s, resolving each frame's <see cref="MethodIndex"/> for the V1 identity
         /// match. The thread/process pseudo-root is not part of the native walk; it is supplied during interning.
         /// </summary>
-        private List<StitchSyncFrame> MaterializeSyncLeafToRoot(CallStackIndex callStackIndex)
+        private void MaterializeSyncLeafToRoot(CallStackIndex callStackIndex, List<StitchSyncFrame> sync)
         {
-            var sync = new List<StitchSyncFrame>();
+            sync.Clear();
             TraceCallStacks callStacks = m_eventLog.CallStacks;
             TraceCodeAddresses codeAddresses = m_eventLog.CodeAddresses;
 
@@ -632,8 +644,6 @@ namespace Microsoft.Diagnostics.Tracing
                 MethodIndex method = ca != CodeAddressIndex.Invalid ? codeAddresses.MethodIndex(ca) : MethodIndex.Invalid;
                 sync.Add(new StitchSyncFrame(ca, method));
             }
-
-            return sync;
         }
 
         /// <summary>
@@ -642,9 +652,9 @@ namespace Microsoft.Diagnostics.Tracing
         /// top. Sync frames and symbolized async frames intern by <see cref="CodeAddressIndex"/>; unsymbolized
         /// async frames get a synthetic placeholder frame named by their method id.
         /// </summary>
-        private StackSourceCallStackIndex InternStitchedStack(StitchResult result, StackSourceCallStackIndex threadRoot)
+        private StackSourceCallStackIndex InternStitchedStack(
+            IReadOnlyList<StitchedFrame> frames, StackSourceCallStackIndex threadRoot)
         {
-            IReadOnlyList<StitchedFrame> frames = result.Frames;
             StackSourceCallStackIndex caller = threadRoot;
 
             for (int i = frames.Count - 1; i >= 0; i--)
@@ -668,12 +678,24 @@ namespace Microsoft.Diagnostics.Tracing
                 frame.Segment?.Kind == AsyncCallstackKind.StateMachineAsync &&
                 frame.CodeAddress != CodeAddressIndex.Invalid)
             {
+                if (m_asyncLogicalFrameByCodeAddress.TryGetValue(
+                    frame.CodeAddress, out StackSourceFrameIndex cachedFrame))
+                {
+                    return cachedFrame != StackSourceFrameIndex.Invalid
+                        ? cachedFrame
+                        : m_outputStackSource.GetFrameIndex(frame.CodeAddress);
+                }
+
                 TraceCodeAddress codeAddress = m_eventLog.CodeAddresses[frame.CodeAddress];
                 if (TryGetLogicalStateMachineMethodName(codeAddress.FullMethodName, out string logicalName))
                 {
                     StackSourceModuleIndex module = m_outputStackSource.Interner.ModuleIntern(codeAddress.ModuleName);
-                    return m_outputStackSource.Interner.FrameIntern(logicalName, module);
+                    StackSourceFrameIndex logicalFrame = m_outputStackSource.Interner.FrameIntern(logicalName, module);
+                    m_asyncLogicalFrameByCodeAddress.Add(frame.CodeAddress, logicalFrame);
+                    return logicalFrame;
                 }
+
+                m_asyncLogicalFrameByCodeAddress.Add(frame.CodeAddress, StackSourceFrameIndex.Invalid);
             }
 
             return frame.CodeAddress != CodeAddressIndex.Invalid
@@ -725,27 +747,20 @@ namespace Microsoft.Diagnostics.Tracing
         /// </summary>
         private StackSourceFrameIndex InternPlaceholderFrame(StitchedFrame frame)
         {
-            string name = frame.Origin == StitchedFrameOrigin.AsyncRemaining && frame.Segment != null
-                ? "AsyncFrame(0x" + frame.Segment.MethodIdAt(frame.SegmentFrameIndex).ToString("x") + ")"
-                : "?!?";
-            return m_outputStackSource.Interner.FrameIntern(name);
-        }
-
-        private void AccumulateAsyncDiagnostics(StitchDiagnostics d)
-        {
-            m_asyncStitchDiagnostics.SegmentsProcessed += d.SegmentsProcessed;
-            m_asyncStitchDiagnostics.BoundariesNotFound += d.BoundariesNotFound;
-            m_asyncStitchDiagnostics.AdjacencyMismatches += d.AdjacencyMismatches;
-            m_asyncStitchDiagnostics.V2WrapperFallbackUsed += d.V2WrapperFallbackUsed;
-            m_asyncStitchDiagnostics.V1InlineFallbackUsed += d.V1InlineFallbackUsed;
-            m_asyncStitchDiagnostics.V2SyncLayoutUsed += d.V2SyncLayoutUsed;
-            m_asyncStitchDiagnostics.V2LeafWrapperDropped += d.V2LeafWrapperDropped;
-            m_asyncStitchDiagnostics.V2PlumbingFramesCollapsed += d.V2PlumbingFramesCollapsed;
-            m_asyncStitchDiagnostics.V1InfrastructureFramesCollapsed += d.V1InfrastructureFramesCollapsed;
-            if (d.Messages.Count != 0)
+            if (frame.Origin != StitchedFrameOrigin.AsyncRemaining || frame.Segment == null)
             {
-                m_asyncStitchDiagnostics.Messages.AddRange(d.Messages);
+                return m_outputStackSource.Interner.FrameIntern("?!?");
             }
+
+            ulong methodId = frame.Segment.MethodIdAt(frame.SegmentFrameIndex);
+            if (!m_asyncPlaceholderFrameByMethodId.TryGetValue(
+                methodId, out StackSourceFrameIndex placeholderFrame))
+            {
+                string name = "AsyncFrame(0x" + methodId.ToString("x") + ")";
+                placeholderFrame = m_outputStackSource.Interner.FrameIntern(name);
+                m_asyncPlaceholderFrameByMethodId.Add(methodId, placeholderFrame);
+            }
+            return placeholderFrame;
         }
 
         #endregion
@@ -899,8 +914,16 @@ namespace Microsoft.Diagnostics.Tracing
         private bool m_asyncStitchActive;
         private AsyncCallStacksIndex m_asyncIndex;
         private AsyncStitchBoundaryCache m_asyncBoundaries;
+        private Func<CodeAddressIndex, AsyncStitchBoundaryInfo> m_asyncClassify;
+        private Func<ProcessIndex, AsyncCallstackKind, bool> m_asyncMethodCompletionObserved;
         private Func<CodeAddressIndex, MethodIndex> m_asyncMethodOf;
         private StitchDiagnostics m_asyncStitchDiagnostics;
+        private StitchDiagnostics m_asyncSampleDiagnostics;
+        private List<AsyncCallStack> m_asyncSegments;
+        private List<StitchSyncFrame> m_asyncSyncFrames;
+        private List<StitchedFrame> m_asyncStitchedFrames;
+        private Dictionary<CodeAddressIndex, StackSourceFrameIndex> m_asyncLogicalFrameByCodeAddress;
+        private Dictionary<ulong, StackSourceFrameIndex> m_asyncPlaceholderFrameByMethodId;
 
         // These are boring caches of frame names which speed things up a bit.  
         private Dictionary<double, StackSourceFrameIndex> m_nodeNameInternTable;

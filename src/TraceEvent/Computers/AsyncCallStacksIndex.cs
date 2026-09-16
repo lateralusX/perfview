@@ -114,12 +114,23 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         public IReadOnlyList<AsyncCallStack> GetAsyncCallStacks(AsyncThreadKey thread, long qpc)
         {
             var result = new List<AsyncCallStack>();
+            GetAsyncCallStacks(thread, qpc, result);
+            return result;
+        }
+
+        internal void GetAsyncCallStacks(AsyncThreadKey thread, long qpc, List<AsyncCallStack> result)
+        {
+            if (result == null)
+            {
+                throw new ArgumentNullException(nameof(result));
+            }
+
+            result.Clear();
             if (_threads.TryGetValue(thread, out ThreadCallStacks callStacks))
             {
                 callStacks.QueryIndex().Stab(qpc, result);
-                result.Sort((a, b) => a.Depth.CompareTo(b.Depth));
+                result.Sort(CompareDepth);
             }
-            return result;
         }
 
         /// <summary>All recorded async call stacks for a thread, in the order they closed.</summary>
@@ -241,6 +252,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         private AsyncCallStackFrames ResolveFrames(AsyncCallStackFramesIndex index) => _internedAsyncCallStackFrames[(int)index];
+
+        private static int CompareDepth(AsyncCallStack left, AsyncCallStack right) =>
+            left.Depth.CompareTo(right.Depth);
 
         private CompletionAvailability GetCompletionAvailability(ProcessIndex processIndex)
         {

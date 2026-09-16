@@ -391,7 +391,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
         public int Length { get { return GetInt32At(0); } }
 
         /// <summary>The encoded async-profiler buffer. Decode with <see cref="AsyncProfilerTraceEventParser.ParseBuffer(byte[], IAsyncProfilerSubEventSink)"/>.</summary>
-        public byte[] Buffer { get { return GetByteArrayAt(4, Length); } }
+        public byte[] Buffer { get { return EventData(null, 0, 4, Length); } }
 
         #region Private
         internal AsyncEventsTraceData(Action<AsyncEventsTraceData> action, int eventID, int task, string taskName, Guid taskGuid, int opcode, string opcodeName, Guid providerGuid, string providerName)

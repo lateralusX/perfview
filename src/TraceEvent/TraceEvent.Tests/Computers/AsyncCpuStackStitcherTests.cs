@@ -124,6 +124,60 @@ namespace TraceEventTests
         }
 
         [Fact]
+        public void StitchInto_ReusesAndClearsCallerOwnedBuffers()
+        {
+            var s = new Scenario();
+            AsyncCallStack segment = s.Segment(
+                AsyncCallstackKind.RuntimeAsync,
+                frameCodeAddrs: new[] { 200, 201 },
+                frameMethods: new[] { 50, 51 });
+            var stitchedSync = new[]
+            {
+                s.Sync(10, 50),
+                s.Boundary(11, Wrapper(0)),
+                s.Sync(12, 99),
+            };
+            var output = new List<StitchedFrame>();
+            var diagnostics = new StitchDiagnostics();
+
+            AsyncCpuStackStitcher.StitchInto(
+                stitchedSync,
+                new[] { segment },
+                Qpc,
+                s.Classify,
+                (processIndex, kind) => s.MethodCompletionObserved(kind),
+                (ProcessIndex)1,
+                s.MethodOf,
+                trace: false,
+                output,
+                diagnostics);
+
+            Assert.Equal(
+                new[] { Scenario.CA(10), Scenario.CA(201), Scenario.CA(12) },
+                output.Select(frame => frame.CodeAddress));
+            Assert.Equal(1, diagnostics.SegmentsProcessed);
+
+            var passthroughSync = new[] { s.Sync(20, 60), s.Sync(21, 61) };
+            AsyncCpuStackStitcher.StitchInto(
+                passthroughSync,
+                Array.Empty<AsyncCallStack>(),
+                Qpc,
+                s.Classify,
+                (processIndex, kind) => s.MethodCompletionObserved(kind),
+                (ProcessIndex)1,
+                s.MethodOf,
+                trace: false,
+                output,
+                diagnostics);
+
+            Assert.Equal(
+                new[] { Scenario.CA(20), Scenario.CA(21) },
+                output.Select(frame => frame.CodeAddress));
+            Assert.Equal(0, diagnostics.SegmentsProcessed);
+            Assert.Equal(0, diagnostics.V2WrapperFallbackUsed);
+        }
+
+        [Fact]
         public void NoSegments_WrapperIsLeaf_IsVerbatim()
         {
             // No async segment covers this sample and the sampled leaf is a continuation-wrapper. With no ancestry to
@@ -962,6 +1016,40 @@ namespace TraceEventTests
 
             Assert.Equal(1, result.Diagnostics.BoundariesNotFound);
             Assert.Contains(result.Diagnostics.Messages, m => m.Contains("segment[0]") && m.Contains("boundary=no-boundary"));
+        }
+
+        [Fact]
+        public void Diagnostics_BoundsRetainedMessages()
+        {
+            var diagnostics = new StitchDiagnostics();
+
+            for (int i = 0; i < 1_100; i++)
+            {
+                diagnostics.Note("message " + i);
+            }
+
+            Assert.Equal(1_024, diagnostics.Messages.Count);
+            Assert.Equal(76, diagnostics.MessagesDropped);
+        }
+
+        [Fact]
+        public void Diagnostics_ClearAndAddToCoverEveryCounter()
+        {
+            System.Reflection.FieldInfo[] counters = typeof(StitchDiagnostics).GetFields()
+                .Where(field => field.IsPublic && !field.IsStatic && field.FieldType == typeof(int))
+                .ToArray();
+            var source = new StitchDiagnostics();
+            foreach (System.Reflection.FieldInfo counter in counters)
+            {
+                counter.SetValue(source, 1);
+            }
+
+            var target = new StitchDiagnostics();
+            source.AddTo(target);
+            Assert.All(counters, counter => Assert.Equal(1, counter.GetValue(target)));
+
+            source.Clear();
+            Assert.All(counters, counter => Assert.Equal(0, counter.GetValue(source)));
         }
     }
 }

@@ -21,6 +21,7 @@
 
   <ItemGroup>
     <Compile Include="..\TraceEvent.Tests\Symbols\ElfBuilder.cs" Link="ElfBuilder.cs" />
+    <Compile Include="..\TraceEvent.Tests\Parsing\AsyncProfilerTestHelpers.cs" Link="AsyncProfilerTestHelpers.cs" />
   </ItemGroup>
 
   <ItemGroup>
