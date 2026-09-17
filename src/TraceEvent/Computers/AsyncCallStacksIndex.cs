@@ -146,14 +146,37 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             AsyncCallStack.CompletionDelta[] methodCompletions, AsyncCallStack.CompletionDelta[] exceptionCompletions, long[] wrapperResets)
         {
             AsyncCallStackFramesIndex framesIndex = Intern(kind, methodIds, frameStates, thread.ProcessIndex, out AsyncCallStackFrames frames);
+            return Add(thread, framesIndex, frames, depth, continuationIndexBase, wrapperCount, startQpc, endQpc,
+                methodCompletions, exceptionCompletions, wrapperResets);
+        }
+
+        internal AsyncCallStack Add(AsyncThreadKey thread, AsyncCallStackFramesIndex framesIndex, AsyncCallStackFrames frames,
+            int depth, byte continuationIndexBase, byte wrapperCount, long startQpc, long endQpc,
+            AsyncCallStack.CompletionDelta[] methodCompletions, AsyncCallStack.CompletionDelta[] exceptionCompletions, long[] wrapperResets)
+        {
             var callStack = new AsyncCallStack(depth, framesIndex, frames, continuationIndexBase, wrapperCount, startQpc, endQpc, methodCompletions, exceptionCompletions, wrapperResets);
             GetOrCreate(thread).Add(callStack);
             return callStack;
         }
 
+        internal bool TryGetInternedFrames(ProcessIndex processIndex, AsyncCallstackKind kind,
+            ulong[] methodIds, int[] frameStates, int frameCount,
+            out AsyncCallStackFramesIndex framesIndex, out AsyncCallStackFrames frames)
+        {
+            var key = new FrameKey(processIndex, kind, methodIds, frameStates, frameCount);
+            if (_frameKeyToIndex.TryGetValue(key, out framesIndex))
+            {
+                frames = _internedAsyncCallStackFrames[(int)framesIndex];
+                return true;
+            }
+
+            frames = null;
+            return false;
+        }
+
         private AsyncCallStackFramesIndex Intern(AsyncCallstackKind kind, ulong[] methodIds, int[] frameStates, ProcessIndex processIndex, out AsyncCallStackFrames frames)
         {
-            var key = new FrameKey(processIndex, kind, methodIds, frameStates);
+            var key = new FrameKey(processIndex, kind, methodIds, frameStates, methodIds.Length);
             if (_frameKeyToIndex.TryGetValue(key, out AsyncCallStackFramesIndex existing))
             {
                 frames = _internedAsyncCallStackFrames[(int)existing];
@@ -385,25 +408,27 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             private readonly AsyncCallstackKind _kind;
             private readonly ulong[] _methodIds;
             private readonly int[] _frameStates;
+            private readonly int _frameCount;
             private readonly int _hash;
 
-            public FrameKey(ProcessIndex processIndex, AsyncCallstackKind kind, ulong[] methodIds, int[] frameStates)
+            public FrameKey(ProcessIndex processIndex, AsyncCallstackKind kind, ulong[] methodIds, int[] frameStates, int frameCount)
             {
                 _processIndex = processIndex;
                 _kind = kind;
                 _methodIds = methodIds;
                 _frameStates = frameStates;
+                _frameCount = frameCount;
 
                 int hash = ((int)processIndex * 31) + (int)kind;
                 unchecked
                 {
-                    for (int i = 0; i < methodIds.Length; i++)
+                    for (int i = 0; i < frameCount; i++)
                     {
                         hash = (hash * 31) + methodIds[i].GetHashCode();
                     }
                     if (frameStates != null)
                     {
-                        for (int i = 0; i < frameStates.Length; i++)
+                        for (int i = 0; i < frameCount; i++)
                         {
                             hash = (hash * 31) + frameStates[i];
                         }
@@ -414,11 +439,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
             public bool Equals(FrameKey other)
             {
-                if (_processIndex != other._processIndex || _kind != other._kind || _hash != other._hash || _methodIds.Length != other._methodIds.Length)
+                if (_processIndex != other._processIndex || _kind != other._kind || _hash != other._hash || _frameCount != other._frameCount)
                 {
                     return false;
                 }
-                for (int i = 0; i < _methodIds.Length; i++)
+                for (int i = 0; i < _frameCount; i++)
                 {
                     if (_methodIds[i] != other._methodIds[i])
                     {
@@ -431,11 +456,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 }
                 if (_frameStates != null)
                 {
-                    if (_frameStates.Length != other._frameStates.Length)
-                    {
-                        return false;
-                    }
-                    for (int i = 0; i < _frameStates.Length; i++)
+                    for (int i = 0; i < _frameCount; i++)
                     {
                         if (_frameStates[i] != other._frameStates[i])
                         {

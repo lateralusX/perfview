@@ -480,25 +480,8 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
             byte[] buffer, ref int index, int payloadEnd, out AsyncCallstackEvent result)
         {
             result = default;
-            if (payloadEnd - index < 3)
-            {
-                return false;
-            }
-
-            index++; // Reserved callstack id (for future callstack interning).
-            byte continuationIndex = buffer[index++];
-            byte frameCount = buffer[index++];
-
-            ulong parentDispatcherId = 0;
-            if (eventId == AsyncEventID.CreateRuntimeAsyncCallstack)
-            {
-                if (!AsyncProfilerReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out parentDispatcherId))
-                {
-                    return false;
-                }
-            }
-
-            if (!AsyncProfilerReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong dispatcherId))
+            if (!TryReadHeader(eventId, buffer, ref index, payloadEnd, out byte continuationIndex,
+                out byte frameCount, out ulong parentDispatcherId, out ulong dispatcherId))
             {
                 return false;
             }
@@ -514,12 +497,82 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
             var methodIds = new ulong[frameCount];
             int[] frameStates = readState ? new int[frameCount] : null;
 
+            if (!TryReadFrames(buffer, ref index, payloadEnd, frameCount, methodIds, frameStates))
+            {
+                return false;
+            }
+
+            result = new AsyncCallstackEvent(eventId, timestampQpc, header, continuationIndex, frameCount, parentDispatcherId, dispatcherId, methodIds, frameStates);
+            return true;
+        }
+
+        internal static bool TryReadInto(AsyncEventID eventId, long timestampQpc, in AsyncProfilerBufferHeader header,
+            byte[] buffer, ref int index, int payloadEnd, ulong[] methodIds, int[] frameStates, out AsyncCallstackEvent result)
+        {
+            result = default;
+            if (!TryReadHeader(eventId, buffer, ref index, payloadEnd, out byte continuationIndex,
+                out byte frameCount, out ulong parentDispatcherId, out ulong dispatcherId))
+            {
+                return false;
+            }
+
+            if (frameCount == 0)
+            {
+                result = new AsyncCallstackEvent(eventId, timestampQpc, header, continuationIndex, 0, parentDispatcherId, dispatcherId, Array.Empty<ulong>(), null);
+                return true;
+            }
+
+            bool readState = AsyncEventInfo.GetCallstackKind(eventId) == AsyncCallstackKind.StateMachineAsync;
+            if (methodIds == null || methodIds.Length < frameCount ||
+                (readState && (frameStates == null || frameStates.Length < frameCount)))
+            {
+                return false;
+            }
+
+            int[] states = readState ? frameStates : null;
+            if (!TryReadFrames(buffer, ref index, payloadEnd, frameCount, methodIds, states))
+            {
+                return false;
+            }
+
+            result = new AsyncCallstackEvent(eventId, timestampQpc, header, continuationIndex, frameCount, parentDispatcherId, dispatcherId, methodIds, states);
+            return true;
+        }
+
+        private static bool TryReadHeader(AsyncEventID eventId, byte[] buffer, ref int index, int payloadEnd,
+            out byte continuationIndex, out byte frameCount, out ulong parentDispatcherId, out ulong dispatcherId)
+        {
+            continuationIndex = 0;
+            frameCount = 0;
+            parentDispatcherId = 0;
+            dispatcherId = 0;
+            if (payloadEnd - index < 3)
+            {
+                return false;
+            }
+
+            index++; // Reserved callstack id (for future callstack interning).
+            continuationIndex = buffer[index++];
+            frameCount = buffer[index++];
+
+            if (eventId == AsyncEventID.CreateRuntimeAsyncCallstack &&
+                !AsyncProfilerReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out parentDispatcherId))
+            {
+                return false;
+            }
+
+            return AsyncProfilerReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out dispatcherId);
+        }
+
+        private static bool TryReadFrames(byte[] buffer, ref int index, int payloadEnd, int frameCount,
+            ulong[] methodIds, int[] frameStates)
+        {
             if (!AsyncProfilerReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong currentMethodId))
             {
                 return false;
             }
             methodIds[0] = currentMethodId;
-            if (readState)
+            if (frameStates != null)
             {
                 if (!AsyncProfilerReader.TryReadCompressedInt32(buffer, ref index, payloadEnd, out int state0))
                 {
@@ -537,7 +590,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
                 currentMethodId = (ulong)((long)currentMethodId + delta);
                 methodIds[i] = currentMethodId;
 
-                if (readState)
+                if (frameStates != null)
                 {
                     if (!AsyncProfilerReader.TryReadCompressedInt32(buffer, ref index, payloadEnd, out int state))
                     {
@@ -547,7 +600,6 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
                 }
             }
 
-            result = new AsyncCallstackEvent(eventId, timestampQpc, header, continuationIndex, frameCount, parentDispatcherId, dispatcherId, methodIds, frameStates);
             return true;
         }
     }
@@ -700,5 +752,11 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
         void OnSyncClock(in AsyncSyncClockEvent e);
         void OnUnknown(in AsyncUnknownEvent e);
         void OnParseError(in AsyncProfilerParseError e);
+    }
+
+    internal interface IAsyncProfilerCallstackPayloadSink
+    {
+        bool TryOnCallstack(AsyncEventID eventId, long timestampQpc, in AsyncProfilerBufferHeader header,
+            byte[] buffer, ref int index, int payloadEnd);
     }
 }

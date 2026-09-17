@@ -286,6 +286,57 @@ namespace TraceEventTests
         }
 
         [Fact]
+        public void StateDifference_PreventsCallstackDeduplication()
+        {
+            var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
+                .Armed(Start)
+                .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA, 0xB }, new[] { 1, 2 })
+                .Suspend(Start + 20)
+                .ResumeStack(Start + 30, dispatcher: 2, new ulong[] { 0xA, 0xB }, new[] { 1, 3 })
+                .Suspend(Start + 40));
+
+            Assert.Equal(2, computer.DistinctFramesCount);
+        }
+
+        [Fact]
+        public void PrefixMatchWithDifferentFrameCount_PreventsCallstackDeduplication()
+        {
+            var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
+                .Armed(Start)
+                .ResumeRuntimeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA })
+                .SuspendRuntime(Start + 20)
+                .ResumeRuntimeStack(Start + 30, dispatcher: 2, new ulong[] { 0xA, 0xB })
+                .SuspendRuntime(Start + 40));
+
+            Assert.Equal(2, computer.DistinctFramesCount);
+        }
+
+        [Fact]
+        public void DeduplicatedResume_PromotesToIndependentFramesWhenAppended()
+        {
+            var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
+                .Armed(Start)
+                .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA }, new[] { 1 })
+                .Suspend(Start + 20)
+                .ResumeStack(Start + 30, dispatcher: 2, new ulong[] { 0xA }, new[] { 1 })
+                .AppendStack(Start + 31, dispatcher: 2, new ulong[] { 0xB }, new[] { 2 })
+                .Suspend(Start + 40));
+
+            Assert.Equal(2, computer.DistinctFramesCount);
+
+            AsyncCallStack original = Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 15));
+            Assert.Equal(1, original.Frames.FrameCount);
+            Assert.Equal(0xAUL, original.Frames.MethodIdAt(0));
+
+            AsyncCallStack atResume = Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 30));
+            AsyncCallStack afterAppend = Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 35));
+            Assert.Same(atResume, afterAppend);
+            Assert.Same(atResume.Frames, afterAppend.Frames);
+            Assert.Equal(new ulong[] { 0xA, 0xB }, new[] { atResume.Frames.MethodIdAt(0), atResume.Frames.MethodIdAt(1) });
+            Assert.Equal(new[] { 1, 2 }, new[] { atResume.Frames.FrameStateAt(0), atResume.Frames.FrameStateAt(1) });
+        }
+
+        [Fact]
         public void MultipleThreads_AreIsolated()
         {
             var computer = new AsyncProfilerComputer();

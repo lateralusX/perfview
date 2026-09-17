@@ -388,7 +388,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// interned at pop</b>.
     /// </para>
     /// </summary>
-    public sealed class AsyncProfilerComputer : IAsyncProfilerSubEventSink
+    public sealed class AsyncProfilerComputer : IAsyncProfilerSubEventSink, IAsyncProfilerCallstackPayloadSink
     {
         // Resume callstacks push a new async call stack onto the thread's nesting stack.
         private static bool IsResumeCallstack(AsyncEventID id) =>
@@ -404,6 +404,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         private readonly Dictionary<AsyncThreadKey, AsyncCallStacks> _threads = new Dictionary<AsyncThreadKey, AsyncCallStacks>();
         private readonly Dictionary<ProcessIndex, ProcessState> _processes = new Dictionary<ProcessIndex, ProcessState>();
         private readonly Stack<AsyncCallStackBuilder> _builderPool = new Stack<AsyncCallStackBuilder>();
+        private readonly ulong[] _callstackMethodIds = new ulong[byte.MaxValue];
+        private readonly int[] _callstackFrameStates = new int[byte.MaxValue];
 
         private ProcessIndex _currentProcessIndex;
 
@@ -508,7 +510,22 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         void IAsyncProfilerSubEventSink.OnContextComplete(in AsyncContextEvent e) => CloseTop(ThreadKeyOf(e.OsThreadId), e.TimestampQpc);
 
-        void IAsyncProfilerSubEventSink.OnCallstack(in AsyncCallstackEvent e)
+        void IAsyncProfilerSubEventSink.OnCallstack(in AsyncCallstackEvent e) => ProcessCallstack(e, reusablePayload: false);
+
+        bool IAsyncProfilerCallstackPayloadSink.TryOnCallstack(AsyncEventID eventId, long timestampQpc,
+            in AsyncProfilerBufferHeader header, byte[] buffer, ref int index, int payloadEnd)
+        {
+            if (!AsyncCallstackEvent.TryReadInto(eventId, timestampQpc, header, buffer, ref index, payloadEnd,
+                _callstackMethodIds, _callstackFrameStates, out AsyncCallstackEvent callstack))
+            {
+                return false;
+            }
+
+            ProcessCallstack(callstack, reusablePayload: true);
+            return true;
+        }
+
+        private void ProcessCallstack(in AsyncCallstackEvent e, bool reusablePayload)
         {
             AsyncCallStacks state = GetOrCreate(ThreadKeyOf(e.OsThreadId));
             if (!state.Armed)
@@ -519,7 +536,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             bool accepted;
             if (IsResumeCallstack(e.EventId))
             {
-                state.Push(RentBuilder(e, CurrentProcess.WrapperCount));
+                state.Push(RentBuilder(e, CurrentProcess.WrapperCount, reusablePayload));
                 accepted = true;
             }
             else if (IsAppendCallstack(e.EventId))
@@ -545,7 +562,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             // so a covering method load binds it even if this async call stack is only committed later by Finish().
             if (OnFrameObserved != null && e.MethodIds != null)
             {
-                for (int i = 0; i < e.MethodIds.Length; i++)
+                for (int i = 0; i < e.FrameCount; i++)
                 {
                     if (e.MethodIds[i] != 0)
                     {
@@ -731,17 +748,24 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         private void Commit(AsyncThreadKey key, AsyncCallStackBuilder builder, long endQpc)
         {
-            ulong[] methodIds = builder.GetMethodIds();
-            int[] frameStates = builder.GetFrameStates();
             AsyncCallStack.CompletionDelta[] methodCompletions = builder.GetMethodCompletions();
             AsyncCallStack.CompletionDelta[] exceptionCompletions = builder.GetExceptionCompletions();
             long[] wrapperResets = builder.GetWrapperResets();
 
             try
             {
-                _index.Add(key, builder.Kind, methodIds, frameStates,
-                    builder.Depth, builder.ContinuationIndexBase, builder.WrapperCount, builder.StartQpc, endQpc,
-                    methodCompletions, exceptionCompletions, wrapperResets);
+                if (builder.HasInternedFrames)
+                {
+                    _index.Add(key, builder.FramesIndex, builder.Frames,
+                        builder.Depth, builder.ContinuationIndexBase, builder.WrapperCount, builder.StartQpc, endQpc,
+                        methodCompletions, exceptionCompletions, wrapperResets);
+                }
+                else
+                {
+                    _index.Add(key, builder.Kind, builder.GetMethodIds(), builder.GetFrameStates(),
+                        builder.Depth, builder.ContinuationIndexBase, builder.WrapperCount, builder.StartQpc, endQpc,
+                        methodCompletions, exceptionCompletions, wrapperResets);
+                }
             }
             finally
             {
@@ -750,12 +774,22 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
         }
 
-        private AsyncCallStackBuilder RentBuilder(in AsyncCallstackEvent e, byte wrapperCount)
+        private AsyncCallStackBuilder RentBuilder(in AsyncCallstackEvent e, byte wrapperCount, bool reusablePayload)
         {
             AsyncCallStackBuilder builder = _builderPool.Count != 0
                 ? _builderPool.Pop()
                 : new AsyncCallStackBuilder();
-            builder.Initialize(e, wrapperCount);
+
+            if (reusablePayload && _index.TryGetInternedFrames(
+                _currentProcessIndex, e.Kind, e.MethodIds, e.FrameStates, e.FrameCount,
+                out AsyncCallStackFramesIndex framesIndex, out AsyncCallStackFrames frames))
+            {
+                builder.Initialize(e, wrapperCount, framesIndex, frames);
+            }
+            else
+            {
+                builder.Initialize(e, wrapperCount, copyFrames: reusablePayload);
+            }
             return builder;
         }
 
@@ -802,6 +836,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             public byte WrapperCount;
             public AsyncCallstackKind Kind;
             public int Depth;
+            public AsyncCallStackFramesIndex FramesIndex;
+            public AsyncCallStackFrames Frames;
+
+            public bool HasInternedFrames => Frames != null;
 
             public List<AsyncCallStack.CompletionDelta> MethodCompletions =>
                 _methodCompletions ?? (_methodCompletions = new List<AsyncCallStack.CompletionDelta>());
@@ -812,20 +850,36 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             public List<long> WrapperResets =>
                 _wrapperResets ?? (_wrapperResets = new List<long>());
 
-            public void Initialize(in AsyncCallstackEvent e, byte wrapperCount)
+            public void Initialize(in AsyncCallstackEvent e, byte wrapperCount, bool copyFrames)
             {
-                DispatcherId = e.DispatcherId;
-                StartQpc = e.TimestampQpc;
-                ContinuationIndexBase = e.ContinuationIndex;
-                WrapperCount = wrapperCount;
-                Kind = e.Kind;
-                _methodIds = e.MethodIds ?? Array.Empty<ulong>();
-                _frameStates = e.FrameStates;
+                InitializeHeader(e, wrapperCount);
+                if (!copyFrames)
+                {
+                    _methodIds = e.MethodIds ?? Array.Empty<ulong>();
+                    _frameStates = e.FrameStates;
+                    return;
+                }
+
+                _methodIds = new ulong[e.FrameCount];
+                Array.Copy(e.MethodIds, _methodIds, e.FrameCount);
+                if (e.FrameStates != null)
+                {
+                    _frameStates = new int[e.FrameCount];
+                    Array.Copy(e.FrameStates, _frameStates, e.FrameCount);
+                }
+            }
+
+            public void Initialize(in AsyncCallstackEvent e, byte wrapperCount,
+                AsyncCallStackFramesIndex framesIndex, AsyncCallStackFrames frames)
+            {
+                InitializeHeader(e, wrapperCount);
+                FramesIndex = framesIndex;
+                Frames = frames;
             }
 
             public void AddFrames(in AsyncCallstackEvent e)
             {
-                if (e.MethodIds == null || e.MethodIds.Length == 0)
+                if (e.MethodIds == null || e.FrameCount == 0)
                 {
                     return;
                 }
@@ -833,25 +887,25 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 bool hasState = e.FrameStates != null;
                 if (_methodIdsBuilder == null)
                 {
-                    _methodIdsBuilder = new List<ulong>(_methodIds.Length + e.MethodIds.Length);
-                    _methodIdsBuilder.AddRange(_methodIds);
+                    int existingCount = HasInternedFrames ? Frames.FrameCount : _methodIds.Length;
+                    _methodIdsBuilder = new List<ulong>(existingCount + e.FrameCount);
+                    for (int i = 0; i < existingCount; i++)
+                    {
+                        _methodIdsBuilder.Add(HasInternedFrames ? Frames.MethodIdAt(i) : _methodIds[i]);
+                    }
 
-                    if (_frameStates != null || hasState)
+                    if (Kind == AsyncCallstackKind.StateMachineAsync)
                     {
                         // Back-fill zero states for frames previously added without state so arrays stay aligned.
-                        _frameStatesBuilder = new List<int>(_methodIds.Length + e.MethodIds.Length);
-                        if (_frameStates != null)
+                        _frameStatesBuilder = new List<int>(existingCount + e.FrameCount);
+                        for (int i = 0; i < existingCount; i++)
                         {
-                            _frameStatesBuilder.AddRange(_frameStates);
-                        }
-                        else
-                        {
-                            for (int i = 0; i < _methodIds.Length; i++)
-                            {
-                                _frameStatesBuilder.Add(0);
-                            }
+                            _frameStatesBuilder.Add(HasInternedFrames ? Frames.FrameStateAt(i) : _frameStates[i]);
                         }
                     }
+
+                    FramesIndex = AsyncCallStackFramesIndex.Invalid;
+                    Frames = null;
                 }
                 else if (hasState && _frameStatesBuilder == null)
                 {
@@ -862,7 +916,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     }
                 }
 
-                for (int i = 0; i < e.MethodIds.Length; i++)
+                for (int i = 0; i < e.FrameCount; i++)
                 {
                     _methodIdsBuilder.Add(e.MethodIds[i]);
                     if (_frameStatesBuilder != null)
@@ -892,6 +946,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 WrapperCount = 0;
                 Kind = default;
                 Depth = 0;
+                FramesIndex = AsyncCallStackFramesIndex.Invalid;
+                Frames = null;
                 _methodIds = null;
                 _frameStates = null;
                 _methodIdsBuilder = null;
@@ -899,6 +955,17 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 _methodCompletions?.Clear();
                 _exceptionCompletions?.Clear();
                 _wrapperResets?.Clear();
+            }
+
+            private void InitializeHeader(in AsyncCallstackEvent e, byte wrapperCount)
+            {
+                DispatcherId = e.DispatcherId;
+                StartQpc = e.TimestampQpc;
+                ContinuationIndexBase = e.ContinuationIndex;
+                WrapperCount = wrapperCount;
+                Kind = e.Kind;
+                FramesIndex = AsyncCallStackFramesIndex.Invalid;
+                Frames = null;
             }
 
             private ulong[] _methodIds;

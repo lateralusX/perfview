@@ -177,6 +177,32 @@ namespace TraceEventTests
         }
 
         [Fact]
+        public void PublicParser_CallstackArraysAreIndependentlyOwned()
+        {
+            ulong[] methods = { 0x8000, 0x8100 };
+            int[] states = { 1, 2 };
+            var buffer = new AsyncProfilerBufferBuilder()
+                .Callstack(AsyncEventID.ResumeStateMachineAsyncCallstack, StartQpc + 1, continuationIndex: 0,
+                    parentDispatcherId: 0, dispatcherId: 1, methods, states)
+                .Callstack(AsyncEventID.ResumeStateMachineAsyncCallstack, StartQpc + 2, continuationIndex: 0,
+                    parentDispatcherId: 0, dispatcherId: 2, methods, states)
+                .Build();
+
+            var sink = new CollectingSink();
+            AsyncProfilerTraceEventParser.ParseBuffer(buffer, sink);
+
+            Assert.Empty(sink.Errors);
+            Assert.Equal(2, sink.Callstacks.Count);
+            Assert.NotSame(sink.Callstacks[0].MethodIds, sink.Callstacks[1].MethodIds);
+            Assert.NotSame(sink.Callstacks[0].FrameStates, sink.Callstacks[1].FrameStates);
+
+            sink.Callstacks[0].MethodIds[0] = 0;
+            sink.Callstacks[0].FrameStates[0] = 0;
+            Assert.Equal(0x8000UL, sink.Callstacks[1].MethodIds[0]);
+            Assert.Equal(1, sink.Callstacks[1].FrameStates[0]);
+        }
+
+        [Fact]
         public void CachedCallstack_HasNoFrames()
         {
             var buffer = new AsyncProfilerBufferBuilder()

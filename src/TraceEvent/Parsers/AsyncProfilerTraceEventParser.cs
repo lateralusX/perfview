@@ -302,11 +302,22 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
                 case AsyncEventID.ResumeStateMachineAsyncCallstack:
                 case AsyncEventID.AppendStateMachineAsyncCallstack:
                 {
-                    if (AsyncCallstackEvent.TryRead(eventId, timestampQpc, header, buffer, ref index, payloadEnd, out AsyncCallstackEvent callstack))
+                    bool parsed;
+                    if (sink is IAsyncProfilerCallstackPayloadSink payloadSink)
+                    {
+                        parsed = payloadSink.TryOnCallstack(eventId, timestampQpc, header, buffer, ref index, payloadEnd);
+                    }
+                    else if (AsyncCallstackEvent.TryRead(eventId, timestampQpc, header, buffer, ref index, payloadEnd, out AsyncCallstackEvent callstack))
                     {
                         sink.OnCallstack(callstack);
+                        parsed = true;
                     }
                     else
+                    {
+                        parsed = false;
+                    }
+
+                    if (!parsed)
                     {
                         ReportMalformedPayload(eventId, payloadStart, sink);
                     }
