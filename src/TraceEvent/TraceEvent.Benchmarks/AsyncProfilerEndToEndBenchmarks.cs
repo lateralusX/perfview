@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 
 using BenchmarkDotNet.Attributes;
@@ -60,6 +61,7 @@ namespace TraceEventBenchmarks
             _traceLog = new TraceLog(_fixture.EtlxPath);
             _controlTraceLog = new TraceLog(_fixture.ControlEtlxPath);
             _symbolReader = new SymbolReader(TextWriter.Null);
+            ReportAsyncIndexMemory(MeasureAsyncIndexMemory(_traceLog), _fixture.ContextCount);
             _fixture.Validate(_traceLog, _controlTraceLog, _symbolReader);
         }
 
@@ -177,6 +179,87 @@ namespace TraceEventBenchmarks
             stackSource.ForEach(_ => count++);
             return count;
         }
+
+        private static AsyncIndexMemoryUsage MeasureAsyncIndexMemory(TraceLog traceLog)
+        {
+            using (Process process = Process.GetCurrentProcess())
+            {
+                CollectGarbage();
+                long managedHeapBefore = GC.GetTotalMemory(forceFullCollection: false);
+                process.Refresh();
+                long privateBytesBefore = process.PrivateMemorySize64;
+                long workingSetBefore = process.WorkingSet64;
+
+                AsyncCallStacksIndex index = traceLog.AsyncCallStacks;
+                if (index == null)
+                {
+                    throw new InvalidOperationException("The generated ETLX does not contain an async callstack index.");
+                }
+
+                CollectGarbage();
+                long managedHeapAfter = GC.GetTotalMemory(forceFullCollection: false);
+                process.Refresh();
+                long privateBytesAfter = process.PrivateMemorySize64;
+                long workingSetAfter = process.WorkingSet64;
+                GC.KeepAlive(index);
+
+                return new AsyncIndexMemoryUsage(
+                    managedHeapBefore,
+                    managedHeapAfter,
+                    privateBytesBefore,
+                    privateBytesAfter,
+                    workingSetBefore,
+                    workingSetAfter);
+            }
+        }
+
+        private static void CollectGarbage()
+        {
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
+            GC.WaitForPendingFinalizers();
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
+        }
+
+        private static void ReportAsyncIndexMemory(AsyncIndexMemoryUsage memory, int contextCount)
+        {
+            Console.WriteLine(
+                $"Async index retained memory after full GC: " +
+                $"managedHeap={memory.ManagedHeapBefore:N0}->{memory.ManagedHeapAfter:N0} bytes, " +
+                $"delta={memory.ManagedHeapDelta:N0} ({memory.ManagedHeapDelta / (double)contextCount:F2}/context); " +
+                $"privateBytes={memory.PrivateBytesBefore:N0}->{memory.PrivateBytesAfter:N0} bytes, " +
+                $"delta={memory.PrivateBytesDelta:N0} ({memory.PrivateBytesDelta / (double)contextCount:F2}/context); " +
+                $"workingSet={memory.WorkingSetBefore:N0}->{memory.WorkingSetAfter:N0} bytes, " +
+                $"delta={memory.WorkingSetDelta:N0} ({memory.WorkingSetDelta / (double)contextCount:F2}/context).");
+        }
+
+        private readonly struct AsyncIndexMemoryUsage
+        {
+            public AsyncIndexMemoryUsage(
+                long managedHeapBefore,
+                long managedHeapAfter,
+                long privateBytesBefore,
+                long privateBytesAfter,
+                long workingSetBefore,
+                long workingSetAfter)
+            {
+                ManagedHeapBefore = managedHeapBefore;
+                ManagedHeapAfter = managedHeapAfter;
+                PrivateBytesBefore = privateBytesBefore;
+                PrivateBytesAfter = privateBytesAfter;
+                WorkingSetBefore = workingSetBefore;
+                WorkingSetAfter = workingSetAfter;
+            }
+
+            public long ManagedHeapBefore { get; }
+            public long ManagedHeapAfter { get; }
+            public long ManagedHeapDelta => ManagedHeapAfter - ManagedHeapBefore;
+            public long PrivateBytesBefore { get; }
+            public long PrivateBytesAfter { get; }
+            public long PrivateBytesDelta => PrivateBytesAfter - PrivateBytesBefore;
+            public long WorkingSetBefore { get; }
+            public long WorkingSetAfter { get; }
+            public long WorkingSetDelta => WorkingSetAfter - WorkingSetBefore;
+        }
     }
 
     internal sealed class AsyncProfilerEndToEndFixture : IDisposable
@@ -253,7 +336,7 @@ namespace TraceEventBenchmarks
         public string ControlConversionEtlxPath { get; }
         public string PreservedBuffersConversionEtlxPath { get; }
 
-        private int ContextCount => _contextRatePerSecond * _durationSeconds;
+        public int ContextCount => _contextRatePerSecond * _durationSeconds;
         private int CpuSampleCount => _durationSeconds * 1_000;
         private int UnmatchedSampleCount => CpuSampleCount / UnmatchedSamplePeriod;
         private int MatchedSampleCount => CpuSampleCount - UnmatchedSampleCount;
