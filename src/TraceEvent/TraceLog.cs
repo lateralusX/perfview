@@ -2146,7 +2146,8 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
             // Build the per-thread active async call stack index (RuntimeAsync + StateMachineAsync) from the
             // AsyncProfilerEventSource while the raw events are processed (like the GC dynamic parser above,
             // it must be created here so the AsyncEvents are observed during processing). The raw AsyncEvents
-            // event is left untouched in the stream; only the derived index is added.
+            // records are omitted after indexing by default; callers may preserve them via
+            // TraceLogOptions.KeepAsyncProfilerEvents (or KeepAllEvents).
             //
             // The async buffer's internal QPC timestamps are recorded and queried as-is: because the
             // AsyncEvents are carried in the same ETW/EventPipe file, their QPC is the same clock domain as
@@ -2156,6 +2157,10 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
             var asyncProfilerComputer = new AsyncProfilerComputer(
                 asyncProfilerParser,
                 data => Processes.GetOrCreateProcess(data.ProcessID, data.TimeStampQPC).ProcessIndex);
+            if (!options.KeepAsyncProfilerEvents)
+            {
+                asyncProfilerParser.AsyncEvents += delegate { removeFromStream = true; };
+            }
 
             // Symbolize the async call stack frames incrementally, driven by the frames actually present (not the total
             // method count). Each frame stores only a CodeAddressIndex, pointing into TraceLog's already-persisted
@@ -11603,6 +11608,13 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
         /// </para>
         /// </summary>
         public bool KeepAllEvents;
+        /// <summary>
+        /// Preserve the raw async-profiler <c>AsyncEvents</c> records in the ETLX after their persisted
+        /// async-callstack index has been built. The default is false because the opaque buffers are not
+        /// needed for async-stack queries or stitching. Set true when raw-buffer inspection or future
+        /// re-decoding from a standalone ETLX is required. <see cref="KeepAllEvents"/> also preserves them.
+        /// </summary>
+        public bool KeepAsyncProfilerEvents;
         /// <summary>
         /// Sometimes ETL files are too big , and you just want to look at a fraction of it to speed things up
         /// (or to keep file size under control).  The MaxEventCount property allows that.   10M will produce a 3-4GB ETLX file.

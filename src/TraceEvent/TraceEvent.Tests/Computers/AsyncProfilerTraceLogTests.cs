@@ -111,6 +111,7 @@ namespace TraceEventTests
 
             string nettracePath = Path.Combine(Path.GetTempPath(), $"asyncprofiler_{Guid.NewGuid():N}.nettrace");
             string etlxPath = null;
+            string preservedEtlxPath = null;
             try
             {
                 File.WriteAllBytes(nettracePath, writer.ToArray());
@@ -118,8 +119,8 @@ namespace TraceEventTests
 
                 using (var traceLog = new TraceLog(etlxPath))
                 {
-                    // Find the CPU sample event's thread + QPC from the reopened ETLX, and confirm the raw
-                    // AsyncEvents event round-tripped as a first-class event.
+                    // Find the CPU sample event's thread + QPC from the reopened ETLX. The raw AsyncEvents
+                    // records are omitted by default because the persisted index supersedes them.
                     int asyncEventsCount = 0;
                     ThreadIndex sampleThreadIndex = ThreadIndex.Invalid;
                     long sampleEventQpc = 0;
@@ -141,7 +142,7 @@ namespace TraceEventTests
                     }
 #pragma warning restore CS0618
 
-                    Assert.True(asyncEventsCount == 2, "events seen: " + string.Join(", ", seen));
+                    Assert.True(asyncEventsCount == 0, "events seen: " + string.Join(", ", seen));
                     Assert.NotEqual(ThreadIndex.Invalid, sampleThreadIndex);
                     Assert.Equal(sampleQpc, sampleEventQpc);
 
@@ -175,6 +176,29 @@ namespace TraceEventTests
                     Assert.Empty(traceLog.GetAsyncCallStacks(ProcessId, 999999, sampleEventQpc));
                     Assert.Empty(traceLog.GetAsyncCallStacks(99999, (ulong)OsThreadId, sampleEventQpc));
                 }
+
+                preservedEtlxPath = nettracePath + ".preserved.etlx";
+                TraceLog.CreateFromEventPipeDataFile(
+                    nettracePath,
+                    preservedEtlxPath,
+                    new TraceLogOptions { KeepAsyncProfilerEvents = true });
+                using (var traceLog = new TraceLog(preservedEtlxPath))
+                {
+                    int asyncEventsCount = 0;
+                    foreach (TraceEvent e in traceLog.Events)
+                    {
+                        if (e.ProviderGuid == AsyncProfilerTraceEventParser.ProviderGuid &&
+                            e.ID == (TraceEventID)AsyncProfilerTraceEventParser.AsyncEventsEventId)
+                        {
+                            asyncEventsCount++;
+                        }
+                    }
+
+                    Assert.Equal(2, asyncEventsCount);
+                    Assert.Equal(
+                        2,
+                        traceLog.GetAsyncCallStacks(ProcessId, (ulong)OsThreadId, sampleQpc).Count);
+                }
             }
             finally
             {
@@ -185,6 +209,10 @@ namespace TraceEventTests
                 if (etlxPath != null && File.Exists(etlxPath))
                 {
                     File.Delete(etlxPath);
+                }
+                if (preservedEtlxPath != null && File.Exists(preservedEtlxPath))
+                {
+                    File.Delete(preservedEtlxPath);
                 }
             }
         }
