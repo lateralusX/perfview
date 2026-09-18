@@ -339,7 +339,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             long endQpc = deserializer.ReadInt64();
 
             int methodCompletionCount = deserializer.ReadInt();
-            var methodCompletions = new CompletionDelta[methodCompletionCount];
+            CompletionDelta[] methodCompletions = methodCompletionCount == 0
+                ? Array.Empty<CompletionDelta>()
+                : new CompletionDelta[methodCompletionCount];
             for (int i = 0; i < methodCompletionCount; i++)
             {
                 long qpc = deserializer.ReadInt64();
@@ -348,7 +350,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             int exceptionCompletionCount = deserializer.ReadInt();
-            var exceptionCompletions = new CompletionDelta[exceptionCompletionCount];
+            CompletionDelta[] exceptionCompletions = exceptionCompletionCount == 0
+                ? Array.Empty<CompletionDelta>()
+                : new CompletionDelta[exceptionCompletionCount];
             for (int i = 0; i < exceptionCompletionCount; i++)
             {
                 long qpc = deserializer.ReadInt64();
@@ -357,7 +361,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             int wrapperResetCount = deserializer.ReadInt();
-            var wrapperResets = new long[wrapperResetCount];
+            long[] wrapperResets = wrapperResetCount == 0
+                ? Array.Empty<long>()
+                : new long[wrapperResetCount];
             for (int i = 0; i < wrapperResetCount; i++)
             {
                 wrapperResets[i] = deserializer.ReadInt64();

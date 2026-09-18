@@ -226,10 +226,9 @@ namespace TraceEventBenchmarks
                 $"Async index retained memory after full GC: " +
                 $"managedHeap={memory.ManagedHeapBefore:N0}->{memory.ManagedHeapAfter:N0} bytes, " +
                 $"delta={memory.ManagedHeapDelta:N0} ({memory.ManagedHeapDelta / (double)contextCount:F2}/context); " +
-                $"privateBytes={memory.PrivateBytesBefore:N0}->{memory.PrivateBytesAfter:N0} bytes, " +
-                $"delta={memory.PrivateBytesDelta:N0} ({memory.PrivateBytesDelta / (double)contextCount:F2}/context); " +
-                $"workingSet={memory.WorkingSetBefore:N0}->{memory.WorkingSetAfter:N0} bytes, " +
-                $"delta={memory.WorkingSetDelta:N0} ({memory.WorkingSetDelta / (double)contextCount:F2}/context).");
+                $"processAfterLoad: privateBytes={memory.PrivateBytesAfter:N0} bytes, " +
+                $"workingSet={memory.WorkingSetAfter:N0} bytes " +
+                $"(before load: privateBytes={memory.PrivateBytesBefore:N0}, workingSet={memory.WorkingSetBefore:N0}).");
         }
 
         private readonly struct AsyncIndexMemoryUsage
@@ -255,10 +254,8 @@ namespace TraceEventBenchmarks
             public long ManagedHeapDelta => ManagedHeapAfter - ManagedHeapBefore;
             public long PrivateBytesBefore { get; }
             public long PrivateBytesAfter { get; }
-            public long PrivateBytesDelta => PrivateBytesAfter - PrivateBytesBefore;
             public long WorkingSetBefore { get; }
             public long WorkingSetAfter { get; }
-            public long WorkingSetDelta => WorkingSetAfter - WorkingSetBefore;
         }
     }
 
