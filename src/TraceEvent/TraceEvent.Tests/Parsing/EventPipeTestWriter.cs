@@ -110,7 +110,7 @@ namespace TraceEventTests
     public enum MetadataTypeCode
     {
         Object = 1,                        // Concatenate together all of the encoded fields
-        Boolean32 = 3,                     // A 4-byte LE integer with value 0=false and 1=true.  
+        Boolean32 = 3,                     // A 4-byte LE integer with value 0=false and 1=true.
         UTF16CodeUnit = 4,                 // a 2-byte UTF16 code unit
         SByte = 5,                         // 1-byte signed integer
         Byte = 6,                          // 1-byte unsigned integer
@@ -823,7 +823,7 @@ namespace TraceEventTests
             BinaryWriter parameterWriter = new BinaryWriter(parameterBlob);
             parameterWriter.WriteNullTerminatedUTF16String(parameterName);
             writeType(parameterWriter);
-            int payloadSize = (int)parameterBlob.Length;                   
+            int payloadSize = (int)parameterBlob.Length;
 
             writer.Write((int)(payloadSize + 4));                              // parameter size includes the leading size field
             writer.Write(parameterBlob.GetBuffer(), 0, payloadSize);
