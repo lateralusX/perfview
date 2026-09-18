@@ -169,14 +169,24 @@ namespace TraceEventTests
     {
         protected BinaryWriter _writer;
 
-        public EventPipeWriter()
+        protected EventPipeWriter()
+            : this(new MemoryStream())
         {
-            _writer = new BinaryWriter(new MemoryStream());
+        }
+
+        protected EventPipeWriter(Stream stream)
+        {
+            _writer = new BinaryWriter(stream);
         }
 
         public byte[] ToArray()
         {
             return (_writer.BaseStream as MemoryStream).ToArray();
+        }
+
+        public void Flush()
+        {
+            _writer.Flush();
         }
 
         abstract public void WriteHeaders();
@@ -229,6 +239,15 @@ namespace TraceEventTests
 
     class EventPipeWriterV6 : EventPipeWriter
     {
+        public EventPipeWriterV6()
+        {
+        }
+
+        protected EventPipeWriterV6(Stream stream)
+            : base(stream)
+        {
+        }
+
         public override void WriteHeaders() => WriteHeaders(null, 6, 0);
 
         public void WriteHeaders(Dictionary<string,string> keyValues, int majorVersion = 6, int minorVersion = 0)

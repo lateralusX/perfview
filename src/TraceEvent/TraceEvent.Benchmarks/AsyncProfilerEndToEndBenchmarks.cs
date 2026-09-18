@@ -24,6 +24,12 @@ namespace TraceEventBenchmarks
         Mixed,
     }
 
+    public enum AsyncProfilerWorkloadProfile
+    {
+        Realistic,
+        High,
+    }
+
     [MemoryDiagnoser]
     public class AsyncProfilerEndToEndBenchmarks
     {
@@ -35,12 +41,15 @@ namespace TraceEventBenchmarks
         [Params(AsyncProfilerKindMode.V2Only, AsyncProfilerKindMode.V1Only, AsyncProfilerKindMode.Mixed)]
         public AsyncProfilerKindMode KindMode { get; set; }
 
+        [Params(AsyncProfilerWorkloadProfile.Realistic, AsyncProfilerWorkloadProfile.High)]
+        public AsyncProfilerWorkloadProfile WorkloadProfile { get; set; }
+
         [GlobalSetup]
         public void Setup()
         {
-            _fixture = AsyncProfilerEndToEndFixture.CreateRealistic(KindMode);
-            File.WriteAllBytes(_fixture.NetTracePath, _fixture.BuildNettrace(includeAsyncProfilerData: true));
-            File.WriteAllBytes(_fixture.ControlNetTracePath, _fixture.BuildNettrace(includeAsyncProfilerData: false));
+            _fixture = AsyncProfilerEndToEndFixture.Create(WorkloadProfile, KindMode);
+            _fixture.WriteNettrace(_fixture.NetTracePath, includeAsyncProfilerData: true);
+            _fixture.WriteNettrace(_fixture.ControlNetTracePath, includeAsyncProfilerData: false);
             TraceLog.CreateFromEventPipeDataFile(_fixture.NetTracePath, _fixture.EtlxPath);
             TraceLog.CreateFromEventPipeDataFile(_fixture.ControlNetTracePath, _fixture.ControlEtlxPath);
             TraceLog.CreateFromEventPipeDataFile(
@@ -177,14 +186,8 @@ namespace TraceEventBenchmarks
         private const long ThreadStreamIndex = 1;
         private const long QpcFrequency = 1_000_000;
         private const long StartQpc = 1_000_000;
-        private const int ContextRatePerSecond = 10_000;
-        private const int DurationSeconds = 30;
-        private const int ContextCount = ContextRatePerSecond * DurationSeconds;
         private const int ContextsPerBuffer = 1_000;
-        private const int CpuSampleCount = DurationSeconds * 1_000;
         private const int UnmatchedSamplePeriod = 20;
-        private const int UnmatchedSampleCount = CpuSampleCount / UnmatchedSamplePeriod;
-        private const int MatchedSampleCount = CpuSampleCount - UnmatchedSampleCount;
         private const int ManagedMethodCount = 1_000;
         private const int AsyncFrameCount = 8;
         private const int DistinctAsyncStackCount = 17;
@@ -209,22 +212,36 @@ namespace TraceEventBenchmarks
         private static readonly Guid s_universalSystemProviderGuid =
             new Guid("8c107b6c-79f8-5231-4de6-2a0e20a3f562");
 
-        private AsyncProfilerEndToEndFixture(string directory, AsyncProfilerKindMode kindMode)
+        private readonly int _contextRatePerSecond;
+        private readonly int _durationSeconds;
+
+        private AsyncProfilerEndToEndFixture(
+            string directory,
+            AsyncProfilerWorkloadProfile workloadProfile,
+            AsyncProfilerKindMode kindMode,
+            int contextRatePerSecond,
+            int durationSeconds)
         {
+            WorkloadProfile = workloadProfile;
             KindMode = kindMode;
+            _contextRatePerSecond = contextRatePerSecond;
+            _durationSeconds = durationSeconds;
             Directory = directory;
+            string profile = workloadProfile.ToString().ToLowerInvariant();
             string mode = kindMode.ToString().ToLowerInvariant();
-            NetTracePath = Path.Combine(directory, "async-realistic-" + mode + ".nettrace");
-            ControlNetTracePath = Path.Combine(directory, "async-realistic-" + mode + "-control.nettrace");
-            EtlxPath = Path.Combine(directory, "async-realistic-" + mode + ".etlx");
-            ControlEtlxPath = Path.Combine(directory, "async-realistic-" + mode + "-control.etlx");
-            PreservedBuffersEtlxPath = Path.Combine(directory, "async-realistic-" + mode + "-preserved.etlx");
-            ConversionEtlxPath = Path.Combine(directory, "async-realistic-" + mode + "-conversion.etlx");
-            ControlConversionEtlxPath = Path.Combine(directory, "async-realistic-" + mode + "-control-conversion.etlx");
+            string name = "async-" + profile + "-" + mode;
+            NetTracePath = Path.Combine(directory, name + ".nettrace");
+            ControlNetTracePath = Path.Combine(directory, name + "-control.nettrace");
+            EtlxPath = Path.Combine(directory, name + ".etlx");
+            ControlEtlxPath = Path.Combine(directory, name + "-control.etlx");
+            PreservedBuffersEtlxPath = Path.Combine(directory, name + "-preserved.etlx");
+            ConversionEtlxPath = Path.Combine(directory, name + "-conversion.etlx");
+            ControlConversionEtlxPath = Path.Combine(directory, name + "-control-conversion.etlx");
             PreservedBuffersConversionEtlxPath =
-                Path.Combine(directory, "async-realistic-" + mode + "-preserved-conversion.etlx");
+                Path.Combine(directory, name + "-preserved-conversion.etlx");
         }
 
+        public AsyncProfilerWorkloadProfile WorkloadProfile { get; }
         public AsyncProfilerKindMode KindMode { get; }
         public string Directory { get; }
         public string NetTracePath { get; }
@@ -236,18 +253,35 @@ namespace TraceEventBenchmarks
         public string ControlConversionEtlxPath { get; }
         public string PreservedBuffersConversionEtlxPath { get; }
 
-        public static AsyncProfilerEndToEndFixture CreateRealistic(AsyncProfilerKindMode kindMode)
+        private int ContextCount => _contextRatePerSecond * _durationSeconds;
+        private int CpuSampleCount => _durationSeconds * 1_000;
+        private int UnmatchedSampleCount => CpuSampleCount / UnmatchedSamplePeriod;
+        private int MatchedSampleCount => CpuSampleCount - UnmatchedSampleCount;
+        private int ContextsPerSample => _contextRatePerSecond / 1_000;
+
+        public static AsyncProfilerEndToEndFixture Create(
+            AsyncProfilerWorkloadProfile workloadProfile,
+            AsyncProfilerKindMode kindMode)
         {
+            int contextRatePerSecond = workloadProfile == AsyncProfilerWorkloadProfile.High ? 100_000 : 10_000;
+            int durationSeconds = 30;
             string directory = Path.Combine(Path.GetTempPath(), "TraceEventAsyncBenchmark_" + Guid.NewGuid().ToString("N"));
             System.IO.Directory.CreateDirectory(directory);
-            return new AsyncProfilerEndToEndFixture(directory, kindMode);
+            return new AsyncProfilerEndToEndFixture(
+                directory,
+                workloadProfile,
+                kindMode,
+                contextRatePerSecond,
+                durationSeconds);
         }
 
-        public byte[] BuildNettrace(bool includeAsyncProfilerData)
+        public void WriteNettrace(string path, bool includeAsyncProfilerData)
         {
-            var writer = new BenchmarkEventPipeWriterV6(QpcFrequency);
-            writer.WriteHeaders();
-            writer.WriteMetadataBlock(
+            using (var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                var writer = new BenchmarkEventPipeWriterV6(stream, QpcFrequency);
+                writer.WriteHeaders();
+                writer.WriteMetadataBlock(
                 new EventMetadata(
                     1,
                     AsyncProfilerTraceEventParser.ProviderName,
@@ -274,32 +308,33 @@ namespace TraceEventBenchmarks
                     ProviderId = s_universalSystemProviderGuid,
                 });
 
-            writer.WriteThreadBlock(w => w.WriteThreadEntry(ThreadStreamIndex, OsThreadId, ProcessId));
-            writer.WriteStackBlock(1, (DistinctAsyncStackCount * 2) + 1, w =>
-            {
-                for (int stackIndex = 0; stackIndex < DistinctAsyncStackCount; stackIndex++)
+                writer.WriteThreadBlock(w => w.WriteThreadEntry(ThreadStreamIndex, OsThreadId, ProcessId));
+                writer.WriteStackBlock(1, (DistinctAsyncStackCount * 2) + 1, w =>
                 {
-                    WriteStack(
-                        w,
-                        MethodAddress(FirstMethodIndex(AsyncCallstackKind.RuntimeAsync, stackIndex)),
-                        WrapperAddress,
-                        DispatchAddress);
-                }
-                for (int stackIndex = 0; stackIndex < DistinctAsyncStackCount; stackIndex++)
-                {
-                    WriteStack(
-                        w,
-                        MethodAddress(FirstMethodIndex(AsyncCallstackKind.StateMachineAsync, stackIndex)),
-                        V1DispatcherAddress,
-                        V1InfrastructureAddress);
-                }
-                WriteStack(w, MethodAddress(UnmatchedMethodIndex), WrapperAddress, DispatchAddress);
-            });
+                    for (int stackIndex = 0; stackIndex < DistinctAsyncStackCount; stackIndex++)
+                    {
+                        WriteStack(
+                            w,
+                            MethodAddress(FirstMethodIndex(AsyncCallstackKind.RuntimeAsync, stackIndex)),
+                            WrapperAddress,
+                            DispatchAddress);
+                    }
+                    for (int stackIndex = 0; stackIndex < DistinctAsyncStackCount; stackIndex++)
+                    {
+                        WriteStack(
+                            w,
+                            MethodAddress(FirstMethodIndex(AsyncCallstackKind.StateMachineAsync, stackIndex)),
+                            V1DispatcherAddress,
+                            V1InfrastructureAddress);
+                    }
+                    WriteStack(w, MethodAddress(UnmatchedMethodIndex), WrapperAddress, DispatchAddress);
+                });
 
-            int sequence = WriteSymbols(writer);
-            WriteWorkload(writer, sequence, includeAsyncProfilerData);
-            writer.WriteEndBlock();
-            return writer.ToArray();
+                int sequence = WriteSymbols(writer);
+                WriteWorkload(writer, sequence, includeAsyncProfilerData);
+                writer.WriteEndBlock();
+                writer.Flush();
+            }
         }
 
         public void Validate(TraceLog traceLog, TraceLog controlTraceLog, SymbolReader symbolReader)
@@ -523,7 +558,7 @@ namespace TraceEventBenchmarks
                             break;
                         }
 
-                        int contextAtSample = sampleIndex * (ContextRatePerSecond / 1_000);
+                        int contextAtSample = sampleIndex * ContextsPerSample;
                         int stackId = unmatched
                             ? UnmatchedStackId
                             : StackId(KindForContext(contextAtSample), AsyncStackIndex(contextAtSample));
@@ -540,7 +575,7 @@ namespace TraceEventBenchmarks
 
             writer.WriteEventBlock(block =>
             {
-                long sentinelQpc = StartQpc + ((long)DurationSeconds * QpcFrequency);
+                long sentinelQpc = StartQpc + ((long)_durationSeconds * QpcFrequency);
                 block.WriteEventBlob(EventOptions(2, sequence, sentinelQpc, stackId: 1),
                     w => w.Write((int)ClrThreadSampleType.Managed));
             });
@@ -630,7 +665,7 @@ namespace TraceEventBenchmarks
             stackSource.ForEach(sample =>
             {
                 bool unmatched = IsUnmatchedSample(sampleIndex);
-                int contextAtSample = sampleIndex * (ContextRatePerSecond / 1_000);
+                int contextAtSample = sampleIndex * ContextsPerSample;
                 int asyncStackIndex = AsyncStackIndex(contextAtSample);
                 AsyncCallstackKind kind = KindForContext(contextAtSample);
                 var actual = new List<string>();
@@ -751,8 +786,8 @@ namespace TraceEventBenchmarks
             };
         }
 
-        private static long ContextStartQpc(int contextIndex) =>
-            StartQpc + ((long)contextIndex * QpcFrequency / ContextRatePerSecond);
+        private long ContextStartQpc(int contextIndex) =>
+            StartQpc + ((long)contextIndex * QpcFrequency / _contextRatePerSecond);
 
         private static int AsyncStackIndex(int contextIndex) => contextIndex % DistinctAsyncStackCount;
 
@@ -778,7 +813,7 @@ namespace TraceEventBenchmarks
                 case AsyncProfilerKindMode.V1Only:
                     return AsyncCallstackKind.StateMachineAsync;
                 case AsyncProfilerKindMode.Mixed:
-                    return ((contextIndex / 10) & 1) == 0
+                    return ((contextIndex / ContextsPerSample) & 1) == 0
                         ? AsyncCallstackKind.RuntimeAsync
                         : AsyncCallstackKind.StateMachineAsync;
                 default:
@@ -891,7 +926,8 @@ namespace TraceEventBenchmarks
         {
             private readonly long _qpcFrequency;
 
-            public BenchmarkEventPipeWriterV6(long qpcFrequency)
+            public BenchmarkEventPipeWriterV6(Stream stream, long qpcFrequency)
+                : base(stream)
             {
                 _qpcFrequency = qpcFrequency;
             }
