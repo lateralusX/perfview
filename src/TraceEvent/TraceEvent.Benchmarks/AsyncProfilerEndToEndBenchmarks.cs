@@ -29,6 +29,7 @@ namespace TraceEventBenchmarks
     {
         Realistic,
         High,
+        Extreme,
     }
 
     [MemoryDiagnoser]
@@ -42,7 +43,10 @@ namespace TraceEventBenchmarks
         [Params(AsyncProfilerKindMode.V2Only, AsyncProfilerKindMode.V1Only, AsyncProfilerKindMode.Mixed)]
         public AsyncProfilerKindMode KindMode { get; set; }
 
-        [Params(AsyncProfilerWorkloadProfile.Realistic, AsyncProfilerWorkloadProfile.High)]
+        [Params(
+            AsyncProfilerWorkloadProfile.Realistic,
+            AsyncProfilerWorkloadProfile.High,
+            AsyncProfilerWorkloadProfile.Extreme)]
         public AsyncProfilerWorkloadProfile WorkloadProfile { get; set; }
 
         [GlobalSetup]
@@ -264,7 +268,7 @@ namespace TraceEventBenchmarks
         private const int ProcessId = 42;
         private const int OsThreadId = 43;
         private const long ThreadStreamIndex = 1;
-        private const long QpcFrequency = 1_000_000;
+        private const long QpcFrequency = 10_000_000;
         private const long StartQpc = 1_000_000;
         private const int ContextsPerBuffer = 1_000;
         private const int UnmatchedSamplePeriod = 20;
@@ -343,8 +347,25 @@ namespace TraceEventBenchmarks
             AsyncProfilerWorkloadProfile workloadProfile,
             AsyncProfilerKindMode kindMode)
         {
-            int contextRatePerSecond = workloadProfile == AsyncProfilerWorkloadProfile.High ? 100_000 : 10_000;
-            int durationSeconds = 30;
+            int contextRatePerSecond;
+            int durationSeconds;
+            switch (workloadProfile)
+            {
+                case AsyncProfilerWorkloadProfile.Realistic:
+                    contextRatePerSecond = 10_000;
+                    durationSeconds = 30;
+                    break;
+                case AsyncProfilerWorkloadProfile.High:
+                    contextRatePerSecond = 100_000;
+                    durationSeconds = 30;
+                    break;
+                case AsyncProfilerWorkloadProfile.Extreme:
+                    contextRatePerSecond = 1_000_000;
+                    durationSeconds = 10;
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(workloadProfile));
+            }
             string directory = Path.Combine(Path.GetTempPath(), "TraceEventAsyncBenchmark_" + Guid.NewGuid().ToString("N"));
             System.IO.Directory.CreateDirectory(directory);
             return new AsyncProfilerEndToEndFixture(
