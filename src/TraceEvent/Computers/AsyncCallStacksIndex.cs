@@ -419,7 +419,6 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
             public void Write(Serializer serializer, int index)
             {
-                _recorded.Freeze();
                 AsyncCallStackRecord record = _recorded[index];
                 GetTimelines(record.TimelinesIndex, out AsyncCallStack.CompletionDelta[] methodCompletions,
                     out AsyncCallStack.CompletionDelta[] exceptionCompletions, out long[] wrapperResets);
@@ -570,8 +569,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             private const int ChunkSize = 1 << ChunkShift;
             private const int ChunkMask = ChunkSize - 1;
 
-            private AsyncCallStackRecord[] _items;
-            private List<AsyncCallStackRecord[]> _chunks;
+            private readonly AsyncCallStackRecord[] _items;
+            private readonly List<AsyncCallStackRecord[]> _chunks;
             private int _count;
 
             public AsyncCallStackRecordCollection()
@@ -617,23 +616,6 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 _count++;
             }
 
-            public void Freeze()
-            {
-                if (_items != null)
-                {
-                    return;
-                }
-
-                _items = new AsyncCallStackRecord[_count];
-                int destination = 0;
-                for (int i = 0; i < _chunks.Count; i++)
-                {
-                    int count = Math.Min(ChunkSize, _count - destination);
-                    Array.Copy(_chunks[i], 0, _items, destination, count);
-                    destination += count;
-                }
-                _chunks = null;
-            }
         }
 
         /// <summary>
