@@ -65,8 +65,10 @@ namespace TraceEventBenchmarks
             _traceLog = new TraceLog(_fixture.EtlxPath);
             _controlTraceLog = new TraceLog(_fixture.ControlEtlxPath);
             _symbolReader = new SymbolReader(TextWriter.Null);
-            ReportAsyncIndexMemory(MeasureAsyncIndexMemory(_traceLog), _fixture.ContextCount);
+            AsyncIndexMemoryUsage memory = MeasureAsyncIndexMemory(_traceLog);
+            ReportAsyncIndexMemory(memory, _fixture.ContextCount);
             _fixture.Validate(_traceLog, _controlTraceLog, _symbolReader);
+            ReportAsyncIndexMemoryAfterUse(memory.ManagedHeapBefore, _fixture.ContextCount);
         }
 
         [GlobalCleanup]
@@ -233,6 +235,16 @@ namespace TraceEventBenchmarks
                 $"processAfterLoad: privateBytes={memory.PrivateBytesAfter:N0} bytes, " +
                 $"workingSet={memory.WorkingSetAfter:N0} bytes " +
                 $"(before load: privateBytes={memory.PrivateBytesBefore:N0}, workingSet={memory.WorkingSetBefore:N0}).");
+        }
+
+        private static void ReportAsyncIndexMemoryAfterUse(long managedHeapBefore, int contextCount)
+        {
+            CollectGarbage();
+            long managedHeapAfterUse = GC.GetTotalMemory(forceFullCollection: false);
+            long delta = managedHeapAfterUse - managedHeapBefore;
+            Console.WriteLine(
+                $"Async index retained memory after full validation: managedHeapDelta={delta:N0} bytes " +
+                $"({delta / (double)contextCount:F2}/context).");
         }
 
         private readonly struct AsyncIndexMemoryUsage

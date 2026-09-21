@@ -174,11 +174,19 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// </summary>
     public sealed class AsyncCallStack
     {
-        private readonly CompletionDelta[] _methodCompletions;    // ascending by Qpc; CompleteMethod events (delta 1)
-        private readonly CompletionDelta[] _exceptionCompletions; // ascending by Qpc; Unwind events (delta = unwound frame count)
-        private readonly long[] _wrapperResets;                   // ascending
+        private CompletionDelta[] _methodCompletions;    // ascending by Qpc; CompleteMethod events (delta 1)
+        private CompletionDelta[] _exceptionCompletions; // ascending by Qpc; Unwind events (delta = unwound frame count)
+        private long[] _wrapperResets;                   // ascending
 
         internal AsyncCallStack(int depth, AsyncCallStackFramesIndex framesIndex, AsyncCallStackFrames frames,
+            byte continuationIndexBase, byte wrapperCount, long startQpc, long endQpc,
+            CompletionDelta[] methodCompletions, CompletionDelta[] exceptionCompletions, long[] wrapperResets)
+        {
+            Reset(depth, framesIndex, frames, continuationIndexBase, wrapperCount, startQpc, endQpc,
+                methodCompletions, exceptionCompletions, wrapperResets);
+        }
+
+        internal void Reset(int depth, AsyncCallStackFramesIndex framesIndex, AsyncCallStackFrames frames,
             byte continuationIndexBase, byte wrapperCount, long startQpc, long endQpc,
             CompletionDelta[] methodCompletions, CompletionDelta[] exceptionCompletions, long[] wrapperResets)
         {
@@ -195,23 +203,23 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         /// <summary>The nesting depth (0 = outermost) of this async call stack on its thread.</summary>
-        public int Depth { get; }
+        public int Depth { get; private set; }
 
         /// <summary>A compact handle to the interned frames (stable for serialization).</summary>
-        public AsyncCallStackFramesIndex FramesIndex { get; }
+        public AsyncCallStackFramesIndex FramesIndex { get; private set; }
 
         /// <summary>The interned frames of this async call stack.</summary>
-        public AsyncCallStackFrames Frames { get; }
+        public AsyncCallStackFrames Frames { get; private set; }
 
         /// <summary>The continuation-wrapper index captured when this async call stack was emitted.</summary>
-        public byte ContinuationIndexBase { get; }
+        public byte ContinuationIndexBase { get; private set; }
 
         /// <summary>The continuation-wrapper pool size (<c>ContinuationWrapper.COUNT</c>) in effect for this
         /// activation. Present as a per-run field; 0 if metadata was not seen. Each wrapper-index reset means this many methods completed.</summary>
-        public byte WrapperCount { get; }
+        public byte WrapperCount { get; private set; }
 
-        public long StartQpc { get; }
-        public long EndQpc { get; }
+        public long StartQpc { get; private set; }
+        public long EndQpc { get; private set; }
 
         /// <summary>
         /// The exact number of leaf frames of <see cref="Frames"/> that have completed by <paramref name="qpc"/>,
