@@ -126,7 +126,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
 
         /// <summary>
         /// Classifies a callstack event's frame family. StateMachineAsync callstacks (ids 16, 19) encode a
-        /// per-frame state value and carry method handles; RuntimeAsync callstacks encode native IPs only.
+        /// per-frame state value and carry CLR MethodIDs; RuntimeAsync callstacks encode native IPs only.
         /// </summary>
         public static AsyncCallstackKind GetCallstackKind(AsyncEventID eventId) =>
             eventId == AsyncEventID.ResumeStateMachineAsyncCallstack || eventId == AsyncEventID.AppendStateMachineAsyncCallstack
@@ -438,7 +438,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
 
     /// <summary>
     /// An async callstack sub-event. Frames are ordered leaf-first; <see cref="MethodIds"/> holds either
-    /// native IPs (RuntimeAsync kind) or method handles (StateMachineAsync kind), with <see cref="FrameStates"/>
+    /// native IPs (RuntimeAsync kind) or CLR MethodIDs (StateMachineAsync kind), with <see cref="FrameStates"/>
     /// carrying the per-frame state-machine state for StateMachineAsync callstacks (null for RuntimeAsync).
     /// A <see cref="IsCached"/> callstack (frame count 0) references a previously emitted callstack by
     /// dispatcher id and carries no frame data.

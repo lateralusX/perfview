@@ -4304,9 +4304,11 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
 
         /// <summary>
         /// Convenience overload of <see cref="GetAsyncCallStacks(ThreadIndex, long)"/> that takes a relative time in
-        /// milliseconds (e.g. a <see cref="StackSourceSample"/>'s <c>TimeRelativeMSec</c>, or any event's
+        /// milliseconds (e.g. a <see cref="Microsoft.Diagnostics.Tracing.Stacks.StackSourceSample"/>'s
+        /// <c>TimeRelativeMSec</c>, or any event's
         /// <see cref="TraceEvent.TimeStampRelativeMSec"/>) and converts it to QPC via
-        /// <see cref="RelativeMSecToQPC(double)"/>. Because a relative-millisecond value is a <c>double</c> derived
+        /// <see cref="TraceEventSource.RelativeMSecToQPC(double)"/>. Because a relative-millisecond value is a
+        /// <c>double</c> derived
         /// from the original QPC (and <c>QPC - sessionStart</c> fits exactly in a <c>double</c> even for multi-hour
         /// traces), this round-trip preserves the QPC to within a single QPC tick (~100 ns) — far finer than any
         /// async call-stack interval — so callers that already hold a relative time need not deal with raw QPC.
@@ -4345,9 +4347,11 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
 
         /// <summary>
         /// Convenience overload of <see cref="GetAsyncCallStacks(int, ulong, long)"/> that takes a relative time in
-        /// milliseconds (e.g. a <see cref="StackSourceSample"/>'s <c>TimeRelativeMSec</c>, or any event's
+        /// milliseconds (e.g. a <see cref="Microsoft.Diagnostics.Tracing.Stacks.StackSourceSample"/>'s
+        /// <c>TimeRelativeMSec</c>, or any event's
         /// <see cref="TraceEvent.TimeStampRelativeMSec"/>) and converts it to QPC via
-        /// <see cref="RelativeMSecToQPC(double)"/>. Because a relative-millisecond value is a <c>double</c> derived
+        /// <see cref="TraceEventSource.RelativeMSecToQPC(double)"/>. Because a relative-millisecond value is a
+        /// <c>double</c> derived
         /// from the original QPC (and <c>QPC - sessionStart</c> fits exactly in a <c>double</c> even for multi-hour
         /// traces), this round-trip preserves the QPC to within a single QPC tick (~100 ns) — far finer than any
         /// async call-stack interval — so callers that already hold a relative time need not deal with raw QPC.

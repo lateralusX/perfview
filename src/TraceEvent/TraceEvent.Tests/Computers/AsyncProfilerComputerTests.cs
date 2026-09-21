@@ -682,6 +682,24 @@ namespace TraceEventTests
         }
 
         [Fact]
+        public void QpcToDateTime_LargePositiveAndNegativeDeltasDoNotOverflowIntermediateMultiplication()
+        {
+            const long qpcFrequency = 10_000_000;
+            long utcFileTime = new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc).ToFileTimeUtc();
+            long threeDaysQpc = 3L * 24 * 60 * 60 * qpcFrequency;
+            long qpcSync = threeDaysQpc + Start;
+            var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
+                .Metadata(Start, (ulong)qpcFrequency, (ulong)qpcSync, (ulong)utcFileTime,
+                    eventBufferSize: 0, wrapperCount: 32, new AsyncManifestEntry[0]));
+
+            DateTime? after = computer.QpcToDateTime(qpcSync + threeDaysQpc);
+            DateTime? before = computer.QpcToDateTime(qpcSync - threeDaysQpc);
+
+            Assert.Equal(new DateTime(2026, 7, 4, 12, 0, 0, DateTimeKind.Utc), after);
+            Assert.Equal(new DateTime(2026, 6, 28, 12, 0, 0, DateTimeKind.Utc), before);
+        }
+
+        [Fact]
         public void DefaultConstructor_ProcessesWithoutThrowing()
         {
             var computer = new AsyncProfilerComputer();

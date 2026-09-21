@@ -45,7 +45,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// <summary>
     /// The frames of an async call stack, ordered leaf-first, interned (deduplicated) across the trace.
     /// <see cref="MethodIdAt"/> is a native IP for <see cref="AsyncCallstackKind.RuntimeAsync"/> and a method
-    /// handle for <see cref="AsyncCallstackKind.StateMachineAsync"/>; state-machine frames also carry a
+    /// ID matching CLR MethodLoad/MethodDCStart events for <see cref="AsyncCallstackKind.StateMachineAsync"/>;
+    /// state-machine frames also carry a
     /// per-frame state (0 for runtime frames).
     /// </summary>
     public sealed class AsyncCallStackFrames
@@ -510,7 +511,14 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 return null;
             }
 
-            long utcTicks = (long)process.UtcSync + (qpc - (long)process.QpcSync) * TimeSpan.TicksPerSecond / (long)process.QpcFrequency;
+            long frequency = checked((long)process.QpcFrequency);
+            long qpcDelta = qpc - checked((long)process.QpcSync);
+            long wholeSeconds = qpcDelta / frequency;
+            long remainingQpc = qpcDelta % frequency;
+            long utcTicks = checked(
+                checked((long)process.UtcSync) +
+                checked(wholeSeconds * TimeSpan.TicksPerSecond) +
+                checked(remainingQpc * TimeSpan.TicksPerSecond) / frequency);
             return DateTime.FromFileTimeUtc(utcTicks);
         }
 
