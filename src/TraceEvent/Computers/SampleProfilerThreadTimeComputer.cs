@@ -89,16 +89,6 @@ namespace Microsoft.Diagnostics.Tracing
         public bool AsyncStitchActive => m_asyncStitchActive;
 
         /// <summary>
-        /// Opt-in: after <see cref="GenerateThreadTimeStacks"/> successfully produces its self-contained stack
-        /// source, release the computer's reusable stitching buffers and, for an ETLX-backed
-        /// <see cref="TraceLog"/>, its loaded async-callstack index. A later async query transparently reloads the
-        /// index from the deferred region. A log without reloadable ETLX backing retains its index. Existing
-        /// <see cref="AsyncCallStack"/> and <see cref="StitchResult"/> instances remain valid because they retain
-        /// their own immutable data. The default is false.
-        /// </summary>
-        public bool ReleaseAsyncCallStacksAfterGeneration { get; set; }
-
-        /// <summary>
         /// Optional presentation filter applied after an async stack has been structurally stitched. Return
         /// <c>true</c> to retain a frame or <c>false</c> to hide it. The filter does not participate in dispatcher
         /// boundary discovery or segment alignment; when null, every structurally retained frame is emitted.
@@ -110,8 +100,18 @@ namespace Microsoft.Diagnostics.Tracing
         /// </summary>
         /// <param name="outputStackSource"></param>
         /// <param name="traceEvents">Optional filtered trace events.</param>
+        /// <exception cref="InvalidOperationException">
+        /// This computer has already generated a stack source. Create a new instance for another generation.
+        /// </exception>
         public void GenerateThreadTimeStacks(MutableTraceEventStackSource outputStackSource, TraceEvents traceEvents = null)
         {
+            if (m_hasGeneratedThreadTimeStacks)
+            {
+                throw new InvalidOperationException(
+                    "GenerateThreadTimeStacks can only be called once per SampleProfilerThreadTimeComputer instance.");
+            }
+            m_hasGeneratedThreadTimeStacks = true;
+
             m_outputStackSource = outputStackSource;
             m_sample = new StackSourceSample(outputStackSource);
             m_nodeNameInternTable = new Dictionary<double, StackSourceFrameIndex>(10);
@@ -317,11 +317,7 @@ namespace Microsoft.Diagnostics.Tracing
 
             m_outputStackSource.DoneAddingSamples();
             m_threadState = null;
-
-            if (ReleaseAsyncCallStacksAfterGeneration && m_asyncStitchActive)
-            {
-                ReleaseAsyncStitchingResources();
-            }
+            ClearAsyncStitchingResources();
         }
 
         #region private
@@ -566,10 +562,10 @@ namespace Microsoft.Diagnostics.Tracing
         }
 
         /// <summary>
-        /// Drops every computer-owned reference that can retain async index records, then asks the TraceLog to make
-        /// its reloadable ETLX region lazy again. Diagnostics intentionally remain available after generation.
+        /// Drops every computer-owned reference that can retain async index records. The shared TraceLog index and
+        /// diagnostics intentionally remain available after generation.
         /// </summary>
-        private void ReleaseAsyncStitchingResources()
+        private void ClearAsyncStitchingResources()
         {
             m_asyncIndex = null;
             m_asyncBoundaries = null;
@@ -582,7 +578,6 @@ namespace Microsoft.Diagnostics.Tracing
             m_asyncSampleDiagnostics = null;
             m_asyncLogicalFrameByCodeAddress = null;
             m_asyncPlaceholderFrameByMethodId = null;
-            m_eventLog.ReleaseAsyncCallStacks();
         }
 
         /// <summary>
@@ -946,6 +941,7 @@ namespace Microsoft.Diagnostics.Tracing
 
         // Async CPU stack stitching (opt-in via the constructor; only active when the trace has async-profiler data).
         private readonly bool m_stitchAsyncCallStacks;
+        private bool m_hasGeneratedThreadTimeStacks;
         private bool m_asyncStitchActive;
         private AsyncCallStacksIndex m_asyncIndex;
         private AsyncStitchBoundaryCache m_asyncBoundaries;

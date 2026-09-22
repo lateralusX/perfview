@@ -4294,7 +4294,11 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
         /// Existing <see cref="AsyncCallStack"/> instances remain valid; a later query transparently loads a new
         /// index instance.
         /// </summary>
-        internal bool ReleaseAsyncCallStacks()
+        /// <returns>
+        /// True if a loaded ETLX-backed index was released; false if no index was loaded or it has no reloadable
+        /// deferred backing.
+        /// </returns>
+        public bool ReleaseAsyncCallStacks()
         {
             lock (asyncCallStacksLock)
             {

@@ -66,7 +66,7 @@ namespace TraceEventTests
                     SegmentsProcessed = 2,
                     V2PlumbingFramesCollapsed = 4,
                 },
-                ReleaseAsyncCallStacksAfterGeneration = true,
+                VerifyComputerAndIndexLifecycle = true,
             };
 
             scenario.AssertProductionStitch();
@@ -1103,7 +1103,7 @@ namespace TraceEventTests
             public bool AddForeignProcessActiveSegment { get; set; }
             public byte ContinuationIndexBase { get; set; }
             public int[] AsyncStates { get; set; }
-            public bool ReleaseAsyncCallStacksAfterGeneration { get; set; }
+            public bool VerifyComputerAndIndexLifecycle { get; set; }
 
             public void AssertProductionStitch()
             {
@@ -1149,11 +1149,14 @@ namespace TraceEventTests
                         {
                             IncludeEventSourceEvents = IncludeEventSourceEvents,
                             GroupByStartStopActivity = GroupByStartStopActivity,
-                            ReleaseAsyncCallStacksAfterGeneration = ReleaseAsyncCallStacksAfterGeneration,
                         };
                         stitchedComputer.GenerateThreadTimeStacks(stitchedStackSource);
-                        if (ReleaseAsyncCallStacksAfterGeneration)
+                        if (VerifyComputerAndIndexLifecycle)
                         {
+                            Assert.Throws<InvalidOperationException>(() =>
+                                stitchedComputer.GenerateThreadTimeStacks(new MutableTraceEventStackSource(traceLog)));
+                            Assert.True(traceLog.IsAsyncCallStacksLoaded);
+                            Assert.True(traceLog.ReleaseAsyncCallStacks());
                             Assert.False(traceLog.IsAsyncCallStacksLoaded);
                         }
                         EmittedStack stitchedOutput = ReadSingleStack(stitchedStackSource);
@@ -1163,7 +1166,7 @@ namespace TraceEventTests
                         Assert.True(stitchedComputer.AsyncStitchActive);
                         (ExpectedDiagnostics ?? new StitchDiagnosticsExpectation()).Assert(stitchedComputer.AsyncStitchDiagnostics);
 
-                        if (ReleaseAsyncCallStacksAfterGeneration)
+                        if (VerifyComputerAndIndexLifecycle)
                         {
                             Assert.Equal(
                                 expectedSegments.Length,

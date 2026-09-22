@@ -160,7 +160,7 @@ namespace TraceEventBenchmarks
         public int GenerateStitchedCpuStacksAndReleaseIndex()
         {
             return GenerateCpuStacks(
-                _traceLog, stitchAsyncCallStacks: true, traceCount: 6, releaseAsyncCallStacksAfterGeneration: true);
+                _traceLog, stitchAsyncCallStacks: true, traceCount: 6, releaseAsyncCallStacks: true);
         }
 
         [Benchmark(OperationsPerInvoke = 2)]
@@ -181,14 +181,12 @@ namespace TraceEventBenchmarks
 
         private SampleProfilerThreadTimeComputer CreateComputer(
             TraceLog traceLog,
-            bool stitchAsyncCallStacks,
-            bool releaseAsyncCallStacksAfterGeneration = false)
+            bool stitchAsyncCallStacks)
         {
             return new SampleProfilerThreadTimeComputer(traceLog, _symbolReader, stitchAsyncCallStacks)
             {
                 IncludeEventSourceEvents = false,
                 GroupByStartStopActivity = false,
-                ReleaseAsyncCallStacksAfterGeneration = releaseAsyncCallStacksAfterGeneration,
             };
         }
 
@@ -196,16 +194,19 @@ namespace TraceEventBenchmarks
             TraceLog traceLog,
             bool stitchAsyncCallStacks,
             int traceCount,
-            bool releaseAsyncCallStacksAfterGeneration = false)
+            bool releaseAsyncCallStacks = false)
         {
             int sampleCount = 0;
             for (int i = 0; i < traceCount; i++)
             {
                 var stackSource = new MutableTraceEventStackSource(traceLog);
-                var computer = CreateComputer(
-                    traceLog, stitchAsyncCallStacks, releaseAsyncCallStacksAfterGeneration);
+                var computer = CreateComputer(traceLog, stitchAsyncCallStacks);
                 computer.GenerateThreadTimeStacks(stackSource);
                 sampleCount += CountSamples(stackSource);
+                if (releaseAsyncCallStacks && !traceLog.ReleaseAsyncCallStacks())
+                {
+                    throw new InvalidOperationException("The async-callstack index was not loaded or reloadable.");
+                }
             }
             return sampleCount;
         }
