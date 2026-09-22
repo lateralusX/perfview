@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading.Tasks;
 
 using FastSerialization;
 
@@ -609,6 +610,78 @@ namespace TraceEventTests
                 .SuspendRuntime(Start + 30));
             Assert.True(v2.Index.MethodCompletionObserved(AsyncCallstackKind.RuntimeAsync));
             Assert.False(v2.Index.MethodCompletionObserved(AsyncCallstackKind.StateMachineAsync));
+        }
+
+        [Fact]
+        public void MethodCompletionObserved_IsScopedToMetadataEpoch()
+        {
+            var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
+                .Metadata(Start, qpcFrequency: 10_000_000, qpcSync: 1, utcSync: 1,
+                    eventBufferSize: 0, wrapperCount: 32, new AsyncManifestEntry[0])
+                .Reset(Start)
+                .ResumeRuntimeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA })
+                .SuspendRuntime(Start + 20)
+                .Metadata(Start + 30, qpcFrequency: 10_000_000, qpcSync: 1, utcSync: 1,
+                    eventBufferSize: 0, wrapperCount: 32, new AsyncManifestEntry[0])
+                .Reset(Start + 30)
+                .ResumeRuntimeStack(Start + 40, dispatcher: 2, new ulong[] { 0xB })
+                .CompleteRuntimeMethod(Start + 45)
+                .SuspendRuntime(Start + 50)
+                .Metadata(Start + 60, qpcFrequency: 10_000_000, qpcSync: 1, utcSync: 1,
+                    eventBufferSize: 0, wrapperCount: 32, new AsyncManifestEntry[0])
+                .Reset(Start + 60)
+                .ResumeRuntimeStack(Start + 70, dispatcher: 3, new ulong[] { 0xC })
+                .SuspendRuntime(Start + 80));
+
+            Assert.False(computer.Index.MethodCompletionObserved(
+                0, AsyncCallstackKind.RuntimeAsync, Start + 10));
+            Assert.True(computer.Index.MethodCompletionObserved(
+                0, AsyncCallstackKind.RuntimeAsync, Start + 40));
+            Assert.False(computer.Index.MethodCompletionObserved(
+                0, AsyncCallstackKind.RuntimeAsync, Start + 70));
+            Assert.True(computer.Index.MethodCompletionObserved(AsyncCallstackKind.RuntimeAsync));
+
+            AsyncCallStacksIndex reloaded = RoundTrip(computer.Index);
+            Assert.False(reloaded.MethodCompletionObserved(
+                0, AsyncCallstackKind.RuntimeAsync, Start + 10));
+            Assert.True(reloaded.MethodCompletionObserved(
+                0, AsyncCallstackKind.RuntimeAsync, Start + 40));
+            Assert.False(reloaded.MethodCompletionObserved(
+                0, AsyncCallstackKind.RuntimeAsync, Start + 70));
+        }
+
+        [Fact]
+        public async Task PublicQueries_AreSafeDuringConcurrentFirstUse()
+        {
+            var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
+                .Armed(Start)
+                .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA, 0xB })
+                .Suspend(Start + 20));
+            AsyncCallStacksIndex reloaded = RoundTrip(computer.Index);
+            AsyncThreadKey thread = Key(ThreadA);
+            var results = new AsyncCallStack[32];
+            var tasks = new Task[results.Length];
+
+            for (int i = 0; i < tasks.Length; i++)
+            {
+                int resultIndex = i;
+                tasks[i] = Task.Run(() =>
+                {
+                    for (int iteration = 0; iteration < 100; iteration++)
+                    {
+                        results[resultIndex] = Assert.Single(
+                            reloaded.GetAsyncCallStacks(thread, Start + 15));
+                        Assert.Same(results[resultIndex], Assert.Single(
+                            reloaded.GetAsyncCallStacks(thread)));
+                    }
+                });
+            }
+
+            await Task.WhenAll(tasks);
+            for (int i = 1; i < results.Length; i++)
+            {
+                Assert.Same(results[0], results[i]);
+            }
         }
 
         [Fact]

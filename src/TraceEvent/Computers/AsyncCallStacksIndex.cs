@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading;
 
 using FastSerialization;
 
@@ -31,8 +32,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         private readonly Dictionary<FrameKey, AsyncCallStackFramesIndex> _frameKeyToIndex = new Dictionary<FrameKey, AsyncCallStackFramesIndex>();
         private readonly Dictionary<AsyncThreadKey, ThreadCallStacks> _threads = new Dictionary<AsyncThreadKey, ThreadCallStacks>();
 
-        private readonly Dictionary<ProcessIndex, CompletionAvailability> _completionAvailability =
-            new Dictionary<ProcessIndex, CompletionAvailability>();
+        private readonly Dictionary<ProcessIndex, List<CompletionAvailabilityEpoch>> _completionAvailability =
+            new Dictionary<ProcessIndex, List<CompletionAvailabilityEpoch>>();
 
         /// <summary>
         /// Invoked (if set) the first time a distinct <see cref="AsyncCallStackFrames"/> is interned, so a build-time
@@ -51,19 +52,38 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         /// <summary>
         /// True if the trace contained any <c>CompleteMethod</c> (normal completion) event for async call stacks of
-        /// the given <paramref name="kind"/>. These events are keyword-gated, so this distinguishes "CompleteMethod
-        /// events were not being emitted" from "they were emitted, but nothing has completed yet" — a distinction a
-        /// per-stack completion count cannot make. When true, <see cref="AsyncCallStack.GetMethodCompletedFrameCount"/>
-        /// is the authoritative normal-completed count (0 genuinely means "nothing completed yet"); when false, the
-        /// normal completed count must be derived another way (the continuation-wrapper slot for V2, or the
-        /// inline-resumed frames on the sync stack for V1). Exceptional completions are tracked separately (see
+        /// the given <paramref name="kind"/> in any metadata/configuration epoch. Stitching uses an internal
+        /// timestamped lookup so an observation in one keyword configuration is not applied to activations from
+        /// another. When completion events were observed in an activation's epoch,
+        /// <see cref="AsyncCallStack.GetMethodCompletedFrameCount"/> is authoritative; otherwise the count is
+        /// derived from the continuation-wrapper slot for V2 or inline-resumed frames for V1. Exceptional
+        /// completions are tracked separately (see
         /// <see cref="ExceptionCompletionObserved(ProcessIndex, AsyncCallstackKind)"/>) because unwound frames leave the sync stack.
         /// </summary>
         public bool MethodCompletionObserved(AsyncCallstackKind kind) => MethodCompletionObserved(0, kind);
 
-        public bool MethodCompletionObserved(ProcessIndex processIndex, AsyncCallstackKind kind) =>
-            _completionAvailability.TryGetValue(processIndex, out CompletionAvailability availability) &&
-            availability.MethodObserved(kind);
+        public bool MethodCompletionObserved(ProcessIndex processIndex, AsyncCallstackKind kind)
+        {
+            if (!_completionAvailability.TryGetValue(processIndex, out List<CompletionAvailabilityEpoch> epochs))
+            {
+                return false;
+            }
+
+            for (int i = 0; i < epochs.Count; i++)
+            {
+                if (epochs[i].MethodObserved(kind))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        internal bool MethodCompletionObserved(ProcessIndex processIndex, AsyncCallstackKind kind, long activationStartQpc)
+        {
+            CompletionAvailabilityEpoch epoch = FindCompletionEpoch(processIndex, activationStartQpc);
+            return epoch != null && epoch.MethodObserved(kind);
+        }
 
         /// <summary>
         /// True if the trace contained any <c>Unwind</c> (exceptional completion) event for async call stacks of the
@@ -73,31 +93,53 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// </summary>
         public bool ExceptionCompletionObserved(AsyncCallstackKind kind) => ExceptionCompletionObserved(0, kind);
 
-        public bool ExceptionCompletionObserved(ProcessIndex processIndex, AsyncCallstackKind kind) =>
-            _completionAvailability.TryGetValue(processIndex, out CompletionAvailability availability) &&
-            availability.ExceptionObserved(kind);
+        public bool ExceptionCompletionObserved(ProcessIndex processIndex, AsyncCallstackKind kind)
+        {
+            if (!_completionAvailability.TryGetValue(processIndex, out List<CompletionAvailabilityEpoch> epochs))
+            {
+                return false;
+            }
+
+            for (int i = 0; i < epochs.Count; i++)
+            {
+                if (epochs[i].ExceptionObserved(kind))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        internal void StartCompletionAvailabilityEpoch(ProcessIndex processIndex, long startQpc)
+        {
+            List<CompletionAvailabilityEpoch> epochs = GetCompletionEpochs(processIndex);
+            int index = FindCompletionEpochIndex(epochs, startQpc);
+            if (index >= 0 && epochs[index].StartQpc == startQpc)
+            {
+                return;
+            }
+            epochs.Insert(index + 1, new CompletionAvailabilityEpoch(startQpc));
+        }
 
         /// <summary>
         /// Records that a <c>CompleteMethod</c> (normal completion) event of the given <paramref name="kind"/> was
-        /// seen in the stream. Called by <see cref="AsyncProfilerComputer"/> as it processes events. This is a
-        /// process-level, per-kind fact (the events are keyword-gated), so it is only reliable after the whole stream
-        /// has been processed — do not stamp it onto individual <see cref="AsyncCallStack"/>s at close time.
+        /// seen in the current metadata/configuration epoch. Called by <see cref="AsyncProfilerComputer"/> as it
+        /// processes events. The stitcher selects the epoch containing an activation's start QPC, so observations
+        /// from another keyword configuration cannot change that activation's completion-count policy.
         /// </summary>
-        internal void MarkMethodCompletionObserved(ProcessIndex processIndex, AsyncCallstackKind kind)
+        internal void MarkMethodCompletionObserved(ProcessIndex processIndex, AsyncCallstackKind kind, long qpc)
         {
-            CompletionAvailability availability = GetCompletionAvailability(processIndex);
-            availability.MarkMethodObserved(kind);
+            FindCompletionEpoch(processIndex, qpc)?.MarkMethodObserved(kind);
         }
 
         /// <summary>
         /// Records that an <c>Unwind</c> (exceptional completion) event of the given <paramref name="kind"/> was seen
-        /// in the stream. Called by <see cref="AsyncProfilerComputer"/> as it processes events. Same process-level,
-        /// per-kind semantics as <see cref="MarkMethodCompletionObserved(ProcessIndex, AsyncCallstackKind)"/>.
+        /// in the stream. Called by <see cref="AsyncProfilerComputer"/> as it processes events. This uses the same
+        /// metadata/configuration epoch scoping as normal method-completion observation.
         /// </summary>
-        internal void MarkExceptionCompletionObserved(ProcessIndex processIndex, AsyncCallstackKind kind)
+        internal void MarkExceptionCompletionObserved(ProcessIndex processIndex, AsyncCallstackKind kind, long qpc)
         {
-            CompletionAvailability availability = GetCompletionAvailability(processIndex);
-            availability.MarkExceptionObserved(kind);
+            FindCompletionEpoch(processIndex, qpc)?.MarkExceptionObserved(kind);
         }
 
         /// <summary>Resolves an interned frames handle to its frames (null if out of range).</summary>
@@ -234,10 +276,15 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             serializer.Write(_completionAvailability.Count);
-            foreach (KeyValuePair<ProcessIndex, CompletionAvailability> pair in _completionAvailability)
+            foreach (KeyValuePair<ProcessIndex, List<CompletionAvailabilityEpoch>> pair in _completionAvailability)
             {
                 serializer.Write((int)pair.Key);
-                serializer.Write(pair.Value.Flags);
+                serializer.Write(pair.Value.Count);
+                for (int i = 0; i < pair.Value.Count; i++)
+                {
+                    serializer.Write(pair.Value[i].StartQpc);
+                    serializer.Write(pair.Value[i].Flags);
+                }
             }
         }
 
@@ -278,7 +325,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             for (int i = 0; i < processCount; i++)
             {
                 ProcessIndex processIndex = (ProcessIndex)deserializer.ReadInt();
-                _completionAvailability[processIndex] = new CompletionAvailability(deserializer.ReadByte());
+                int epochCount = deserializer.ReadInt();
+                var epochs = new List<CompletionAvailabilityEpoch>(epochCount);
+                for (int e = 0; e < epochCount; e++)
+                {
+                    epochs.Add(new CompletionAvailabilityEpoch(deserializer.ReadInt64(), deserializer.ReadByte()));
+                }
+                _completionAvailability[processIndex] = epochs;
             }
         }
 
@@ -287,32 +340,64 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         private static int CompareDepth(AsyncCallStack left, AsyncCallStack right) =>
             left.Depth.CompareTo(right.Depth);
 
-        private CompletionAvailability GetCompletionAvailability(ProcessIndex processIndex)
+        private List<CompletionAvailabilityEpoch> GetCompletionEpochs(ProcessIndex processIndex)
         {
-            if (!_completionAvailability.TryGetValue(processIndex, out CompletionAvailability availability))
+            if (!_completionAvailability.TryGetValue(processIndex, out List<CompletionAvailabilityEpoch> epochs))
             {
-                availability = new CompletionAvailability();
-                _completionAvailability[processIndex] = availability;
+                epochs = new List<CompletionAvailabilityEpoch>();
+                _completionAvailability[processIndex] = epochs;
             }
-            return availability;
+            return epochs;
         }
 
-        private sealed class CompletionAvailability
+        private CompletionAvailabilityEpoch FindCompletionEpoch(ProcessIndex processIndex, long qpc)
+        {
+            if (!_completionAvailability.TryGetValue(processIndex, out List<CompletionAvailabilityEpoch> epochs))
+            {
+                return null;
+            }
+            int index = FindCompletionEpochIndex(epochs, qpc);
+            return index >= 0 ? epochs[index] : null;
+        }
+
+        private static int FindCompletionEpochIndex(List<CompletionAvailabilityEpoch> epochs, long qpc)
+        {
+            int lo = 0;
+            int hi = epochs.Count;
+            while (lo < hi)
+            {
+                int mid = (lo + hi) >> 1;
+                if (epochs[mid].StartQpc <= qpc)
+                {
+                    lo = mid + 1;
+                }
+                else
+                {
+                    hi = mid;
+                }
+            }
+            return lo - 1;
+        }
+
+        private sealed class CompletionAvailabilityEpoch
         {
             private const byte RuntimeMethod = 1 << 0;
             private const byte StateMachineMethod = 1 << 1;
             private const byte RuntimeException = 1 << 2;
             private const byte StateMachineException = 1 << 3;
 
-            public CompletionAvailability()
+            public CompletionAvailabilityEpoch(long startQpc)
             {
+                StartQpc = startQpc;
             }
 
-            public CompletionAvailability(byte flags)
+            public CompletionAvailabilityEpoch(long startQpc, byte flags)
             {
+                StartQpc = startQpc;
                 Flags = flags;
             }
 
+            public long StartQpc { get; }
             public byte Flags { get; private set; }
 
             public bool MethodObserved(AsyncCallstackKind kind) =>
@@ -374,6 +459,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         private sealed class ThreadCallStacks
         {
             private readonly AsyncCallStackRecordCollection _recorded;
+            private readonly object _queryLock = new object();
             private List<AsyncCallStackTimelines> _timelines;
             private Dictionary<int, AsyncCallStack> _materialized;
             private AsyncCallStacksIntervalIndex _index;
@@ -455,6 +541,21 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             public void Query(long qpc, List<AsyncCallStack> result,
                 AsyncCallStacksIndex owner, bool cacheMaterialized)
             {
+                if (cacheMaterialized)
+                {
+                    lock (_queryLock)
+                    {
+                        QueryCore(qpc, result, owner, cacheMaterialized: true);
+                    }
+                    return;
+                }
+
+                QueryCore(qpc, result, owner, cacheMaterialized: false);
+            }
+
+            private void QueryCore(long qpc, List<AsyncCallStack> result,
+                AsyncCallStacksIndex owner, bool cacheMaterialized)
+            {
                 int count = 0;
                 QueryIndex().Stab(qpc, this, result, owner, cacheMaterialized, ref count);
                 if (result.Count > count)
@@ -477,8 +578,33 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 return callStack;
             }
 
-            public AsyncCallStacksIntervalIndex QueryIndex() =>
-                _index ?? (_index = new AsyncCallStacksIntervalIndex(_recorded));
+            public AsyncCallStack GetOrCreateMaterializedThreadSafe(int index, AsyncCallStackFrames frames)
+            {
+                lock (_queryLock)
+                {
+                    return GetOrCreateMaterialized(index, frames);
+                }
+            }
+
+            public AsyncCallStacksIntervalIndex QueryIndex()
+            {
+                AsyncCallStacksIntervalIndex index = Volatile.Read(ref _index);
+                if (index != null)
+                {
+                    return index;
+                }
+
+                lock (_queryLock)
+                {
+                    index = _index;
+                    if (index == null)
+                    {
+                        index = new AsyncCallStacksIntervalIndex(_recorded);
+                        Volatile.Write(ref _index, index);
+                    }
+                    return index;
+                }
+            }
 
             private int AddTimelines(AsyncCallStack.CompletionDelta[] methodCompletions,
                 AsyncCallStack.CompletionDelta[] exceptionCompletions, long[] wrapperResets)
@@ -728,7 +854,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             {
                 get
                 {
-                    return _callStacks.GetOrCreateMaterialized(
+                    return _callStacks.GetOrCreateMaterializedThreadSafe(
                         index, _owner.ResolveFrames(_callStacks.FramesIndexAt(index)));
                 }
             }

@@ -252,7 +252,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// (they are reversed internally to leaf-&gt;root to walk in lockstep with the sync stack).</param>
         /// <param name="qpc">The sample time, in the trace's QPC domain.</param>
         /// <param name="boundaries">The per-trace boundary-method cache.</param>
-        /// <param name="index">The async index, queried for whether completion events were emitted per process and kind.</param>
+        /// <param name="index">The async index, queried for whether completion events were observed in each
+        /// activation's metadata/configuration epoch.</param>
         /// <param name="processIndex">The process instance that emitted the sampled stack.</param>
         /// <param name="methodOf">Maps a <see cref="CodeAddressIndex"/> to its <see cref="MethodIndex"/>
         /// (typically <c>traceLog.CodeAddresses.MethodIndex</c>); used for the V1 identity match and V2 adjacency check.</param>
@@ -271,8 +272,14 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         {
             if (boundaries is null) throw new ArgumentNullException(nameof(boundaries));
             if (index is null) throw new ArgumentNullException(nameof(index));
-            return Stitch(syncLeafToRoot, segmentsRootToLeaf, qpc, boundaries.Classify,
-                kind => index.MethodCompletionObserved(processIndex, kind), methodOf, trace);
+            if (syncLeafToRoot is null) throw new ArgumentNullException(nameof(syncLeafToRoot));
+            if (methodOf is null) throw new ArgumentNullException(nameof(methodOf));
+
+            var diagnostics = new StitchDiagnostics();
+            var output = new List<StitchedFrame>(syncLeafToRoot.Count + 8);
+            StitchInto(syncLeafToRoot, segmentsRootToLeaf, qpc, boundaries.Classify, null,
+                index.MethodCompletionObserved, processIndex, methodOf, trace, output, diagnostics);
+            return new StitchResult(output, diagnostics);
         }
 
         /// <summary>
@@ -319,7 +326,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             IReadOnlyList<AsyncCallStack> segmentsRootToLeaf,
             long qpc,
             Func<CodeAddressIndex, AsyncStitchBoundaryInfo> classify,
-            Func<ProcessIndex, AsyncCallstackKind, bool> methodCompletionObserved,
+            Func<ProcessIndex, AsyncCallstackKind, long, bool> methodCompletionObserved,
             ProcessIndex processIndex,
             Func<CodeAddressIndex, MethodIndex> methodOf,
             bool trace,
@@ -343,7 +350,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             long qpc,
             Func<CodeAddressIndex, AsyncStitchBoundaryInfo> classify,
             Func<AsyncCallstackKind, bool> methodCompletionObserved,
-            Func<ProcessIndex, AsyncCallstackKind, bool> methodCompletionObservedByProcess,
+            Func<ProcessIndex, AsyncCallstackKind, long, bool> methodCompletionObservedByProcess,
             ProcessIndex processIndex,
             Func<CodeAddressIndex, MethodIndex> methodOf,
             bool trace,
@@ -622,13 +629,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             AsyncStitchBoundaryInfo boundaryInfo, long qpc,
             IReadOnlyList<StitchSyncFrame> sync, int pSync, int boundaryPos,
             Func<AsyncCallstackKind, bool> methodCompletionObserved,
-            Func<ProcessIndex, AsyncCallstackKind, bool> methodCompletionObservedByProcess,
+            Func<ProcessIndex, AsyncCallstackKind, long, bool> methodCompletionObservedByProcess,
             ProcessIndex processIndex,
             Func<CodeAddressIndex, MethodIndex> methodOf, StitchDiagnostics diagnostics)
         {
             bool completionObserved = methodCompletionObserved != null
                 ? methodCompletionObserved(kind)
-                : methodCompletionObservedByProcess(processIndex, kind);
+                : methodCompletionObservedByProcess(processIndex, kind, segment.StartQpc);
             int completed;
             if (kind == AsyncCallstackKind.RuntimeAsync) // V2
             {

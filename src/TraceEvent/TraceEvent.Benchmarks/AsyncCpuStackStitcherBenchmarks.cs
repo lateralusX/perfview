@@ -21,7 +21,7 @@ namespace TraceEventBenchmarks
         private List<StitchedFrame> _output;
         private StitchDiagnostics _diagnostics;
         private Func<CodeAddressIndex, AsyncStitchBoundaryInfo> _classify;
-        private Func<ProcessIndex, AsyncCallstackKind, bool> _methodCompletionObservedByProcess;
+        private Func<ProcessIndex, AsyncCallstackKind, long, bool> _methodCompletionObservedByProcess;
         private Func<CodeAddressIndex, MethodIndex> _methodOf;
 
         [Params(
@@ -200,7 +200,7 @@ namespace TraceEventBenchmarks
         private static bool MethodCompletionObserved(AsyncCallstackKind kind) => false;
 
         private static bool MethodCompletionObservedByProcess(
-            ProcessIndex processIndex, AsyncCallstackKind kind) => false;
+            ProcessIndex processIndex, AsyncCallstackKind kind, long activationStartQpc) => false;
 
         private static readonly ProcessIndex s_processIndex = (ProcessIndex)1;
 

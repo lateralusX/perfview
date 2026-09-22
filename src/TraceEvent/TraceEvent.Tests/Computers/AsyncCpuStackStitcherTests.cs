@@ -139,13 +139,18 @@ namespace TraceEventTests
             };
             var output = new List<StitchedFrame>();
             var diagnostics = new StitchDiagnostics();
+            long completionPolicyQpc = long.MinValue;
 
             AsyncCpuStackStitcher.StitchInto(
                 stitchedSync,
                 new[] { segment },
                 Qpc,
                 s.Classify,
-                (processIndex, kind) => s.MethodCompletionObserved(kind),
+                (processIndex, kind, activationStartQpc) =>
+                {
+                    completionPolicyQpc = activationStartQpc;
+                    return s.MethodCompletionObserved(kind);
+                },
                 (ProcessIndex)1,
                 s.MethodOf,
                 trace: false,
@@ -156,6 +161,7 @@ namespace TraceEventTests
                 new[] { Scenario.CA(10), Scenario.CA(201), Scenario.CA(12) },
                 output.Select(frame => frame.CodeAddress));
             Assert.Equal(1, diagnostics.SegmentsProcessed);
+            Assert.Equal(segment.StartQpc, completionPolicyQpc);
 
             var passthroughSync = new[] { s.Sync(20, 60), s.Sync(21, 61) };
             AsyncCpuStackStitcher.StitchInto(
@@ -163,7 +169,7 @@ namespace TraceEventTests
                 Array.Empty<AsyncCallStack>(),
                 Qpc,
                 s.Classify,
-                (processIndex, kind) => s.MethodCompletionObserved(kind),
+                (processIndex, kind, activationStartQpc) => s.MethodCompletionObserved(kind),
                 (ProcessIndex)1,
                 s.MethodOf,
                 trace: false,

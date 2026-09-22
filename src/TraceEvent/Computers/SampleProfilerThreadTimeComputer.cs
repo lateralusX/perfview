@@ -915,7 +915,7 @@ namespace Microsoft.Diagnostics.Tracing
         private AsyncCallStacksIndex m_asyncIndex;
         private AsyncStitchBoundaryCache m_asyncBoundaries;
         private Func<CodeAddressIndex, AsyncStitchBoundaryInfo> m_asyncClassify;
-        private Func<ProcessIndex, AsyncCallstackKind, bool> m_asyncMethodCompletionObserved;
+        private Func<ProcessIndex, AsyncCallstackKind, long, bool> m_asyncMethodCompletionObserved;
         private Func<CodeAddressIndex, MethodIndex> m_asyncMethodOf;
         private StitchDiagnostics m_asyncStitchDiagnostics;
         private StitchDiagnostics m_asyncSampleDiagnostics;

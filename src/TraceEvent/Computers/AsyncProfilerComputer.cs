@@ -233,10 +233,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         /// <summary>
         /// The number of leaf frames completed by <paramref name="qpc"/> via normal <c>CompleteMethod</c> events
-        /// (each contributes 1). Meaningful only when <c>CompleteMethod</c> events were emitted for this kind (see
-        /// <see cref="AsyncCallStacksIndex.MethodCompletionObserved(ProcessIndex, AsyncCallstackKind)"/>); otherwise this is 0 and the normal
-        /// completed count must be derived another way (the continuation-wrapper slot for V2, or the inline-resumed
-        /// frames on the sync stack for V1).
+        /// (each contributes 1). Meaningful when <c>CompleteMethod</c> events were observed in this activation's
+        /// metadata/configuration epoch; otherwise this is 0 and the normal completed count must be derived another
+        /// way (the continuation-wrapper slot for V2, or the inline-resumed frames on the sync stack for V1).
         /// </summary>
         public int GetMethodCompletedFrameCount(long qpc) => SumDeltasUpTo(_methodCompletions, qpc);
 
@@ -276,9 +275,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// the current slot, because the resets that advanced it before attach could not be observed. Subtracting
         /// it makes the count start from that value, so only completions observed since resume are counted.
         /// </para>
-        /// Use this overload when <c>CompleteMethod</c> events are not available for V2 (see
-        /// <see cref="AsyncCallStacksIndex.MethodCompletionObserved(ProcessIndex, AsyncCallstackKind)"/>); otherwise prefer
-        /// <see cref="GetCompletedFrameCount(long)"/>.
+        /// Use this overload when <c>CompleteMethod</c> events were not observed in this activation's
+        /// metadata/configuration epoch; otherwise prefer <see cref="GetCompletedFrameCount(long)"/>.
         /// </summary>
         public int GetCompletedFrameCount(long qpc, int currentMethodIndex)
         {
@@ -606,7 +604,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             AsyncCallstackKind kind = e.IsStateMachine ? AsyncCallstackKind.StateMachineAsync : AsyncCallstackKind.RuntimeAsync;
-            _index.MarkMethodCompletionObserved(_currentProcessIndex, kind);
+            _index.MarkMethodCompletionObserved(_currentProcessIndex, kind, e.TimestampQpc);
             state.Top?.MethodCompletions.Add(new AsyncCallStack.CompletionDelta(e.TimestampQpc, 1));
         }
 
@@ -620,7 +618,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             AsyncCallstackKind kind = e.IsStateMachine ? AsyncCallstackKind.StateMachineAsync : AsyncCallstackKind.RuntimeAsync;
-            _index.MarkExceptionCompletionObserved(_currentProcessIndex, kind);
+            _index.MarkExceptionCompletionObserved(_currentProcessIndex, kind, e.TimestampQpc);
             if (e.UnwoundFrameCount > 0)
             {
                 state.Top?.ExceptionCompletions.Add(new AsyncCallStack.CompletionDelta(e.TimestampQpc, (int)e.UnwoundFrameCount));
@@ -673,6 +671,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         void IAsyncProfilerSubEventSink.OnMetadata(in AsyncMetadataEvent e)
         {
             ProcessState process = CurrentProcess;
+            _index.StartCompletionAvailabilityEpoch(_currentProcessIndex, e.TimestampQpc);
             if (e.TimestampQpc < process.FirstMetadataQpc)
             {
                 process.FirstMetadataQpc = e.TimestampQpc;
