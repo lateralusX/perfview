@@ -4241,7 +4241,7 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
             deserializer.Read(out truncated);
             firstTimeInversion = (EventIndex)(uint)deserializer.ReadInt();
 
-            lazyAsyncCallStacks.Read(deserializer, delegate
+            lazyAsyncCallStacks.ReadReloadable(deserializer, delegate
             {
                 bool present;
                 deserializer.Read(out present);
@@ -4279,7 +4279,48 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
         /// </summary>
         internal AsyncCallStacksIndex AsyncCallStacks
         {
-            get { lazyAsyncCallStacks.FinishRead(); return asyncCallStacks; }
+            get
+            {
+                lock (asyncCallStacksLock)
+                {
+                    lazyAsyncCallStacks.FinishRead(preserveStreamPosition: true);
+                    return asyncCallStacks;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Releases the loaded async-callstack index when it can be restored from the ETLX deferred region.
+        /// Existing <see cref="AsyncCallStack"/> instances remain valid; a later query transparently loads a new
+        /// index instance.
+        /// </summary>
+        internal bool ReleaseAsyncCallStacks()
+        {
+            lock (asyncCallStacksLock)
+            {
+                if (asyncCallStacks == null || !lazyAsyncCallStacks.CanReload)
+                {
+                    return false;
+                }
+
+                asyncCallStacks = null;
+                lazyAsyncCallStacks.ResetRead();
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// True when the deferred async-callstack index is currently materialized in memory.
+        /// </summary>
+        internal bool IsAsyncCallStacksLoaded
+        {
+            get
+            {
+                lock (asyncCallStacksLock)
+                {
+                    return asyncCallStacks != null;
+                }
+            }
         }
 
         /// <summary>
@@ -4412,6 +4453,7 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
         private DeferedRegion lazyCswitchBlockingEventsToStacks;
         private DeferedRegion lazyAsyncCallStacks;
         private AsyncCallStacksIndex asyncCallStacks;       // Per-thread active async call stacks (RuntimeAsync + StateMachineAsync); null if none. Lazily loaded.
+        private readonly object asyncCallStacksLock = new object();
         private TraceEvents events;
         private GrowableArray<EventPageEntry> eventPages;   // The offset offset of a page
         private int eventCount;                             // Total number of events

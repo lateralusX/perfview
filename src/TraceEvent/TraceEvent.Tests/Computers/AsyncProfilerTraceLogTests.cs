@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading.Tasks;
 
 using Microsoft.Diagnostics.Symbols;
 using Microsoft.Diagnostics.Tracing;
@@ -153,6 +154,36 @@ namespace TraceEventTests
                     Assert.Equal(new ulong[] { 0xA, 0xB }, MethodIds(nested[0].Frames));
                     Assert.Equal(1, nested[1].Depth);
                     Assert.Equal(new ulong[] { 0xC }, MethodIds(nested[1].Frames));
+
+                    // Releasing the materialized index preserves already-returned immutable objects and makes the
+                    // next public query transparently deserialize a fresh index from the deferred ETLX region.
+                    AsyncCallStack retainedOuter = nested[0];
+                    Assert.True(traceLog.IsAsyncCallStacksLoaded);
+                    Assert.True(traceLog.ReleaseAsyncCallStacks());
+                    Assert.False(traceLog.IsAsyncCallStacksLoaded);
+                    Assert.Equal(new ulong[] { 0xA, 0xB }, MethodIds(retainedOuter.Frames));
+
+                    IReadOnlyList<AsyncCallStack> reloaded = traceLog.GetAsyncCallStacks(sampleThreadIndex, sampleEventQpc);
+                    Assert.Equal(2, reloaded.Count);
+                    Assert.NotSame(retainedOuter, reloaded[0]);
+                    Assert.True(traceLog.IsAsyncCallStacksLoaded);
+
+                    // Release and reload are synchronized. A query that obtained the old index can finish while
+                    // another caller releases it, and later callers load a complete replacement.
+                    Parallel.For(0, 64, i =>
+                    {
+                        if ((i & 3) == 0)
+                        {
+                            traceLog.ReleaseAsyncCallStacks();
+                        }
+                        else
+                        {
+                            Assert.Equal(
+                                2,
+                                traceLog.GetAsyncCallStacks(sampleThreadIndex, sampleEventQpc).Count);
+                        }
+                    });
+                    Assert.Equal(2, traceLog.GetAsyncCallStacks(sampleThreadIndex, sampleEventQpc).Count);
 
                     // The (processId, osThreadId) overload resolves the same real thread identically.
                     IReadOnlyList<AsyncCallStack> byId = traceLog.GetAsyncCallStacks(ProcessId, (ulong)OsThreadId, sampleEventQpc);

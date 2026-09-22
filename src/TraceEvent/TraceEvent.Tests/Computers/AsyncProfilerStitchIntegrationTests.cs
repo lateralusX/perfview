@@ -66,6 +66,7 @@ namespace TraceEventTests
                     SegmentsProcessed = 2,
                     V2PlumbingFramesCollapsed = 4,
                 },
+                ReleaseAsyncCallStacksAfterGeneration = true,
             };
 
             scenario.AssertProductionStitch();
@@ -1102,6 +1103,7 @@ namespace TraceEventTests
             public bool AddForeignProcessActiveSegment { get; set; }
             public byte ContinuationIndexBase { get; set; }
             public int[] AsyncStates { get; set; }
+            public bool ReleaseAsyncCallStacksAfterGeneration { get; set; }
 
             public void AssertProductionStitch()
             {
@@ -1147,14 +1149,27 @@ namespace TraceEventTests
                         {
                             IncludeEventSourceEvents = IncludeEventSourceEvents,
                             GroupByStartStopActivity = GroupByStartStopActivity,
+                            ReleaseAsyncCallStacksAfterGeneration = ReleaseAsyncCallStacksAfterGeneration,
                         };
                         stitchedComputer.GenerateThreadTimeStacks(stitchedStackSource);
+                        if (ReleaseAsyncCallStacksAfterGeneration)
+                        {
+                            Assert.False(traceLog.IsAsyncCallStacksLoaded);
+                        }
                         EmittedStack stitchedOutput = ReadSingleStack(stitchedStackSource);
                         Assert.Equal(Labels(ExpectedStitched), stitchedOutput.ScenarioFrames);
 
                         Assert.Equal(syncOutput.RootFrames, stitchedOutput.RootFrames);
                         Assert.True(stitchedComputer.AsyncStitchActive);
                         (ExpectedDiagnostics ?? new StitchDiagnosticsExpectation()).Assert(stitchedComputer.AsyncStitchDiagnostics);
+
+                        if (ReleaseAsyncCallStacksAfterGeneration)
+                        {
+                            Assert.Equal(
+                                expectedSegments.Length,
+                                traceLog.GetAsyncCallStacks(ProcessId, OsThreadId, asyncProbeQpc).Count);
+                            Assert.True(traceLog.IsAsyncCallStacksLoaded);
+                        }
 
                         if (FilteredOut != null && FilteredOut.Length != 0)
                         {

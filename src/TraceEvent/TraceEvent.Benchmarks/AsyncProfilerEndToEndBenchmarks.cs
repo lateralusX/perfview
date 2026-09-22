@@ -69,6 +69,7 @@ namespace TraceEventBenchmarks
             ReportAsyncIndexMemory(memory, _fixture.ContextCount);
             _fixture.Validate(_traceLog, _controlTraceLog, _symbolReader);
             ReportAsyncIndexMemoryAfterUse(memory.ManagedHeapBefore, _fixture.ContextCount);
+            ReportAsyncIndexMemoryAfterRelease(_traceLog, _fixture.ContextCount);
         }
 
         [GlobalCleanup]
@@ -155,24 +156,54 @@ namespace TraceEventBenchmarks
             return GenerateCpuStacks(_traceLog, stitchAsyncCallStacks: true, traceCount: 6);
         }
 
+        [Benchmark(OperationsPerInvoke = 6)]
+        public int GenerateStitchedCpuStacksAndReleaseIndex()
+        {
+            return GenerateCpuStacks(
+                _traceLog, stitchAsyncCallStacks: true, traceCount: 6, releaseAsyncCallStacksAfterGeneration: true);
+        }
+
+        [Benchmark(OperationsPerInvoke = 2)]
+        public int ReloadReleasedAsyncIndex()
+        {
+            int result = 0;
+            for (int i = 0; i < 2; i++)
+            {
+                if (!_traceLog.ReleaseAsyncCallStacks())
+                {
+                    throw new InvalidOperationException("The async-callstack index was not loaded or reloadable.");
+                }
+
+                result += _traceLog.AsyncCallStacks.DistinctFramesCount;
+            }
+            return result;
+        }
+
         private SampleProfilerThreadTimeComputer CreateComputer(
             TraceLog traceLog,
-            bool stitchAsyncCallStacks)
+            bool stitchAsyncCallStacks,
+            bool releaseAsyncCallStacksAfterGeneration = false)
         {
             return new SampleProfilerThreadTimeComputer(traceLog, _symbolReader, stitchAsyncCallStacks)
             {
                 IncludeEventSourceEvents = false,
                 GroupByStartStopActivity = false,
+                ReleaseAsyncCallStacksAfterGeneration = releaseAsyncCallStacksAfterGeneration,
             };
         }
 
-        private int GenerateCpuStacks(TraceLog traceLog, bool stitchAsyncCallStacks, int traceCount)
+        private int GenerateCpuStacks(
+            TraceLog traceLog,
+            bool stitchAsyncCallStacks,
+            int traceCount,
+            bool releaseAsyncCallStacksAfterGeneration = false)
         {
             int sampleCount = 0;
             for (int i = 0; i < traceCount; i++)
             {
                 var stackSource = new MutableTraceEventStackSource(traceLog);
-                var computer = CreateComputer(traceLog, stitchAsyncCallStacks);
+                var computer = CreateComputer(
+                    traceLog, stitchAsyncCallStacks, releaseAsyncCallStacksAfterGeneration);
                 computer.GenerateThreadTimeStacks(stackSource);
                 sampleCount += CountSamples(stackSource);
             }
@@ -245,6 +276,27 @@ namespace TraceEventBenchmarks
             Console.WriteLine(
                 $"Async index retained memory after full validation: managedHeapDelta={delta:N0} bytes " +
                 $"({delta / (double)contextCount:F2}/context).");
+        }
+
+        private static void ReportAsyncIndexMemoryAfterRelease(TraceLog traceLog, int contextCount)
+        {
+            CollectGarbage();
+            long managedHeapBefore = GC.GetTotalMemory(forceFullCollection: false);
+
+            if (!traceLog.ReleaseAsyncCallStacks())
+            {
+                throw new InvalidOperationException("The async-callstack index was not loaded or reloadable.");
+            }
+
+            CollectGarbage();
+            long managedHeapAfter = GC.GetTotalMemory(forceFullCollection: false);
+            long reclaimed = managedHeapBefore - managedHeapAfter;
+            Console.WriteLine(
+                $"Async index memory after release: managedHeap={managedHeapBefore:N0}->{managedHeapAfter:N0} bytes, " +
+                $"reclaimed={reclaimed:N0} ({reclaimed / (double)contextCount:F2}/context).");
+
+            AsyncCallStacksIndex reloaded = traceLog.AsyncCallStacks;
+            GC.KeepAlive(reloaded);
         }
 
         private readonly struct AsyncIndexMemoryUsage

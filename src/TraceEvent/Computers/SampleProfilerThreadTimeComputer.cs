@@ -89,6 +89,16 @@ namespace Microsoft.Diagnostics.Tracing
         public bool AsyncStitchActive => m_asyncStitchActive;
 
         /// <summary>
+        /// Opt-in: after <see cref="GenerateThreadTimeStacks"/> successfully produces its self-contained stack
+        /// source, release the computer's reusable stitching buffers and, for an ETLX-backed
+        /// <see cref="TraceLog"/>, its loaded async-callstack index. A later async query transparently reloads the
+        /// index from the deferred region. A log without reloadable ETLX backing retains its index. Existing
+        /// <see cref="AsyncCallStack"/> and <see cref="StitchResult"/> instances remain valid because they retain
+        /// their own immutable data. The default is false.
+        /// </summary>
+        public bool ReleaseAsyncCallStacksAfterGeneration { get; set; }
+
+        /// <summary>
         /// Optional presentation filter applied after an async stack has been structurally stitched. Return
         /// <c>true</c> to retain a frame or <c>false</c> to hide it. The filter does not participate in dispatcher
         /// boundary discovery or segment alignment; when null, every structurally retained frame is emitted.
@@ -307,6 +317,11 @@ namespace Microsoft.Diagnostics.Tracing
 
             m_outputStackSource.DoneAddingSamples();
             m_threadState = null;
+
+            if (ReleaseAsyncCallStacksAfterGeneration && m_asyncStitchActive)
+            {
+                ReleaseAsyncStitchingResources();
+            }
         }
 
         #region private
@@ -548,6 +563,26 @@ namespace Microsoft.Diagnostics.Tracing
             m_asyncLogicalFrameByCodeAddress = new Dictionary<CodeAddressIndex, StackSourceFrameIndex>();
             m_asyncPlaceholderFrameByMethodId = new Dictionary<ulong, StackSourceFrameIndex>();
             m_asyncStitchActive = true;
+        }
+
+        /// <summary>
+        /// Drops every computer-owned reference that can retain async index records, then asks the TraceLog to make
+        /// its reloadable ETLX region lazy again. Diagnostics intentionally remain available after generation.
+        /// </summary>
+        private void ReleaseAsyncStitchingResources()
+        {
+            m_asyncIndex = null;
+            m_asyncBoundaries = null;
+            m_asyncClassify = null;
+            m_asyncMethodCompletionObserved = null;
+            m_asyncMethodOf = null;
+            m_asyncSegments = null;
+            m_asyncSyncFrames = null;
+            m_asyncStitchedFrames = null;
+            m_asyncSampleDiagnostics = null;
+            m_asyncLogicalFrameByCodeAddress = null;
+            m_asyncPlaceholderFrameByMethodId = null;
+            m_eventLog.ReleaseAsyncCallStacks();
         }
 
         /// <summary>
