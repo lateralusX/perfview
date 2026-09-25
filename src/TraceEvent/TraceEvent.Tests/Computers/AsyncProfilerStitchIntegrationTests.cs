@@ -1182,12 +1182,49 @@ namespace TraceEventTests
                             {
                                 IncludeEventSourceEvents = IncludeEventSourceEvents,
                                 GroupByStartStopActivity = GroupByStartStopActivity,
-                                AsyncStitchFrameFilter = frame => IncludeFilteredFrame(traceLog, frame),
+                                AsyncStitchStackTransform = frames =>
+                                    frames.RemoveAll(frame => !IncludeFilteredFrame(traceLog, frame)),
                             };
                             filteredComputer.GenerateThreadTimeStacks(filteredStackSource);
                             EmittedStack filteredOutput = ReadSingleStack(filteredStackSource);
                             Assert.Equal(Labels(ExpectedFilteredFrames()), filteredOutput.ScenarioFrames);
                             Assert.Equal(syncOutput.RootFrames, filteredOutput.RootFrames);
+                        }
+
+                        if (VerifyComputerAndIndexLifecycle)
+                        {
+                            AsyncCallStacksIndex customIndex = traceLog.AsyncCallStacks;
+                            var customBoundaries = new AsyncStitchBoundaryCache(traceLog.CodeAddresses);
+                            ProcessIndex processIndex = traceLog.Processes
+                                .GetProcess(ProcessId, asyncProbeQpc).ProcessIndex;
+                            bool callbackInvoked = false;
+                            var customStackSource = new MutableTraceEventStackSource(traceLog);
+                            var customComputer = new SampleProfilerThreadTimeComputer(
+                                traceLog, symbolReader, stitchAsyncCallStacks: true)
+                            {
+                                IncludeEventSourceEvents = IncludeEventSourceEvents,
+                                GroupByStartStopActivity = GroupByStartStopActivity,
+                                AsyncStackStitcher = (sync, segments, qpc, output, diagnostics) =>
+                                {
+                                    callbackInvoked = true;
+                                    AsyncCpuStackStitcher.StitchInto(
+                                        sync,
+                                        segments,
+                                        qpc,
+                                        customBoundaries.Classify,
+                                        customIndex.MethodCompletionObserved,
+                                        processIndex,
+                                        ca => traceLog.CodeAddresses.MethodIndex(ca),
+                                        trace: false,
+                                        output,
+                                        diagnostics);
+                                },
+                            };
+                            customComputer.GenerateThreadTimeStacks(customStackSource);
+                            EmittedStack customOutput = ReadSingleStack(customStackSource);
+                            Assert.True(callbackInvoked);
+                            Assert.Equal(stitchedOutput.ScenarioFrames, customOutput.ScenarioFrames);
+                            Assert.Equal(stitchedOutput.RootFrames, customOutput.RootFrames);
                         }
                     }
                 }
@@ -1725,6 +1762,7 @@ namespace TraceEventTests
             public int AdjacencyMismatches { get; set; }
             public int V2PlumbingFramesCollapsed { get; set; }
             public int V1InfrastructureFramesCollapsed { get; set; }
+            public int V1SynchronousStartupFramesCollapsed { get; set; }
             public int V1InlineFallbackUsed { get; set; }
             public int V2SyncLayoutUsed { get; set; }
             public int V2LeafWrapperDropped { get; set; }
@@ -1736,6 +1774,7 @@ namespace TraceEventTests
                 Xunit.Assert.Equal(AdjacencyMismatches, actual.AdjacencyMismatches);
                 Xunit.Assert.Equal(V2PlumbingFramesCollapsed, actual.V2PlumbingFramesCollapsed);
                 Xunit.Assert.Equal(V1InfrastructureFramesCollapsed, actual.V1InfrastructureFramesCollapsed);
+                Xunit.Assert.Equal(V1SynchronousStartupFramesCollapsed, actual.V1SynchronousStartupFramesCollapsed);
                 Xunit.Assert.Equal(V1InlineFallbackUsed, actual.V1InlineFallbackUsed);
                 Xunit.Assert.Equal(V2SyncLayoutUsed, actual.V2SyncLayoutUsed);
                 Xunit.Assert.Equal(V2LeafWrapperDropped, actual.V2LeafWrapperDropped);

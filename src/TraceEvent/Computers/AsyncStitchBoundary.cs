@@ -147,6 +147,73 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         public const string HostModuleName = "System.Private.CoreLib";
 
         /// <summary>
+        /// Classifies frames used by the V1 synchronous async-method startup sequence. Builder frames must be
+        /// declared in <c>System.Private.CoreLib!System.Runtime.CompilerServices</c>; the generated state-machine
+        /// <c>MoveNext</c> is expected in the application module.
+        /// </summary>
+        public static StitchSyncFrameKind ClassifyV1SynchronousFrame(string frameName) =>
+            ClassifyV1SynchronousFrame(frameName, IsHostModuleQualifiedFrame(frameName));
+
+        /// <summary>
+        /// Classifies a V1 synchronous-startup frame when the caller has already determined whether the method is
+        /// declared in <c>System.Private.CoreLib</c>. This overload supports TraceEvent's split module/method model,
+        /// where <c>TraceCodeAddress.ModuleName</c> and <c>FullMethodName</c> are separate.
+        /// </summary>
+        public static StitchSyncFrameKind ClassifyV1SynchronousFrame(string frameName, bool isHostModule)
+        {
+            string method = GetBareMethodName(frameName);
+            if (method == AsyncStateMachineDispatcherMethodName)
+            {
+                string declaringType = GetDeclaringTypeName(frameName);
+                if (declaringType != null &&
+                    declaringType.StartsWith("<", StringComparison.Ordinal) &&
+                    declaringType.IndexOf(">d__", StringComparison.Ordinal) >= 0)
+                {
+                    return StitchSyncFrameKind.V1StateMachineMoveNext;
+                }
+            }
+
+            if (!isHostModule || !IsRuntimeCompilerServicesMethod(frameName))
+            {
+                return StitchSyncFrameKind.None;
+            }
+
+            string builderType = GetDeclaringTypeName(frameName);
+            if (builderType is null)
+            {
+                return StitchSyncFrameKind.None;
+            }
+
+            int genericArity = builderType.IndexOf('`');
+            if (genericArity >= 0)
+            {
+                builderType = builderType.Substring(0, genericArity);
+            }
+
+            if (method == "SetExistingTaskResult" && builderType == "AsyncTaskMethodBuilder")
+            {
+                return StitchSyncFrameKind.V1MethodBuilderCompletion;
+            }
+
+            if (method != "Start")
+            {
+                return StitchSyncFrameKind.None;
+            }
+
+            switch (builderType)
+            {
+                case "AsyncMethodBuilderCore":
+                case "AsyncTaskMethodBuilder":
+                case "AsyncValueTaskMethodBuilder":
+                case "PoolingAsyncValueTaskMethodBuilder":
+                case "AsyncVoidMethodBuilder":
+                    return StitchSyncFrameKind.V1MethodBuilderStart;
+                default:
+                    return StitchSyncFrameKind.None;
+            }
+        }
+
+        /// <summary>
         /// Classifies a frame name as an async dispatch boundary. <paramref name="frameName"/> may be either a
         /// full TraceEvent frame name (<c>module!Namespace.Type.Method</c>, optionally with an optimization-tier
         /// prefix and/or a parameter signature) or a bare <c>Namespace.Type.Method</c> full method name; only
@@ -223,6 +290,23 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
             return declaringType.EndsWith(AsyncStateMachineBoxTypeSuffix, StringComparison.Ordinal) ||
                    declaringType == AsyncStateMachineDispatcherTypeName;
+        }
+
+        private static bool IsHostModuleQualifiedFrame(string frameName)
+        {
+            const string prefix = HostModuleName + "!";
+            return frameName != null && frameName.StartsWith(prefix, StringComparison.Ordinal);
+        }
+
+        private static bool IsRuntimeCompilerServicesMethod(string frameName)
+        {
+            int qualifiedStart = IsHostModuleQualifiedFrame(frameName)
+                ? HostModuleName.Length + 1
+                : 0;
+            const string namespacePrefix = "System.Runtime.CompilerServices.";
+            return frameName.Length - qualifiedStart >= namespacePrefix.Length &&
+                   string.CompareOrdinal(
+                       frameName, qualifiedStart, namespacePrefix, 0, namespacePrefix.Length) == 0;
         }
 
         /// <summary>
@@ -323,11 +407,25 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
             int typeEnd = methodDot;
             // The type's simple name starts after the preceding namespace '.' or nested-type '+' (or module '!').
+            // Ignore separators inside constructed generic arguments, such as the '+' in
+            // AsyncStateMachineBox`1[System.Int64,MyType+<Method>d__1].
             int typeStart = 0;
+            int bracketDepth = 0;
             for (int i = typeEnd - 1; i >= 0; i--)
             {
                 char c = frameName[i];
-                if (c == '.' || c == '+' || c == '!')
+                if (c == ']')
+                {
+                    bracketDepth++;
+                }
+                else if (c == '[')
+                {
+                    if (bracketDepth > 0)
+                    {
+                        bracketDepth--;
+                    }
+                }
+                else if (bracketDepth == 0 && (c == '.' || c == '+' || c == '!'))
                 {
                     typeStart = i + 1;
                     break;

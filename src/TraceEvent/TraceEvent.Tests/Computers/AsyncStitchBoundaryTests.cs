@@ -88,6 +88,64 @@ namespace TraceEventTests
             Assert.Equal(expectedWrapperIndex, wrapperIndex);
         }
 
+        [Theory]
+        [InlineData("System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1+AsyncStateMachineBox`1[System.Int64,V1TraceScenarios+<BurnCpuAsync>d__15].ExecuteDirectly(class System.Threading.Thread)")]
+        [InlineData("System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1+AsyncStateMachineBox`1[System.Int64,V1TraceScenarios+<BurnCpuAsync>d__15].MoveNext(class System.Threading.Thread)")]
+        [InlineData("System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1+AsyncProfilerAsyncStateMachineBox`1[System.Int64,V1TraceScenarios+<BurnCpuAsync>d__15].InstrumentedMoveNext(class System.Threading.Thread,value class Flags)")]
+        public void Classify_RecognizesConstructedV1StateMachineBoxFramesFromRealTrace(string frameName)
+        {
+            Assert.Equal(
+                AsyncStitchBoundaryKind.V1DispatcherInfrastructure,
+                AsyncStitchBoundary.Classify(frameName, out int wrapperIndex));
+            Assert.Equal(-1, wrapperIndex);
+        }
+
+        [Theory]
+        [InlineData(
+            "AsyncProfilerScenarios!V1TraceScenarios+<BurnCpuAsync>d__15.MoveNext()",
+            StitchSyncFrameKind.V1StateMachineMoveNext)]
+        [InlineData(
+            "System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1[System.Int64].Start(!!0&)",
+            StitchSyncFrameKind.V1MethodBuilderStart)]
+        [InlineData(
+            "System.Private.CoreLib!System.Runtime.CompilerServices.AsyncMethodBuilderCore.Start(!!0&)",
+            StitchSyncFrameKind.V1MethodBuilderStart)]
+        [InlineData(
+            "System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1[System.Int64].SetExistingTaskResult(class System.Threading.Tasks.Task`1<!0>,!0)",
+            StitchSyncFrameKind.V1MethodBuilderCompletion)]
+        [InlineData(
+            "Other.CoreLib!System.Runtime.CompilerServices.AsyncMethodBuilderCore.Start(!!0&)",
+            StitchSyncFrameKind.None)]
+        [InlineData(
+            "System.Private.CoreLib!Other.Namespace.AsyncMethodBuilderCore.Start(!!0&)",
+            StitchSyncFrameKind.None)]
+        [InlineData(
+            "MyBuilders!CustomAsyncMethodBuilder.Start(!!0&)",
+            StitchSyncFrameKind.None)]
+        [InlineData(
+            "MyApp!MyType.MoveNext()",
+            StitchSyncFrameKind.None)]
+        public void ClassifyV1SynchronousFrame_RecognizesKnownStartupFrames(
+            string frameName,
+            StitchSyncFrameKind expected)
+        {
+            Assert.Equal(expected, AsyncStitchBoundary.ClassifyV1SynchronousFrame(frameName));
+        }
+
+        [Fact]
+        public void ClassifyV1SynchronousFrame_SplitTraceEventModuleAndMethod_RequiresCoreLib()
+        {
+            const string method =
+                "System.Runtime.CompilerServices.AsyncMethodBuilderCore.Start(!!0&)";
+
+            Assert.Equal(
+                StitchSyncFrameKind.V1MethodBuilderStart,
+                AsyncStitchBoundary.ClassifyV1SynchronousFrame(method, isHostModule: true));
+            Assert.Equal(
+                StitchSyncFrameKind.None,
+                AsyncStitchBoundary.ClassifyV1SynchronousFrame(method, isHostModule: false));
+        }
+
         [Fact]
         public void Contract_ConstantsMatchRuntime()
         {
@@ -115,6 +173,19 @@ namespace TraceEventTests
         public void GetDeclaringTypeName_ExtractsTypeComponent(string frameName, string expected)
         {
             Assert.Equal(expected, AsyncStitchBoundary.GetDeclaringTypeName(frameName));
+        }
+
+        [Fact]
+        public void GetDeclaringTypeName_ConstructedNestedGenericType_IgnoresSeparatorsInTypeArguments()
+        {
+            const string frameName =
+                "System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1+" +
+                "AsyncProfilerAsyncStateMachineBox`1[System.Int64,V1TraceScenarios+<BurnCpuAsync>d__15]." +
+                "InstrumentedMoveNext(class System.Threading.Thread,value class Flags)";
+
+            Assert.Equal(
+                "AsyncProfilerAsyncStateMachineBox`1[System.Int64,V1TraceScenarios+<BurnCpuAsync>d__15]",
+                AsyncStitchBoundary.GetDeclaringTypeName(frameName));
         }
     }
 }

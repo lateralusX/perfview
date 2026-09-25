@@ -25,6 +25,29 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     }
 
     /// <summary>
+    /// Additional classification carried by a native sync frame for V1 synchronous-startup normalization.
+    /// These are not dispatch boundaries.
+    /// </summary>
+    public enum StitchSyncFrameKind
+    {
+        /// <summary>An ordinary native sync frame.</summary>
+        None = 0,
+
+        /// <summary>A compiler-generated async state-machine <c>MoveNext</c> frame.</summary>
+        V1StateMachineMoveNext,
+
+        /// <summary>A known CoreLib async method-builder <c>Start</c> frame.</summary>
+        V1MethodBuilderStart,
+
+        /// <summary>
+        /// A known CoreLib method-builder frame that completes the currently executing V1 state machine's own
+        /// result. When it is directly leaf-ward of the final matched <c>MoveNext</c>, that frame has completed
+        /// rather than merely remaining as the caller of a nested async segment.
+        /// </summary>
+        V1MethodBuilderCompletion,
+    }
+
+    /// <summary>
     /// One frame of a native (CPU-sample) call stack, as consumed by <see cref="AsyncCpuStackStitcher"/>.
     /// Carries both the <see cref="CodeAddressIndex"/> (for interning the frame into the output stack source)
     /// and the <see cref="MethodIndex"/> (for the V1 completed-frame identity match) so the stitcher does no
@@ -38,10 +61,19 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <summary>The frame's method (used for the V1 inline-<c>MoveNext</c> identity match).</summary>
         public readonly MethodIndex Method;
 
+        /// <summary>Optional V1 synchronous-startup classification.</summary>
+        public readonly StitchSyncFrameKind Kind;
+
         public StitchSyncFrame(CodeAddressIndex codeAddress, MethodIndex method)
+            : this(codeAddress, method, StitchSyncFrameKind.None)
+        {
+        }
+
+        public StitchSyncFrame(CodeAddressIndex codeAddress, MethodIndex method, StitchSyncFrameKind kind)
         {
             CodeAddress = codeAddress;
             Method = method;
+            Kind = kind;
         }
     }
 
@@ -65,23 +97,40 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <summary>For an async-origin frame, its index within <see cref="Segment"/>; otherwise -1.</summary>
         public readonly int SegmentFrameIndex;
 
-        private StitchedFrame(StitchedFrameOrigin origin, CodeAddressIndex codeAddress, AsyncCallStackFrames segment, int segmentFrameIndex)
+        /// <summary>For a sync-origin frame, its optional V1 synchronous-startup classification.</summary>
+        public readonly StitchSyncFrameKind SyncFrameKind;
+
+        private StitchedFrame(
+            StitchedFrameOrigin origin,
+            CodeAddressIndex codeAddress,
+            AsyncCallStackFrames segment,
+            int segmentFrameIndex,
+            StitchSyncFrameKind syncFrameKind)
         {
             Origin = origin;
             CodeAddress = codeAddress;
             Segment = segment;
             SegmentFrameIndex = segmentFrameIndex;
+            SyncFrameKind = syncFrameKind;
         }
 
-        internal static StitchedFrame Sync(CodeAddressIndex codeAddress) =>
-            new StitchedFrame(StitchedFrameOrigin.Sync, codeAddress, null, -1);
+        /// <summary>Creates a stitched frame that preserves a native sync frame.</summary>
+        public static StitchedFrame CreateSync(StitchSyncFrame frame) =>
+            new StitchedFrame(StitchedFrameOrigin.Sync, frame.CodeAddress, null, -1, frame.Kind);
 
-        internal static StitchedFrame AsyncCurrent(
+        /// <summary>Creates the physically present current V1 frame with its logical async identity.</summary>
+        public static StitchedFrame CreateAsyncCurrent(
             CodeAddressIndex codeAddress, AsyncCallStackFrames segment, int segmentFrameIndex) =>
-            new StitchedFrame(StitchedFrameOrigin.AsyncCurrent, codeAddress, segment, segmentFrameIndex);
+            new StitchedFrame(StitchedFrameOrigin.AsyncCurrent, codeAddress, segment, segmentFrameIndex, StitchSyncFrameKind.None);
 
-        internal static StitchedFrame Async(AsyncCallStackFrames segment, int segmentFrameIndex) =>
-            new StitchedFrame(StitchedFrameOrigin.AsyncRemaining, segment.CodeAddressAt(segmentFrameIndex), segment, segmentFrameIndex);
+        /// <summary>Creates a suspended-ancestry frame from an async call-stack segment.</summary>
+        public static StitchedFrame CreateAsync(AsyncCallStackFrames segment, int segmentFrameIndex) =>
+            new StitchedFrame(
+                StitchedFrameOrigin.AsyncRemaining,
+                segment.CodeAddressAt(segmentFrameIndex),
+                segment,
+                segmentFrameIndex,
+                StitchSyncFrameKind.None);
     }
 
     /// <summary>
@@ -108,6 +157,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <summary>V1 segments whose completed-frame count was derived from the inline sync frames (no completion events).</summary>
         public int V1InlineFallbackUsed;
 
+        /// <summary>V1 segments whose dispatcher boundary was truncated, but whose current position was recovered
+        /// from a unique contiguous sequence of state-machine methods retained on the synchronous stack.</summary>
+        public int V1TruncatedSuffixFallbackUsed;
+
         /// <summary>V2 samples emitted verbatim as the sync layout (not stitched) because no continuation-wrapper
         /// sat root-ward of the sampled leaf (at a higher leaf-&gt;root index): either the wrapper was the leaf itself,
         /// or there was no wrapper but the sample sat in dispatch-continuation plumbing. These frames are dispatch
@@ -127,6 +180,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <summary>V1 CoreLib async-state-machine-box frames collapsed contiguously root-ward of a consumed
         /// dispatcher boundary.</summary>
         public int V1InfrastructureFramesCollapsed;
+
+        /// <summary>V1 synchronous startup frames collapsed from a recognized
+        /// <c>stateMachine.MoveNext -&gt; methodBuilder.Start+</c> sequence.</summary>
+        public int V1SynchronousStartupFramesCollapsed;
 
         /// <summary>Human-readable notes: the anomalies above, plus per-segment happy-path trace steps when
         /// stitching is run with tracing enabled.</summary>
@@ -166,10 +223,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             AdjacencyMismatches = 0;
             V2WrapperFallbackUsed = 0;
             V1InlineFallbackUsed = 0;
+            V1TruncatedSuffixFallbackUsed = 0;
             V2SyncLayoutUsed = 0;
             V2LeafWrapperDropped = 0;
             V2PlumbingFramesCollapsed = 0;
             V1InfrastructureFramesCollapsed = 0;
+            V1SynchronousStartupFramesCollapsed = 0;
             MessagesDropped = 0;
             m_messages?.Clear();
         }
@@ -181,10 +240,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             target.AdjacencyMismatches += AdjacencyMismatches;
             target.V2WrapperFallbackUsed += V2WrapperFallbackUsed;
             target.V1InlineFallbackUsed += V1InlineFallbackUsed;
+            target.V1TruncatedSuffixFallbackUsed += V1TruncatedSuffixFallbackUsed;
             target.V2SyncLayoutUsed += V2SyncLayoutUsed;
             target.V2LeafWrapperDropped += V2LeafWrapperDropped;
             target.V2PlumbingFramesCollapsed += V2PlumbingFramesCollapsed;
             target.V1InfrastructureFramesCollapsed += V1InfrastructureFramesCollapsed;
+            target.V1SynchronousStartupFramesCollapsed += V1SynchronousStartupFramesCollapsed;
             target.MessagesDropped += MessagesDropped;
             if (m_messages != null)
             {
@@ -205,10 +266,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// <summary>The result of a stitch: the merged frames (leaf-&gt;root) and the diagnostics.</summary>
     public sealed class StitchResult
     {
-        internal StitchResult(IReadOnlyList<StitchedFrame> frames, StitchDiagnostics diagnostics)
+        public StitchResult(IReadOnlyList<StitchedFrame> frames, StitchDiagnostics diagnostics)
         {
-            Frames = frames;
-            Diagnostics = diagnostics;
+            Frames = frames ?? throw new ArgumentNullException(nameof(frames));
+            Diagnostics = diagnostics ?? throw new ArgumentNullException(nameof(diagnostics));
         }
 
         /// <summary>The stitched frames, leaf-&gt;root (the native leaf first, the thread/process root last).</summary>
@@ -368,7 +429,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             {
                 for (int i = 0; i < syncLeafToRoot.Count; i++)
                 {
-                    output.Add(StitchedFrame.Sync(syncLeafToRoot[i].CodeAddress));
+                    output.Add(StitchedFrame.CreateSync(syncLeafToRoot[i]));
                 }
                 return;
             }
@@ -395,7 +456,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     diagnostics.V2LeafWrapperDropped++;
                     for (int i = 1; i < syncLeafToRoot.Count; i++)
                     {
-                        output.Add(StitchedFrame.Sync(syncLeafToRoot[i].CodeAddress));
+                        output.Add(StitchedFrame.CreateSync(syncLeafToRoot[i]));
                     }
                     if (trace)
                     {
@@ -409,7 +470,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     diagnostics.V2SyncLayoutUsed++;
                     for (int i = 0; i < syncLeafToRoot.Count; i++)
                     {
-                        output.Add(StitchedFrame.Sync(syncLeafToRoot[i].CodeAddress));
+                        output.Add(StitchedFrame.CreateSync(syncLeafToRoot[i]));
                     }
                     if (trace)
                     {
@@ -420,12 +481,14 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             int pSync = 0;
+            bool v1SegmentProcessed = false;
             for (int segmentIndex = segmentsRootToLeaf.Count - 1; segmentIndex >= 0; segmentIndex--)
             {
                 AsyncCallStack segment = segmentsRootToLeaf[segmentIndex];
                 diagnostics.SegmentsProcessed++;
                 AsyncCallStackFrames frames = segment.Frames;
                 AsyncCallstackKind kind = frames.Kind;
+                v1SegmentProcessed |= kind == AsyncCallstackKind.StateMachineAsync;
 
                 int boundaryPos = FindBoundary(syncLeafToRoot, pSync, kind, classify, out AsyncStitchBoundaryInfo boundaryInfo);
                 bool boundaryFound = boundaryPos < syncLeafToRoot.Count;
@@ -442,11 +505,18 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     }
                 }
 
-                int completed = ComputeCompletedCount(segment, frames, kind, boundaryInfo, qpc,
-                    syncLeafToRoot, pSync, boundaryPos, methodCompletionObserved,
-                    methodCompletionObservedByProcess, processIndex, methodOf, diagnostics);
+                // A non-leaf segment can finish all of its methods while its dispatcher invocation remains
+                // physically on the stack and synchronously resumes the next segment. The leaf segment must still
+                // have a current frame, but an outer segment with a verified boundary may be fully completed.
+                bool allowFullyCompleted = boundaryFound && segmentIndex < segmentsRootToLeaf.Count - 1;
+                int completed = ComputeCompletedCount(segment, frames, kind, boundaryInfo, boundaryFound,
+                    allowFullyCompleted, qpc,
+                    syncLeafToRoot, pSync, boundaryPos, classify, methodCompletionObserved,
+                    methodCompletionObservedByProcess, processIndex, methodOf, diagnostics,
+                    out int recoveredV1TailPos);
+                bool fullyCompleted = completed == frames.FrameCount;
 
-                int currentSyncPos = kind == AsyncCallstackKind.StateMachineAsync
+                int currentSyncPos = kind == AsyncCallstackKind.StateMachineAsync && !fullyCompleted
                     ? FindCurrentV1SyncFrame(frames, completed, syncLeafToRoot, pSync, boundaryPos, methodOf)
                     : -1;
 
@@ -457,26 +527,32 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 // inline-transition chain represented by the logical ancestry and are not emitted.
                 for (int i = pSync; i < boundaryPos; i++)
                 {
+                    if (fullyCompleted)
+                    {
+                        continue;
+                    }
+
                     if (kind == AsyncCallstackKind.StateMachineAsync && currentSyncPos >= 0 && i > currentSyncPos)
                     {
                         continue;
                     }
 
                     output.Add(i == currentSyncPos
-                        ? StitchedFrame.AsyncCurrent(syncLeafToRoot[i].CodeAddress, frames, completed)
-                        : StitchedFrame.Sync(syncLeafToRoot[i].CodeAddress));
+                        ? StitchedFrame.CreateAsyncCurrent(syncLeafToRoot[i].CodeAddress, frames, completed)
+                        : StitchedFrame.CreateSync(syncLeafToRoot[i]));
                 }
 
                 // The current (running) frame is segment[completed]; it is physically present on the sync stack
                 // (emitted above), so it is never re-emitted here. Splice only the root-ward suspended ancestry.
                 if (boundaryFound)
                 {
-                    ValidateAdjacency(segment, frames, kind, completed, syncLeafToRoot, boundaryPos, methodOf, diagnostics);
+                    ValidateAdjacency(segment, frames, kind, completed, syncLeafToRoot, boundaryPos,
+                        methodOf, diagnostics);
                 }
 
                 for (int k = completed + 1; k < frames.FrameCount; k++)
                 {
-                    output.Add(StitchedFrame.Async(frames, k));
+                    output.Add(StitchedFrame.CreateAsync(frames, k));
                 }
 
                 if (trace && diagnostics.CanRetainMessage)
@@ -489,7 +565,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     int splicedCount = frames.FrameCount - (completed + 1);
                     if (splicedCount < 0) splicedCount = 0;
                     diagnostics.Note($"segment[{diagnostics.SegmentsProcessed - 1}] kind={kind} boundary={boundaryDesc} " +
-                        $"emittedSync=[{pSync}..{boundaryPos}) completed={completed} spliced=[{completed + 1}..{frames.FrameCount}) ({splicedCount} frame(s)) frameCount={frames.FrameCount}");
+                        $"emittedSync={(fullyCompleted ? "none (fully completed)" : $"[{pSync}..{boundaryPos})")} " +
+                        $"completed={completed} spliced=[{completed + 1}..{frames.FrameCount}) ({splicedCount} frame(s)) frameCount={frames.FrameCount}");
                 }
                 else if (trace)
                 {
@@ -497,7 +574,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 }
 
                 // Skip the boundary frame itself (the dispatch machinery the ancestry replaces); keep other frames.
-                pSync = boundaryFound ? boundaryPos + 1 : boundaryPos;
+                pSync = recoveredV1TailPos >= 0
+                    ? recoveredV1TailPos
+                    : (boundaryFound ? boundaryPos + 1 : boundaryPos);
                 if (boundaryFound && kind == AsyncCallstackKind.StateMachineAsync)
                 {
                     while (pSync < syncLeafToRoot.Count &&
@@ -526,9 +605,47 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             // Emit the clean sync tail (includes the thread/process root).
             for (int i = pSync; i < syncLeafToRoot.Count; i++)
             {
-                output.Add(StitchedFrame.Sync(syncLeafToRoot[i].CodeAddress));
+                output.Add(StitchedFrame.CreateSync(syncLeafToRoot[i]));
             }
 
+            if (v1SegmentProcessed)
+            {
+                CollapseV1SynchronousStartup(output, diagnostics);
+            }
+
+        }
+
+        private static void CollapseV1SynchronousStartup(List<StitchedFrame> output, StitchDiagnostics diagnostics)
+        {
+            for (int i = 0; i < output.Count - 1;)
+            {
+                if (output[i].Origin != StitchedFrameOrigin.Sync ||
+                    output[i].SyncFrameKind != StitchSyncFrameKind.V1StateMachineMoveNext)
+                {
+                    i++;
+                    continue;
+                }
+
+                int end = i + 1;
+                while (end < output.Count &&
+                       output[end].Origin == StitchedFrameOrigin.Sync &&
+                       output[end].SyncFrameKind == StitchSyncFrameKind.V1MethodBuilderStart)
+                {
+                    end++;
+                }
+
+                // A generated MoveNext is real executing code. It is startup plumbing only when immediately
+                // followed root-ward by at least one known method-builder Start frame.
+                if (end == i + 1)
+                {
+                    i++;
+                    continue;
+                }
+
+                int count = end - i;
+                output.RemoveRange(i, count);
+                diagnostics.V1SynchronousStartupFramesCollapsed += count;
+            }
         }
 
         private static bool HasEmptySegment(IReadOnlyList<AsyncCallStack> segments)
@@ -622,17 +739,22 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         ///   added from <c>Unwind</c> events (<see cref="AsyncCallStack.GetExceptionCompletedFrameCount"/>). For V2
         ///   they are already folded into whichever normal source is used, so they are not added again.</item>
         /// </list>
-        /// The result is clamped to <c>[0, FrameCount-1]</c> so a valid "current" frame always remains.
+        /// The leaf segment is clamped to <c>[0, FrameCount-1]</c> so a valid current frame remains. A non-leaf
+        /// segment with a verified dispatch boundary may return <c>FrameCount</c>: all of its methods completed,
+        /// but its dispatcher invocation is still physically unwinding around an inline-resumed inner segment.
         /// </summary>
         private static int ComputeCompletedCount(
             AsyncCallStack segment, AsyncCallStackFrames frames, AsyncCallstackKind kind,
-            AsyncStitchBoundaryInfo boundaryInfo, long qpc,
+            AsyncStitchBoundaryInfo boundaryInfo, bool boundaryFound, bool allowFullyCompleted, long qpc,
             IReadOnlyList<StitchSyncFrame> sync, int pSync, int boundaryPos,
+            Func<CodeAddressIndex, AsyncStitchBoundaryInfo> classify,
             Func<AsyncCallstackKind, bool> methodCompletionObserved,
             Func<ProcessIndex, AsyncCallstackKind, long, bool> methodCompletionObservedByProcess,
             ProcessIndex processIndex,
-            Func<CodeAddressIndex, MethodIndex> methodOf, StitchDiagnostics diagnostics)
+            Func<CodeAddressIndex, MethodIndex> methodOf, StitchDiagnostics diagnostics,
+            out int recoveredV1TailPos)
         {
+            recoveredV1TailPos = -1;
             bool completionObserved = methodCompletionObserved != null
                 ? methodCompletionObserved(kind)
                 : methodCompletionObservedByProcess(processIndex, kind, segment.StartQpc);
@@ -665,8 +787,18 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 {
                     // No CompleteMethod events: the normal completions are the inline-resumed MoveNext frames
                     // physically on the sync stack.
-                    normal = CountV1Completed(frames, sync, pSync, boundaryPos,
-                        segment.GetExceptionCompletedFrameCount(qpc), methodOf);
+                    int exceptionCompleted = segment.GetExceptionCompletedFrameCount(qpc);
+                    if (!boundaryFound && exceptionCompleted == 0 &&
+                        TryRecoverTruncatedV1Completed(frames, sync, pSync, boundaryPos, classify, methodOf,
+                            out normal, out recoveredV1TailPos))
+                    {
+                        diagnostics.V1TruncatedSuffixFallbackUsed++;
+                    }
+                    else
+                    {
+                        normal = CountV1Completed(
+                            frames, sync, pSync, boundaryPos, exceptionCompleted, allowFullyCompleted, methodOf);
+                    }
                     diagnostics.V1InlineFallbackUsed++;
                 }
 
@@ -675,7 +807,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 completed = normal + segment.GetExceptionCompletedFrameCount(qpc);
             }
 
-            int maxIndex = frames.FrameCount - 1;
+            int maxIndex = allowFullyCompleted ? frames.FrameCount : frames.FrameCount - 1;
             if (completed < 0)
             {
                 completed = 0;
@@ -685,6 +817,98 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 completed = maxIndex;
             }
             return completed;
+        }
+
+        /// <summary>
+        /// Recovers a V1 current-frame position when the root side of the synchronous sample was truncated before
+        /// the dispatcher boundary. Only state-machine methods present in the indexed async segment participate.
+        /// The retained physical methods must form one uniquely positioned contiguous sequence of at least two
+        /// frames in the async segment; recursive/repeated or otherwise ambiguous layouts are rejected.
+        /// </summary>
+        private static bool TryRecoverTruncatedV1Completed(
+            AsyncCallStackFrames frames, IReadOnlyList<StitchSyncFrame> sync, int pSync, int boundaryPos,
+            Func<CodeAddressIndex, AsyncStitchBoundaryInfo> classify,
+            Func<CodeAddressIndex, MethodIndex> methodOf, out int completed, out int rootTailPos)
+        {
+            completed = 0;
+            rootTailPos = -1;
+            int frameCount = frames.FrameCount;
+            if (frameCount < 2)
+            {
+                return false;
+            }
+
+            var segmentMethods = new MethodIndex[frameCount];
+            var methodSet = new HashSet<MethodIndex>();
+            for (int i = 0; i < frameCount; i++)
+            {
+                MethodIndex method = methodOf(frames.CodeAddressAt(i));
+                if (method == MethodIndex.Invalid)
+                {
+                    return false;
+                }
+
+                segmentMethods[i] = method;
+                methodSet.Add(method);
+            }
+
+            var physicalMethods = new List<MethodIndex>();
+            int rootmostPhysicalMethodPos = -1;
+            for (int i = boundaryPos - 1; i >= pSync; i--)
+            {
+                MethodIndex method = sync[i].Method;
+                if (methodSet.Contains(method))
+                {
+                    if (rootmostPhysicalMethodPos < 0)
+                    {
+                        rootmostPhysicalMethodPos = i;
+                    }
+                    physicalMethods.Add(method);
+                }
+            }
+
+            if (physicalMethods.Count < 2 || physicalMethods.Count > frameCount)
+            {
+                return false;
+            }
+
+            int matchStart = -1;
+            int maxStart = frameCount - physicalMethods.Count;
+            for (int start = 0; start <= maxStart; start++)
+            {
+                int physicalIndex = 0;
+                while (physicalIndex < physicalMethods.Count &&
+                       segmentMethods[start + physicalIndex] == physicalMethods[physicalIndex])
+                {
+                    physicalIndex++;
+                }
+
+                if (physicalIndex != physicalMethods.Count)
+                {
+                    continue;
+                }
+
+                if (matchStart >= 0)
+                {
+                    return false;
+                }
+
+                matchStart = start;
+            }
+
+            if (matchStart < 0)
+            {
+                return false;
+            }
+
+            completed = matchStart + physicalMethods.Count - 1;
+            rootTailPos = rootmostPhysicalMethodPos + 1;
+            while (rootTailPos < boundaryPos &&
+                   classify(sync[rootTailPos].CodeAddress).Kind == AsyncStitchBoundaryKind.V1DispatcherInfrastructure)
+            {
+                rootTailPos++;
+            }
+            return true;
         }
 
         /// <summary>
@@ -709,12 +933,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// </summary>
         private static int CountV1Completed(
             AsyncCallStackFrames frames, IReadOnlyList<StitchSyncFrame> sync, int pSync, int boundaryPos,
-            int exceptionCompleted, Func<CodeAddressIndex, MethodIndex> methodOf)
+            int exceptionCompleted, bool allowFullyCompleted, Func<CodeAddressIndex, MethodIndex> methodOf)
         {
             int frameCount = frames.FrameCount;
             int nextSegmentFrame = 0;
             int matched = 0;
             int exceptionsSkipped = 0;
+            int leafmostMatchedSyncPos = -1;
 
             for (int i = boundaryPos - 1; i >= pSync && nextSegmentFrame < frameCount; i--)
             {
@@ -743,6 +968,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                         exceptionsSkipped += candidateExceptions;
                         nextSegmentFrame = candidate + 1;
                         matched++;
+                        leafmostMatchedSyncPos = i;
                         break;
                     }
 
@@ -751,8 +977,23 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 }
             }
 
-            // The final matched physical state-machine frame is current; every earlier match completed normally.
-            // Exceptionally completed frames were skipped only to align identities and are added separately.
+            // Normally the final matched physical state-machine frame is current. For a non-leaf segment, however,
+            // its final MoveNext may have completed and synchronously resumed the inner segment while its dispatcher
+            // invocation remains on the physical stack. A CoreLib method-builder completion frame leaf-ward of that
+            // final MoveNext proves this shape without requiring CompleteMethod events.
+            if (allowFullyCompleted && matched == frameCount && leafmostMatchedSyncPos > pSync)
+            {
+                for (int i = leafmostMatchedSyncPos - 1; i >= pSync; i--)
+                {
+                    if (sync[i].Kind == StitchSyncFrameKind.V1MethodBuilderCompletion)
+                    {
+                        return matched;
+                    }
+                }
+            }
+
+            // Every match before the final current frame completed normally. Exceptionally completed frames were
+            // skipped only to align identities and are added separately.
             return Math.Max(0, matched - 1);
         }
 
@@ -822,5 +1063,6 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 }
             }
         }
+
     }
 }

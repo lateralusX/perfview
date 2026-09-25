@@ -2349,7 +2349,10 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
                 countForEvent.m_eventDataLenTotal += data.EventDataLength;
 
                 var extendedDataCount = data.eventRecord->ExtendedDataCount;
-                if (extendedDataCount != 0)
+                // An event removed from the persisted stream has no EventIndex to own its extended stack data.
+                // Attaching that stack to the current eventCount would make the next persisted event reuse the
+                // same EventIndex and appear to have two stacks.
+                if (extendedDataCount != 0 && (!removeFromStream || options.KeepAllEvents))
                 {
                     bookKeepingEvent |= ProcessExtendedData(data, extendedDataCount, countForEvent, isLiveSession: false);
                 }
