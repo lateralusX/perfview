@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.Tracing;
 using System.IO;
 using System.Linq;
 
@@ -67,6 +68,64 @@ namespace TraceEventTests
                     V2PlumbingFramesCollapsed = 4,
                 },
                 VerifyComputerAndIndexLifecycle = true,
+            };
+
+            scenario.AssertProductionStitch();
+        }
+
+        [Fact]
+        public void RuntimeAsync_ReplacesTplReconstructionAndPreservesStartStopGrouping()
+        {
+            Frame taskExecute = Frame.CoreLib("System.Threading.Tasks.Task.Execute", "Task.Execute");
+            var scenario = new StitchScenario
+            {
+                Sync = new[]
+                {
+                    Frame.App("Scenario.DoWork"),
+                    Frame.App("Scenario.CurrentAsync"),
+                    Frame.V2Wrapper(0),
+                    Frame.V2InstrumentedDispatch,
+                    Frame.V2Dispatch,
+                    taskExecute,
+                    Frame.ThreadPoolDispatch,
+                    Frame.WorkerThreadStart,
+                },
+                Async = new[]
+                {
+                    Frame.App("Scenario.CurrentAsync"),
+                    Frame.App("Scenario.ParentAsync"),
+                    Frame.App("Program.Main"),
+                },
+                ExpectedStitched = new[]
+                {
+                    Frame.App("Scenario.DoWork"),
+                    Frame.App("Scenario.CurrentAsync"),
+                    Frame.App("Scenario.ParentAsync"),
+                    Frame.App("Program.Main"),
+                    taskExecute,
+                    Frame.ThreadPoolDispatch,
+                    Frame.WorkerThreadStart,
+                },
+                ExpectedDiagnostics = new StitchDiagnosticsExpectation
+                {
+                    SegmentsProcessed = 2,
+                    V2PlumbingFramesCollapsed = 4,
+                },
+                IncludeTplActivity = true,
+                IncludeStartStopActivity = true,
+                AllowSupplementalSamples = true,
+                SkipNormalStackAssertion = true,
+                AssertOutputs = (normal, stitched) =>
+                {
+                    Assert.Contains(normal.GroupingFrames, name =>
+                        name.IndexOf("STARTING TASK", StringComparison.Ordinal) >= 0);
+                    Assert.DoesNotContain(stitched.GroupingFrames, name =>
+                        name.IndexOf("STARTING TASK", StringComparison.Ordinal) >= 0);
+                    Assert.Contains(normal.RootFrames, name =>
+                        name.IndexOf("Activity Request", StringComparison.Ordinal) >= 0);
+                    Assert.Contains(stitched.RootFrames, name =>
+                        name.IndexOf("Activity Request", StringComparison.Ordinal) >= 0);
+                },
             };
 
             scenario.AssertProductionStitch();
@@ -1476,7 +1535,12 @@ namespace TraceEventTests
             public byte ContinuationIndexBase { get; set; }
             public int[] AsyncStates { get; set; }
             public bool VerifyComputerAndIndexLifecycle { get; set; }
+            public bool IncludeTplActivity { get; set; }
+            public bool IncludeStartStopActivity { get; set; }
+            public bool AllowSupplementalSamples { get; set; }
+            public bool SkipNormalStackAssertion { get; set; }
             public Action<MutableTraceEventStackSource> AssertStitchedStackSource { get; set; }
+            public Action<EmittedStack, EmittedStack> AssertOutputs { get; set; }
 
             public void AssertProductionStitch()
             {
@@ -1515,7 +1579,10 @@ namespace TraceEventTests
                         };
                         syncComputer.GenerateThreadTimeStacks(syncStackSource);
                         EmittedStack syncOutput = ReadSingleStack(syncStackSource);
-                        Assert.Equal(Labels(Sync), syncOutput.ScenarioFrames);
+                        if (!SkipNormalStackAssertion)
+                        {
+                            Assert.Equal(Labels(Sync), syncOutput.ScenarioFrames);
+                        }
 
                         var stitchedStackSource = new MutableTraceEventStackSource(traceLog);
                         var stitchedComputer = new SampleProfilerThreadTimeComputer(traceLog, symbolReader, stitchAsyncCallStacks: true)
@@ -1535,6 +1602,7 @@ namespace TraceEventTests
                         EmittedStack stitchedOutput = ReadSingleStack(stitchedStackSource);
                         Assert.Equal(Labels(ExpectedStitched), stitchedOutput.ScenarioFrames);
                         AssertStitchedStackSource?.Invoke(stitchedStackSource);
+                        AssertOutputs?.Invoke(syncOutput, stitchedOutput);
 
                         Assert.Equal(syncOutput.RootFrames, stitchedOutput.RootFrames);
                         Assert.True(stitchedComputer.AsyncStitchActive);
@@ -1670,10 +1738,33 @@ namespace TraceEventTests
                 {
                     ProviderId = EventPipeFixtureWriter.UniversalSystemProviderGuid,
                 };
+                var taskScheduledMetadata = new EventMetadata(
+                    5, TplEtwProviderTraceEventParser.ProviderName, "TaskScheduled", 7)
+                {
+                    ProviderId = TplEtwProviderTraceEventParser.ProviderGuid,
+                };
+                var taskStartedMetadata = new EventMetadata(
+                    6, TplEtwProviderTraceEventParser.ProviderName, "TaskExecuteStart", 8)
+                {
+                    ProviderId = TplEtwProviderTraceEventParser.ProviderGuid,
+                };
+                var activityStartMetadata = new EventMetadata(
+                    7, "Microsoft-Diagnostics-ActivityTracking", "RequestStart", 1)
+                {
+                    ProviderId = new Guid("3b268b3d-903f-5835-c77e-790d518a26c4"),
+                    OpCode = (byte)EventOpcode.Start,
+                };
 
                 var writer = new EventPipeFixtureWriter();
                 writer.WriteHeadersWithNonZeroSyncTime();
-                writer.WriteMetadataBlock(asyncMetadata, sampleMetadata, mappingMetadata, symbolMetadata);
+                writer.WriteMetadataBlock(
+                    asyncMetadata,
+                    sampleMetadata,
+                    mappingMetadata,
+                    symbolMetadata,
+                    taskScheduledMetadata,
+                    taskStartedMetadata,
+                    activityStartMetadata);
                 writer.WriteThreadBlock(w =>
                 {
                     w.WriteThreadEntry(ThreadStreamIndex, OsThreadId, ProcessId);
@@ -1712,6 +1803,35 @@ namespace TraceEventTests
                         ulong address = addresses[frame.Key];
                         w.WriteEventBlob(EventOptions(4, sequence++, StartQpc + 2), p =>
                             WriteProcessSymbolPayload(p, symbolId++, mappingId, address, frame.SymbolName));
+                    }
+
+                    Guid activityId = new Guid("9f7e55d2-694f-4cc2-a68d-df35efca1c81");
+                    if (IncludeStartStopActivity)
+                    {
+                        w.WriteEventBlob(
+                            EventOptions(7, sequence++, StartQpc + 3, activityId: activityId),
+                            p => { });
+                    }
+                    if (IncludeTplActivity)
+                    {
+                        w.WriteEventBlob(
+                            EventOptions(5, sequence++, StartQpc + 4, stackId: 1, activityId: activityId),
+                            p =>
+                            {
+                                p.Write(1);
+                                p.Write(0);
+                                p.Write(42);
+                                p.Write(0);
+                                p.Write(0);
+                            });
+                        w.WriteEventBlob(
+                            EventOptions(6, sequence++, StartQpc + 5, stackId: 1, activityId: activityId),
+                            p =>
+                            {
+                                p.Write(1);
+                                p.Write(0);
+                                p.Write(42);
+                            });
                     }
 
                     // Thread-time computation emits a CPU sample when the following sample arrives.
@@ -1794,18 +1914,32 @@ namespace TraceEventTests
             {
                 EmittedStack result = null;
                 int sampleCount = 0;
+                int matchingSampleCount = 0;
                 stackSource.ForEach(sample =>
                 {
                     sampleCount++;
-                    result = ReadStack(stackSource, sample.StackIndex);
+                    EmittedStack candidate = ReadStack(stackSource, sample.StackIndex);
+                    if (!AllowSupplementalSamples || candidate.ScenarioFrames.Length != 0)
+                    {
+                        matchingSampleCount++;
+                        result = candidate;
+                    }
                 });
-                Assert.Equal(1, sampleCount);
+                if (AllowSupplementalSamples)
+                {
+                    Assert.True(matchingSampleCount > 0);
+                }
+                else
+                {
+                    Assert.Equal(1, sampleCount);
+                }
                 return result;
             }
 
             private EmittedStack ReadStack(MutableTraceEventStackSource stackSource, StackSourceCallStackIndex stackIndex)
             {
                 var scenarioFrames = new List<string>();
+                var groupingFrames = new List<string>();
                 var rootFrames = new List<string>();
                 bool inRoot = false;
 
@@ -1830,11 +1964,18 @@ namespace TraceEventTests
                         {
                             scenarioFrames.Add(frame.Label);
                         }
+                        else if (!string.Equals(name, "BROKEN", StringComparison.Ordinal))
+                        {
+                            groupingFrames.Add(name);
+                        }
                     }
                     stackIndex = stackSource.GetCallerIndex(stackIndex);
                 }
 
-                return new EmittedStack(scenarioFrames.ToArray(), rootFrames.ToArray());
+                return new EmittedStack(
+                    scenarioFrames.ToArray(),
+                    groupingFrames.ToArray(),
+                    rootFrames.ToArray());
             }
 
             private string[] AsyncFrameLabels(
@@ -1932,7 +2073,12 @@ namespace TraceEventTests
             private static string[] Labels(IEnumerable<Frame> frames) => frames.Select(frame => frame.Label).ToArray();
 
             private static WriteEventOptions EventOptions(
-                int metadataId, int sequence, long timestamp, int stackId = 0, long threadIndex = ThreadStreamIndex)
+                int metadataId,
+                int sequence,
+                long timestamp,
+                int stackId = 0,
+                long threadIndex = ThreadStreamIndex,
+                Guid activityId = default)
             {
                 return new WriteEventOptions
                 {
@@ -1942,6 +2088,7 @@ namespace TraceEventTests
                     SequenceNumber = sequence,
                     StackId = stackId,
                     Timestamp = timestamp,
+                    ActivityId = activityId,
                     IsSorted = true,
                 };
             }
@@ -2108,13 +2255,15 @@ namespace TraceEventTests
 
         private sealed class EmittedStack
         {
-            public EmittedStack(string[] scenarioFrames, string[] rootFrames)
+            public EmittedStack(string[] scenarioFrames, string[] groupingFrames, string[] rootFrames)
             {
                 ScenarioFrames = scenarioFrames;
+                GroupingFrames = groupingFrames;
                 RootFrames = rootFrames;
             }
 
             public string[] ScenarioFrames { get; }
+            public string[] GroupingFrames { get; }
             public string[] RootFrames { get; }
         }
 
