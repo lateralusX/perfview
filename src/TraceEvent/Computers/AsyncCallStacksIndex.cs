@@ -12,6 +12,34 @@ using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
 
 namespace Microsoft.Diagnostics.Tracing.Computers
 {
+    /// <summary>A recorded dispatcher creation and the parent dispatcher recorded by its create event.</summary>
+    public sealed class AsyncDispatcherCreation
+    {
+        internal AsyncDispatcherCreation(
+            AsyncThreadKey thread,
+            ulong childDispatcherId,
+            ulong parentDispatcherId,
+            long createQpc)
+        {
+            Thread = thread;
+            ChildDispatcherId = childDispatcherId;
+            ParentDispatcherId = parentDispatcherId;
+            CreateQpc = createQpc;
+        }
+
+        /// <summary>The thread on which the child was created.</summary>
+        public AsyncThreadKey Thread { get; }
+
+        /// <summary>The newly-created child dispatcher.</summary>
+        public ulong ChildDispatcherId { get; }
+
+        /// <summary>The active parent dispatcher, or 0 when the create event recorded no parent.</summary>
+        public ulong ParentDispatcherId { get; }
+
+        /// <summary>The creation timestamp in the trace QPC domain.</summary>
+        public long CreateQpc { get; }
+    }
+
     /// <summary>
     /// The recorded, queryable, serializable result of <see cref="AsyncProfilerComputer"/>: an index over all
     /// the per-thread <see cref="AsyncCallStack"/> runs, plus a deduplicated table of
@@ -31,6 +59,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         private readonly List<AsyncCallStackFrames> _internedAsyncCallStackFrames = new List<AsyncCallStackFrames>();
         private readonly Dictionary<FrameKey, AsyncCallStackFramesIndex> _frameKeyToIndex = new Dictionary<FrameKey, AsyncCallStackFramesIndex>();
         private readonly Dictionary<AsyncThreadKey, ThreadCallStacks> _threads = new Dictionary<AsyncThreadKey, ThreadCallStacks>();
+        private readonly List<AsyncDispatcherCreationRecord> _creations =
+            new List<AsyncDispatcherCreationRecord>();
+        private readonly object _creationIndexLock = new object();
+        private Dictionary<DispatcherKey, List<int>> _creationsByChild;
+        private Dictionary<DispatcherKey, List<int>> _creationsByParent;
 
         private readonly Dictionary<ProcessIndex, List<CompletionAvailabilityEpoch>> _completionAvailability =
             new Dictionary<ProcessIndex, List<CompletionAvailabilityEpoch>>();
@@ -164,6 +197,173 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             return result;
         }
 
+        /// <summary>
+        /// Returns the async call stack for <paramref name="dispatcherId"/> that was running on
+        /// <paramref name="thread"/> at <paramref name="qpc"/>, or null when no matching resume interval covers the
+        /// timestamp.
+        /// </summary>
+        public AsyncCallStack GetAsyncCallStack(
+            AsyncThreadKey thread,
+            ulong dispatcherId,
+            long qpc)
+        {
+            IReadOnlyList<AsyncCallStack> callStacks = GetAsyncCallStacks(thread, qpc);
+            for (int i = callStacks.Count - 1; i >= 0; i--)
+            {
+                if (callStacks[i].DispatcherId == dispatcherId)
+                {
+                    return callStacks[i];
+                }
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// True when normal <c>CompleteMethod</c> events were enabled for the configuration epoch containing
+        /// <paramref name="callStack"/>. When true, <see cref="AsyncCallStack.GetCompletedFrameCount(long)"/>
+        /// returns the exact leaf-frame count at a QPC within that call stack's resume interval.
+        /// </summary>
+        public bool MethodCompletionObserved(AsyncCallStack callStack)
+        {
+            if (callStack == null)
+            {
+                throw new ArgumentNullException(nameof(callStack));
+            }
+            return MethodCompletionObserved(
+                callStack.Thread.ProcessIndex,
+                callStack.Frames.Kind,
+                callStack.StartQpc);
+        }
+
+        /// <summary>
+        /// Returns the latest creation of <paramref name="childDispatcherId"/> at or before
+        /// <paramref name="qpc"/> in <paramref name="processIndex"/>, or null when no such creation was recorded.
+        /// </summary>
+        public AsyncDispatcherCreation GetCreation(
+            ProcessIndex processIndex,
+            ulong childDispatcherId,
+            long qpc)
+        {
+            EnsureCreationIndexes();
+            var key = new DispatcherKey(processIndex, childDispatcherId);
+            if (!_creationsByChild.TryGetValue(key, out List<int> creations))
+            {
+                return null;
+            }
+
+            int lo = 0;
+            int hi = creations.Count;
+            while (lo < hi)
+            {
+                int mid = (lo + hi) >> 1;
+                if (_creations[creations[mid]].CreateQpc <= qpc)
+                {
+                    lo = mid + 1;
+                }
+                else
+                {
+                    hi = mid;
+                }
+            }
+            return lo == 0 ? null : MaterializeCreation(_creations[creations[lo - 1]]);
+        }
+
+        /// <summary>Returns the creation record associated with <paramref name="callStack"/>, if captured.</summary>
+        public AsyncDispatcherCreation GetCreation(AsyncCallStack callStack)
+        {
+            if (callStack == null)
+            {
+                throw new ArgumentNullException(nameof(callStack));
+            }
+            return GetCreation(
+                callStack.Thread.ProcessIndex,
+                callStack.DispatcherId,
+                callStack.StartQpc);
+        }
+
+        /// <summary>Returns all recorded children of a parent dispatcher, ordered by creation QPC.</summary>
+        public IReadOnlyList<AsyncDispatcherCreation> GetChildCreations(
+            ProcessIndex processIndex,
+            ulong parentDispatcherId)
+        {
+            EnsureCreationIndexes();
+            var key = new DispatcherKey(processIndex, parentDispatcherId);
+            if (!_creationsByParent.TryGetValue(key, out List<int> creations))
+            {
+                return Array.Empty<AsyncDispatcherCreation>();
+            }
+
+            var result = new AsyncDispatcherCreation[creations.Count];
+            for (int i = 0; i < result.Length; i++)
+            {
+                result[i] = MaterializeCreation(_creations[creations[i]]);
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// Returns the children created while <paramref name="parent"/> was running, ordered by creation QPC.
+        /// </summary>
+        public IReadOnlyList<AsyncDispatcherCreation> GetChildCreations(AsyncCallStack parent)
+        {
+            if (parent == null)
+            {
+                throw new ArgumentNullException(nameof(parent));
+            }
+
+            IReadOnlyList<AsyncDispatcherCreation> candidates = GetChildCreations(
+                parent.Thread.ProcessIndex,
+                parent.DispatcherId);
+            if (candidates.Count == 0)
+            {
+                return candidates;
+            }
+
+            var result = new List<AsyncDispatcherCreation>();
+            for (int i = 0; i < candidates.Count; i++)
+            {
+                AsyncDispatcherCreation creation = candidates[i];
+                if (creation.Thread.Equals(parent.Thread) &&
+                    parent.StartQpc <= creation.CreateQpc &&
+                    creation.CreateQpc < parent.EndQpc)
+                {
+                    result.Add(creation);
+                }
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// Returns the parent async call stack recorded by <paramref name="child"/>'s create event, as it existed at
+        /// the creation QPC, or null when the create event or parent resume interval was not captured.
+        /// </summary>
+        public AsyncCallStack GetParentAsyncCallStack(AsyncCallStack child) =>
+            TryGetParentAsyncCallStack(child, out AsyncCallStack parent, out _) ? parent : null;
+
+        /// <summary>
+        /// Resolves the parent async call stack recorded by <paramref name="child"/>'s create event and returns the
+        /// creation QPC. The QPC can be passed to <see cref="AsyncCallStack.GetCompletedFrameCount(long)"/> to select
+        /// the parent's logical async frames at that instant. Intervening synchronous frames are not represented by
+        /// this relationship.
+        /// </summary>
+        public bool TryGetParentAsyncCallStack(
+            AsyncCallStack child,
+            out AsyncCallStack parent,
+            out long parentQpc)
+        {
+            if (child == null)
+            {
+                throw new ArgumentNullException(nameof(child));
+            }
+
+            AsyncDispatcherCreation creation = GetCreation(child);
+            parentQpc = creation?.CreateQpc ?? 0;
+            parent = creation == null || creation.ParentDispatcherId == 0
+                ? null
+                : GetAsyncCallStack(creation.Thread, creation.ParentDispatcherId, creation.CreateQpc);
+            return parent != null;
+        }
+
         internal void GetAsyncCallStacks(AsyncThreadKey thread, long qpc, List<AsyncCallStack> result)
         {
             if (result == null)
@@ -193,20 +393,38 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <see cref="AsyncCallStack"/>. Called by <see cref="AsyncProfilerComputer"/> as async call stacks close.
         /// </summary>
         internal void Add(AsyncThreadKey thread, AsyncCallstackKind kind, ulong[] methodIds, int[] frameStates,
-            int depth, byte continuationIndexBase, byte wrapperCount, long startQpc, long endQpc,
+            ulong dispatcherId, int depth, byte continuationIndexBase, byte wrapperCount, long startQpc, long endQpc,
             AsyncCallStack.CompletionDelta[] methodCompletions, AsyncCallStack.CompletionDelta[] exceptionCompletions, long[] wrapperResets)
         {
             AsyncCallStackFramesIndex framesIndex = Intern(kind, methodIds, frameStates, thread.ProcessIndex, out AsyncCallStackFrames frames);
-            Add(thread, framesIndex, frames, depth, continuationIndexBase, wrapperCount, startQpc, endQpc,
+            Add(thread, framesIndex, frames, dispatcherId, depth,
+                continuationIndexBase, wrapperCount, startQpc, endQpc,
                 methodCompletions, exceptionCompletions, wrapperResets);
         }
 
         internal void Add(AsyncThreadKey thread, AsyncCallStackFramesIndex framesIndex, AsyncCallStackFrames frames,
-            int depth, byte continuationIndexBase, byte wrapperCount, long startQpc, long endQpc,
+            ulong dispatcherId, int depth, byte continuationIndexBase, byte wrapperCount, long startQpc, long endQpc,
             AsyncCallStack.CompletionDelta[] methodCompletions, AsyncCallStack.CompletionDelta[] exceptionCompletions, long[] wrapperResets)
         {
-            GetOrCreate(thread).Add(framesIndex, depth, continuationIndexBase, wrapperCount, startQpc, endQpc,
+            GetOrCreate(thread).Add(framesIndex, dispatcherId, depth,
+                continuationIndexBase, wrapperCount, startQpc, endQpc,
                 methodCompletions, exceptionCompletions, wrapperResets);
+        }
+
+        internal void AddCreation(
+            AsyncThreadKey thread,
+            ulong childDispatcherId,
+            ulong parentDispatcherId,
+            long createQpc)
+        {
+            if (childDispatcherId == 0)
+            {
+                return;
+            }
+
+            _creations.Add(new AsyncDispatcherCreationRecord(
+                thread, childDispatcherId, parentDispatcherId, createQpc));
+            InvalidateCreationIndexes();
         }
 
         internal bool TryGetInternedFrames(ProcessIndex processIndex, AsyncCallstackKind kind,
@@ -245,11 +463,86 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         {
             if (!_threads.TryGetValue(key, out ThreadCallStacks callStacks))
             {
-                callStacks = new ThreadCallStacks();
+                callStacks = new ThreadCallStacks(key);
                 _threads[key] = callStacks;
             }
             return callStacks;
         }
+
+        private void InvalidateCreationIndexes()
+        {
+            lock (_creationIndexLock)
+            {
+                _creationsByChild = null;
+                _creationsByParent = null;
+            }
+        }
+
+        private void EnsureCreationIndexes()
+        {
+            if (_creationsByChild != null)
+            {
+                return;
+            }
+
+            lock (_creationIndexLock)
+            {
+                if (_creationsByChild != null)
+                {
+                    return;
+                }
+
+                var byChild = new Dictionary<DispatcherKey, List<int>>();
+                var byParent = new Dictionary<DispatcherKey, List<int>>();
+                for (int i = 0; i < _creations.Count; i++)
+                {
+                    AsyncDispatcherCreationRecord creation = _creations[i];
+                    AddCreationIndex(
+                        byChild,
+                        new DispatcherKey(creation.Thread.ProcessIndex, creation.ChildDispatcherId), i);
+                    if (creation.ParentDispatcherId != 0)
+                    {
+                        AddCreationIndex(
+                            byParent,
+                            new DispatcherKey(creation.Thread.ProcessIndex, creation.ParentDispatcherId), i);
+                    }
+                }
+
+                foreach (List<int> creations in byChild.Values)
+                {
+                    creations.Sort((left, right) =>
+                        _creations[left].CreateQpc.CompareTo(_creations[right].CreateQpc));
+                }
+                foreach (List<int> creations in byParent.Values)
+                {
+                    creations.Sort((left, right) =>
+                        _creations[left].CreateQpc.CompareTo(_creations[right].CreateQpc));
+                }
+
+                _creationsByParent = byParent;
+                _creationsByChild = byChild;
+            }
+        }
+
+        private static void AddCreationIndex(
+            Dictionary<DispatcherKey, List<int>> index,
+            DispatcherKey key,
+            int creationIndex)
+        {
+            if (!index.TryGetValue(key, out List<int> creations))
+            {
+                creations = new List<int>();
+                index.Add(key, creations);
+            }
+            creations.Add(creationIndex);
+        }
+
+        private static AsyncDispatcherCreation MaterializeCreation(AsyncDispatcherCreationRecord creation) =>
+            new AsyncDispatcherCreation(
+                creation.Thread,
+                creation.ChildDispatcherId,
+                creation.ParentDispatcherId,
+                creation.CreateQpc);
 
         void IFastSerializable.ToStream(Serializer serializer)
         {
@@ -286,6 +579,17 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     serializer.Write(pair.Value[i].Flags);
                 }
             }
+
+            serializer.Write(_creations.Count);
+            for (int i = 0; i < _creations.Count; i++)
+            {
+                AsyncDispatcherCreationRecord creation = _creations[i];
+                serializer.Write((int)creation.Thread.ProcessIndex);
+                serializer.Write((long)creation.Thread.OsThreadId);
+                serializer.Write((long)creation.ChildDispatcherId);
+                serializer.Write((long)creation.ParentDispatcherId);
+                serializer.Write(creation.CreateQpc);
+            }
         }
 
         void IFastSerializable.FromStream(Deserializer deserializer)
@@ -300,6 +604,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             _frameKeyToIndex.Clear();
             _threads.Clear();
             _completionAvailability.Clear();
+            _creations.Clear();
+            InvalidateCreationIndexes();
 
             int frameCount = deserializer.ReadInt();
             for (int i = 0; i < frameCount; i++)
@@ -313,8 +619,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 ProcessIndex processIndex = (ProcessIndex)deserializer.ReadInt();
                 ulong osThreadId = (ulong)deserializer.ReadInt64();
                 int count = deserializer.ReadInt();
-                var callStacks = new ThreadCallStacks(count);
-                _threads[new AsyncThreadKey(processIndex, osThreadId)] = callStacks;
+                var thread = new AsyncThreadKey(processIndex, osThreadId);
+                var callStacks = new ThreadCallStacks(thread, count);
+                _threads[thread] = callStacks;
                 for (int i = 0; i < count; i++)
                 {
                     callStacks.ReadAndAdd(deserializer);
@@ -332,6 +639,19 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     epochs.Add(new CompletionAvailabilityEpoch(deserializer.ReadInt64(), deserializer.ReadByte()));
                 }
                 _completionAvailability[processIndex] = epochs;
+            }
+
+            int creationCount = deserializer.ReadInt();
+            for (int i = 0; i < creationCount; i++)
+            {
+                var thread = new AsyncThreadKey(
+                    (ProcessIndex)deserializer.ReadInt(),
+                    (ulong)deserializer.ReadInt64());
+                _creations.Add(new AsyncDispatcherCreationRecord(
+                    thread,
+                    (ulong)deserializer.ReadInt64(),
+                    (ulong)deserializer.ReadInt64(),
+                    deserializer.ReadInt64()));
             }
         }
 
@@ -419,9 +739,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         private readonly struct AsyncCallStackRecord
         {
-            public AsyncCallStackRecord(int depth, AsyncCallStackFramesIndex framesIndex, int timelinesIndex,
+            public AsyncCallStackRecord(ulong dispatcherId, int depth,
+                AsyncCallStackFramesIndex framesIndex, int timelinesIndex,
                 byte continuationIndexBase, byte wrapperCount, long startQpc, long endQpc)
             {
+                DispatcherId = dispatcherId;
                 Depth = depth;
                 FramesIndex = framesIndex;
                 TimelinesIndex = timelinesIndex;
@@ -433,11 +755,29 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
             public readonly long StartQpc;
             public readonly long EndQpc;
+            public readonly ulong DispatcherId;
             public readonly int Depth;
             public readonly AsyncCallStackFramesIndex FramesIndex;
             public readonly int TimelinesIndex;
             public readonly byte ContinuationIndexBase;
             public readonly byte WrapperCount;
+        }
+
+        private readonly struct AsyncDispatcherCreationRecord
+        {
+            public AsyncDispatcherCreationRecord(AsyncThreadKey thread, ulong childDispatcherId,
+                ulong parentDispatcherId, long createQpc)
+            {
+                Thread = thread;
+                ChildDispatcherId = childDispatcherId;
+                ParentDispatcherId = parentDispatcherId;
+                CreateQpc = createQpc;
+            }
+
+            public readonly AsyncThreadKey Thread;
+            public readonly ulong ChildDispatcherId;
+            public readonly ulong ParentDispatcherId;
+            public readonly long CreateQpc;
         }
 
         private sealed class AsyncCallStackTimelines
@@ -458,37 +798,41 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <summary>Per-thread compact async call stack records plus a lazily-built interval index.</summary>
         private sealed class ThreadCallStacks
         {
+            private readonly AsyncThreadKey _thread;
             private readonly AsyncCallStackRecordCollection _recorded;
             private readonly object _queryLock = new object();
             private List<AsyncCallStackTimelines> _timelines;
             private Dictionary<int, AsyncCallStack> _materialized;
             private AsyncCallStacksIntervalIndex _index;
 
-            public ThreadCallStacks()
+            public ThreadCallStacks(AsyncThreadKey thread)
             {
+                _thread = thread;
                 _recorded = new AsyncCallStackRecordCollection();
             }
 
-            public ThreadCallStacks(int capacity)
+            public ThreadCallStacks(AsyncThreadKey thread, int capacity)
             {
+                _thread = thread;
                 _recorded = new AsyncCallStackRecordCollection(capacity);
             }
 
             public int Count => _recorded.Count;
 
-            public void Add(AsyncCallStackFramesIndex framesIndex, int depth,
+            public void Add(AsyncCallStackFramesIndex framesIndex, ulong dispatcherId, int depth,
                 byte continuationIndexBase, byte wrapperCount, long startQpc, long endQpc,
                 AsyncCallStack.CompletionDelta[] methodCompletions,
                 AsyncCallStack.CompletionDelta[] exceptionCompletions, long[] wrapperResets)
             {
                 int timelinesIndex = AddTimelines(methodCompletions, exceptionCompletions, wrapperResets);
-                _recorded.Add(new AsyncCallStackRecord(depth, framesIndex, timelinesIndex,
+                _recorded.Add(new AsyncCallStackRecord(dispatcherId, depth, framesIndex, timelinesIndex,
                     continuationIndexBase, wrapperCount, startQpc, endQpc));
                 _index = null; // invalidate the cached query index
             }
 
             public void ReadAndAdd(Deserializer deserializer)
             {
+                ulong dispatcherId = (ulong)deserializer.ReadInt64();
                 int depth = deserializer.ReadInt();
                 var framesIndex = (AsyncCallStackFramesIndex)deserializer.ReadInt();
                 byte continuationIndexBase = deserializer.ReadByte();
@@ -499,7 +843,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 AsyncCallStack.CompletionDelta[] methodCompletions = ReadCompletions(deserializer);
                 AsyncCallStack.CompletionDelta[] exceptionCompletions = ReadCompletions(deserializer);
                 long[] wrapperResets = ReadQpcs(deserializer);
-                Add(framesIndex, depth, continuationIndexBase, wrapperCount, startQpc, endQpc,
+                Add(framesIndex, dispatcherId, depth,
+                    continuationIndexBase, wrapperCount, startQpc, endQpc,
                     methodCompletions, exceptionCompletions, wrapperResets);
             }
 
@@ -508,6 +853,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 AsyncCallStackRecord record = _recorded[index];
                 GetTimelines(record.TimelinesIndex, out AsyncCallStack.CompletionDelta[] methodCompletions,
                     out AsyncCallStack.CompletionDelta[] exceptionCompletions, out long[] wrapperResets);
+                serializer.Write((long)record.DispatcherId);
                 serializer.Write(record.Depth);
                 serializer.Write((int)record.FramesIndex);
                 serializer.Write(record.ContinuationIndexBase);
@@ -526,11 +872,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     out AsyncCallStack.CompletionDelta[] exceptionCompletions, out long[] wrapperResets);
                 if (reusable == null)
                 {
-                    return new AsyncCallStack(record.Depth, record.FramesIndex, resolveFrames,
+                    return new AsyncCallStack(_thread, record.DispatcherId,
+                        record.Depth, record.FramesIndex, resolveFrames,
                         record.ContinuationIndexBase, record.WrapperCount, record.StartQpc, record.EndQpc,
                         methodCompletions, exceptionCompletions, wrapperResets);
                 }
-                reusable.Reset(record.Depth, record.FramesIndex, resolveFrames,
+                reusable.Reset(_thread, record.DispatcherId,
+                    record.Depth, record.FramesIndex, resolveFrames,
                     record.ContinuationIndexBase, record.WrapperCount, record.StartQpc, record.EndQpc,
                     methodCompletions, exceptionCompletions, wrapperResets);
                 return reusable;
@@ -868,6 +1216,32 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+        }
+
+        private readonly struct DispatcherKey : IEquatable<DispatcherKey>
+        {
+            public DispatcherKey(ProcessIndex processIndex, ulong dispatcherId)
+            {
+                ProcessIndex = processIndex;
+                DispatcherId = dispatcherId;
+            }
+
+            public ProcessIndex ProcessIndex { get; }
+            public ulong DispatcherId { get; }
+
+            public bool Equals(DispatcherKey other) =>
+                ProcessIndex == other.ProcessIndex &&
+                DispatcherId == other.DispatcherId;
+
+            public override bool Equals(object obj) => obj is DispatcherKey other && Equals(other);
+
+            public override int GetHashCode()
+            {
+                unchecked
+                {
+                    return ((int)ProcessIndex * 397) ^ DispatcherId.GetHashCode();
+                }
+            }
         }
 
         private readonly struct FrameKey : IEquatable<FrameKey>

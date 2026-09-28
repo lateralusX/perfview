@@ -4351,6 +4351,27 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
         }
 
         /// <summary>
+        /// Returns the async call stack for <paramref name="dispatcherId"/> active on
+        /// <paramref name="threadIndex"/> at <paramref name="timeQPC"/>, or null when no matching resume interval
+        /// was captured.
+        /// </summary>
+        public AsyncCallStack GetAsyncCallStack(
+            ThreadIndex threadIndex,
+            ulong dispatcherId,
+            long timeQPC)
+        {
+            AsyncCallStacksIndex index = AsyncCallStacks;
+            if (index == null || threadIndex == ThreadIndex.Invalid)
+            {
+                return null;
+            }
+
+            TraceThread traceThread = Threads[threadIndex];
+            var key = new AsyncThreadKey(traceThread.Process.ProcessIndex, (ulong)traceThread.ThreadID);
+            return index.GetAsyncCallStack(key, dispatcherId, timeQPC);
+        }
+
+        /// <summary>
         /// Convenience overload of <see cref="GetAsyncCallStacks(ThreadIndex, long)"/> that takes a relative time in
         /// milliseconds (e.g. a <see cref="Microsoft.Diagnostics.Tracing.Stacks.StackSourceSample"/>'s
         /// <c>TimeRelativeMSec</c>, or any event's
@@ -4394,6 +4415,31 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
         }
 
         /// <summary>
+        /// Returns the async call stack for <paramref name="dispatcherId"/> active on the specified OS thread at
+        /// <paramref name="timeQPC"/>, or null when the process, dispatcher, or resume interval was not captured.
+        /// </summary>
+        public AsyncCallStack GetAsyncCallStack(
+            int processId,
+            ulong osThreadId,
+            ulong dispatcherId,
+            long timeQPC)
+        {
+            AsyncCallStacksIndex index = AsyncCallStacks;
+            if (index == null)
+            {
+                return null;
+            }
+
+            TraceProcess process = Processes.GetProcess(processId, timeQPC);
+            return process == null
+                ? null
+                : index.GetAsyncCallStack(
+                    new AsyncThreadKey(process.ProcessIndex, osThreadId),
+                    dispatcherId,
+                    timeQPC);
+        }
+
+        /// <summary>
         /// Convenience overload of <see cref="GetAsyncCallStacks(int, ulong, long)"/> that takes a relative time in
         /// milliseconds (e.g. a <see cref="Microsoft.Diagnostics.Tracing.Stacks.StackSourceSample"/>'s
         /// <c>TimeRelativeMSec</c>, or any event's
@@ -4425,6 +4471,77 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
 #pragma warning disable CS0618 // TimeStampQPC is discouraged for general use, but here we deliberately need the event's exact QPC to query the async index precisely; the discouraged property never leaves this assembly.
             return GetAsyncCallStacks(anchorEvent.ProcessID, (ulong)anchorEvent.ThreadID, anchorEvent.TimeStampQPC);
 #pragma warning restore CS0618
+        }
+
+        /// <summary>Returns the create record associated with <paramref name="callStack"/>, if captured.</summary>
+        public AsyncDispatcherCreation GetAsyncCallStackCreation(AsyncCallStack callStack)
+        {
+            if (callStack == null)
+            {
+                throw new ArgumentNullException(nameof(callStack));
+            }
+            return AsyncCallStacks?.GetCreation(callStack);
+        }
+
+        /// <summary>
+        /// Returns the parent async call stack recorded by <paramref name="child"/>'s create event, as it existed at
+        /// the creation QPC, or null when the create event or parent resume interval was not captured.
+        /// </summary>
+        public AsyncCallStack GetParentAsyncCallStack(AsyncCallStack child)
+        {
+            if (child == null)
+            {
+                throw new ArgumentNullException(nameof(child));
+            }
+            return AsyncCallStacks?.GetParentAsyncCallStack(child);
+        }
+
+        /// <summary>
+        /// Resolves the parent async call stack recorded by <paramref name="child"/>'s create event and returns the
+        /// creation QPC. Intervening synchronous frames are not represented by this relationship.
+        /// </summary>
+        public bool TryGetParentAsyncCallStack(
+            AsyncCallStack child,
+            out AsyncCallStack parent,
+            out long parentQpc)
+        {
+            if (child == null)
+            {
+                throw new ArgumentNullException(nameof(child));
+            }
+
+            AsyncCallStacksIndex index = AsyncCallStacks;
+            if (index == null)
+            {
+                parent = null;
+                parentQpc = 0;
+                return false;
+            }
+            return index.TryGetParentAsyncCallStack(child, out parent, out parentQpc);
+        }
+
+        /// <summary>Returns the children created while <paramref name="parent"/> was running.</summary>
+        public IReadOnlyList<AsyncDispatcherCreation> GetChildAsyncCallStackCreations(AsyncCallStack parent)
+        {
+            if (parent == null)
+            {
+                throw new ArgumentNullException(nameof(parent));
+            }
+            return AsyncCallStacks?.GetChildCreations(parent) ??
+                Array.Empty<AsyncDispatcherCreation>();
+        }
+
+        /// <summary>
+        /// True when normal <c>CompleteMethod</c> events were enabled for the configuration epoch containing
+        /// <paramref name="callStack"/>.
+        /// </summary>
+        public bool AsyncMethodCompletionObserved(AsyncCallStack callStack)
+        {
+            if (callStack == null)
+            {
+                throw new ArgumentNullException(nameof(callStack));
+            }
+            return AsyncCallStacks?.MethodCompletionObserved(callStack) == true;
         }
 
         // headerSize is the size we persist of TraceEventNativeMethods.EVENT_RECORD which is up to and

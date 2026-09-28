@@ -182,15 +182,29 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         internal AsyncCallStack(int depth, AsyncCallStackFramesIndex framesIndex, AsyncCallStackFrames frames,
             byte continuationIndexBase, byte wrapperCount, long startQpc, long endQpc,
             CompletionDelta[] methodCompletions, CompletionDelta[] exceptionCompletions, long[] wrapperResets)
+            : this(default, 0, depth, framesIndex, frames,
+                  continuationIndexBase, wrapperCount, startQpc, endQpc,
+                  methodCompletions, exceptionCompletions, wrapperResets)
         {
-            Reset(depth, framesIndex, frames, continuationIndexBase, wrapperCount, startQpc, endQpc,
-                methodCompletions, exceptionCompletions, wrapperResets);
         }
 
-        internal void Reset(int depth, AsyncCallStackFramesIndex framesIndex, AsyncCallStackFrames frames,
+        internal AsyncCallStack(AsyncThreadKey thread, ulong dispatcherId,
+            int depth, AsyncCallStackFramesIndex framesIndex, AsyncCallStackFrames frames,
             byte continuationIndexBase, byte wrapperCount, long startQpc, long endQpc,
             CompletionDelta[] methodCompletions, CompletionDelta[] exceptionCompletions, long[] wrapperResets)
         {
+            Reset(thread, dispatcherId, depth, framesIndex, frames,
+                continuationIndexBase, wrapperCount, startQpc, endQpc,
+                methodCompletions, exceptionCompletions, wrapperResets);
+        }
+
+        internal void Reset(AsyncThreadKey thread, ulong dispatcherId,
+            int depth, AsyncCallStackFramesIndex framesIndex, AsyncCallStackFrames frames,
+            byte continuationIndexBase, byte wrapperCount, long startQpc, long endQpc,
+            CompletionDelta[] methodCompletions, CompletionDelta[] exceptionCompletions, long[] wrapperResets)
+        {
+            Thread = thread;
+            DispatcherId = dispatcherId;
             Depth = depth;
             FramesIndex = framesIndex;
             Frames = frames;
@@ -202,6 +216,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             _exceptionCompletions = exceptionCompletions;
             _wrapperResets = wrapperResets;
         }
+
+        /// <summary>The process/thread on which this activation resumed.</summary>
+        public AsyncThreadKey Thread { get; private set; }
+
+        /// <summary>The dispatcher associated with this activation.</summary>
+        public ulong DispatcherId { get; private set; }
 
         /// <summary>The nesting depth (0 = outermost) of this async call stack on its thread.</summary>
         public int Depth { get; private set; }
@@ -308,6 +328,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         internal void Write(Serializer serializer)
         {
+            serializer.Write((int)Thread.ProcessIndex);
+            serializer.Write((long)Thread.OsThreadId);
+            serializer.Write((long)DispatcherId);
             serializer.Write(Depth);
             serializer.Write((int)FramesIndex);
             serializer.Write((byte)ContinuationIndexBase);
@@ -338,6 +361,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         internal static AsyncCallStack Read(Deserializer deserializer, Func<AsyncCallStackFramesIndex, AsyncCallStackFrames> resolveFrames)
         {
+            ProcessIndex processIndex = (ProcessIndex)deserializer.ReadInt();
+            ulong osThreadId = (ulong)deserializer.ReadInt64();
+            ulong dispatcherId = (ulong)deserializer.ReadInt64();
             int depth = deserializer.ReadInt();
             var framesIndex = (AsyncCallStackFramesIndex)deserializer.ReadInt();
             byte continuationIndexBase = deserializer.ReadByte();
@@ -376,7 +402,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 wrapperResets[i] = deserializer.ReadInt64();
             }
 
-            return new AsyncCallStack(depth, framesIndex, resolveFrames(framesIndex), continuationIndexBase, wrapperCount, startQpc, endQpc, methodCompletions, exceptionCompletions, wrapperResets);
+            return new AsyncCallStack(
+                new AsyncThreadKey(processIndex, osThreadId), dispatcherId,
+                depth, framesIndex, resolveFrames(framesIndex),
+                continuationIndexBase, wrapperCount, startQpc, endQpc,
+                methodCompletions, exceptionCompletions, wrapperResets);
         }
 
         internal readonly struct CompletionDelta
@@ -522,7 +552,15 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         #region sink
 
-        void IAsyncProfilerSubEventSink.OnContextCreate(in AsyncContextEvent e) { /* creation only; the run pushes via its resume callstack */ }
+        void IAsyncProfilerSubEventSink.OnContextCreate(in AsyncContextEvent e)
+        {
+            AsyncThreadKey thread = ThreadKeyOf(e.OsThreadId);
+            AsyncCallStacks state = GetOrCreate(thread);
+            if (state.Armed)
+            {
+                _index.AddCreation(thread, e.DispatcherId, e.ParentDispatcherId, e.TimestampQpc);
+            }
+        }
 
         void IAsyncProfilerSubEventSink.OnContextResume(in AsyncContextEvent e) { /* the async call stack is pushed by the resume callstack, which carries the frames */ }
 
@@ -778,13 +816,15 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 if (builder.HasInternedFrames)
                 {
                     _index.Add(key, builder.FramesIndex, builder.Frames,
-                        builder.Depth, builder.ContinuationIndexBase, builder.WrapperCount, builder.StartQpc, endQpc,
+                        builder.DispatcherId, builder.Depth, builder.ContinuationIndexBase,
+                        builder.WrapperCount, builder.StartQpc, endQpc,
                         methodCompletions, exceptionCompletions, wrapperResets);
                 }
                 else
                 {
                     _index.Add(key, builder.Kind, builder.GetMethodIds(), builder.GetFrameStates(),
-                        builder.Depth, builder.ContinuationIndexBase, builder.WrapperCount, builder.StartQpc, endQpc,
+                        builder.DispatcherId, builder.Depth, builder.ContinuationIndexBase,
+                        builder.WrapperCount, builder.StartQpc, endQpc,
                         methodCompletions, exceptionCompletions, wrapperResets);
                 }
             }

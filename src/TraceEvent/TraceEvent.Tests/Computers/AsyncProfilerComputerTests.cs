@@ -230,6 +230,139 @@ namespace TraceEventTests
         }
 
         [Fact]
+        public void DispatcherLookup_ReturnsMatchingCallStack()
+        {
+            var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
+                .Armed(Start)
+                .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA })
+                .ResumeStack(Start + 20, dispatcher: 2, new ulong[] { 0xB })
+                .Suspend(Start + 30)
+                .Suspend(Start + 40));
+
+            AsyncCallStack outer = computer.Index.GetAsyncCallStack(
+                Key(ThreadA), dispatcherId: 1, qpc: Start + 25);
+            AsyncCallStack inner = computer.Index.GetAsyncCallStack(
+                Key(ThreadA), dispatcherId: 2, qpc: Start + 25);
+
+            Assert.NotNull(outer);
+            Assert.Equal(Key(ThreadA), outer.Thread);
+            Assert.Equal(1UL, outer.DispatcherId);
+            Assert.Equal(0xAUL, outer.Frames.MethodIdAt(0));
+            Assert.NotNull(inner);
+            Assert.Equal(Key(ThreadA), inner.Thread);
+            Assert.Equal(2UL, inner.DispatcherId);
+            Assert.Equal(0xBUL, inner.Frames.MethodIdAt(0));
+            Assert.Null(computer.Index.GetAsyncCallStack(
+                Key(ThreadA), dispatcherId: 3, qpc: Start + 25));
+        }
+
+        [Fact]
+        public void FireAndForgetCreation_ResolvesParentCallStackAndCreationQpc()
+        {
+            var computer = new AsyncProfilerComputer();
+            computer.Process(new AsyncProfilerBufferBuilder(ThreadA)
+                .Armed(Start)
+                .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA, 0xB, 0xC })
+                .CompleteMethod(Start + 15)
+                .CreateContext(
+                    AsyncEventID.CreateStateMachineAsyncContext,
+                    Start + 20,
+                    parent: 1,
+                    dispatcher: 2)
+                .Suspend(Start + 25)
+                .Build());
+            computer.Process(new AsyncProfilerBufferBuilder(ThreadB)
+                .Reset(Start)
+                .ResumeStack(Start + 30, dispatcher: 2, new ulong[] { 0xD })
+                .Suspend(Start + 40)
+                .Build());
+
+            AsyncCallStack child = computer.Index.GetAsyncCallStack(
+                Key(ThreadB), dispatcherId: 2, qpc: Start + 35);
+            Assert.NotNull(child);
+
+            AsyncDispatcherCreation creation = computer.Index.GetCreation(child);
+            Assert.NotNull(creation);
+            Assert.Equal(Key(ThreadA), creation.Thread);
+            Assert.Equal(2UL, creation.ChildDispatcherId);
+            Assert.Equal(1UL, creation.ParentDispatcherId);
+            Assert.Equal(Start + 20, creation.CreateQpc);
+
+            Assert.True(computer.Index.TryGetParentAsyncCallStack(
+                child,
+                out AsyncCallStack parent,
+                out long parentQpc));
+            Assert.Equal(Start + 20, parentQpc);
+            Assert.Equal(1UL, parent.DispatcherId);
+            Assert.Equal(Key(ThreadA), parent.Thread);
+            Assert.True(computer.Index.MethodCompletionObserved(parent));
+            Assert.Equal(1, parent.GetCompletedFrameCount(parentQpc));
+            Assert.Equal(0xBUL, parent.Frames.MethodIdAt(parent.GetCompletedFrameCount(parentQpc)));
+            Assert.Same(parent, computer.Index.GetParentAsyncCallStack(child));
+
+            AsyncDispatcherCreation childCreation = Assert.Single(
+                computer.Index.GetChildCreations(parent));
+            Assert.Equal(creation.Thread, childCreation.Thread);
+            Assert.Equal(creation.ChildDispatcherId, childCreation.ChildDispatcherId);
+            Assert.Equal(creation.ParentDispatcherId, childCreation.ParentDispatcherId);
+            Assert.Equal(creation.CreateQpc, childCreation.CreateQpc);
+
+            AsyncCallStacksIndex reloaded = RoundTrip(computer.Index);
+            AsyncCallStack reloadedChild = reloaded.GetAsyncCallStack(
+                Key(ThreadB), dispatcherId: 2, qpc: Start + 35);
+            Assert.NotNull(reloadedChild);
+            Assert.True(reloaded.TryGetParentAsyncCallStack(
+                reloadedChild,
+                out AsyncCallStack reloadedParent,
+                out long reloadedParentQpc));
+            Assert.Equal(Start + 20, reloadedParentQpc);
+            Assert.Equal(1UL, reloadedParent.DispatcherId);
+            Assert.Equal(Key(ThreadA), reloadedParent.Thread);
+            Assert.True(reloaded.MethodCompletionObserved(reloadedParent));
+            Assert.Equal(1, reloadedParent.GetCompletedFrameCount(reloadedParentQpc));
+        }
+
+        [Fact]
+        public void CreationWithoutParent_IsKnownRoot()
+        {
+            var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
+                .Armed(Start)
+                .CreateContext(
+                    AsyncEventID.CreateStateMachineAsyncContext,
+                    Start + 10,
+                    parent: 0,
+                    dispatcher: 2)
+                .ResumeStack(Start + 20, dispatcher: 2, new ulong[] { 0xA })
+                .Suspend(Start + 30));
+
+            AsyncCallStack child = Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 25));
+            AsyncDispatcherCreation creation = computer.Index.GetCreation(child);
+            Assert.NotNull(creation);
+            Assert.Equal(0UL, creation.ParentDispatcherId);
+            Assert.False(computer.Index.MethodCompletionObserved(child));
+            Assert.False(computer.Index.TryGetParentAsyncCallStack(child, out _, out _));
+        }
+
+        [Fact]
+        public void CreationBeforeThreadIsArmed_IsIgnored()
+        {
+            var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
+                .Metadata(Start, qpcFrequency: 10_000_000, qpcSync: 1, utcSync: 1, eventBufferSize: 0, wrapperCount: 32, new AsyncManifestEntry[0])
+                .CreateContext(
+                    AsyncEventID.CreateStateMachineAsyncContext,
+                    Start + 5,
+                    parent: 1,
+                    dispatcher: 2)
+                .Reset(Start + 10)
+                .ResumeStack(Start + 20, dispatcher: 2, new ulong[] { 0xA })
+                .Suspend(Start + 30));
+
+            AsyncCallStack child = Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 25));
+            Assert.Null(computer.Index.GetCreation(child));
+            Assert.False(computer.Index.TryGetParentAsyncCallStack(child, out _, out _));
+        }
+
+        [Fact]
         public void Append_ExtendsCallstack_FinalizedAtClose()
         {
             var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)

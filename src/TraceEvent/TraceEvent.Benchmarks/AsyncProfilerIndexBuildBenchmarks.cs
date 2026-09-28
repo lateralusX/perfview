@@ -18,6 +18,7 @@ namespace TraceEventBenchmarks
     public class AsyncProfilerIndexBuildBenchmarks
     {
         private byte[] _buffer;
+        private byte[] _bufferWithCreations;
         private AsyncProfilerManifest _manifest;
         private CountingSink _sink;
         private AsyncCallStacksIndex _index;
@@ -37,7 +38,9 @@ namespace TraceEventBenchmarks
         [GlobalSetup]
         public void Setup()
         {
-            _buffer = BuildBuffer(EpisodeCount, FrameCount, Kind, UniqueCallstacks);
+            _buffer = BuildBuffer(EpisodeCount, FrameCount, Kind, UniqueCallstacks, includeCreations: false);
+            _bufferWithCreations = BuildBuffer(
+                EpisodeCount, FrameCount, Kind, UniqueCallstacks, includeCreations: true);
             _manifest = new AsyncProfilerManifest();
             _sink = new CountingSink();
 
@@ -65,6 +68,15 @@ namespace TraceEventBenchmarks
         }
 
         [Benchmark]
+        public int BuildIndexWithCreations()
+        {
+            var computer = new AsyncProfilerComputer();
+            computer.Process(_bufferWithCreations, (ProcessIndex)1);
+            computer.Finish();
+            return computer.DistinctFramesCount;
+        }
+
+        [Benchmark]
         public long SerializeIndex()
         {
             SerializationSettings settings = SerializationSettings.Default.WithStreamLabelWidth(StreamLabelWidth.EightBytes);
@@ -78,7 +90,8 @@ namespace TraceEventBenchmarks
             }
         }
 
-        private static byte[] BuildBuffer(int episodeCount, int frameCount, AsyncCallstackKind kind, bool uniqueCallstacks)
+        private static byte[] BuildBuffer(int episodeCount, int frameCount, AsyncCallstackKind kind,
+            bool uniqueCallstacks, bool includeCreations)
         {
             const long startQpc = 1_000_000;
             var builder = new AsyncProfilerBufferBuilder(startQpc: startQpc)
@@ -98,6 +111,18 @@ namespace TraceEventBenchmarks
                     {
                         states[frame] = frame & 3;
                     }
+                }
+
+                if (includeCreations)
+                {
+                    timestampQpc++;
+                    builder.CreateContext(
+                        kind == AsyncCallstackKind.RuntimeAsync
+                            ? AsyncEventID.CreateRuntimeAsyncContext
+                            : AsyncEventID.CreateStateMachineAsyncContext,
+                        timestampQpc,
+                        parent: episode == 0 ? 0UL : (ulong)episode,
+                        dispatcher: (ulong)episode + 1);
                 }
 
                 timestampQpc++;

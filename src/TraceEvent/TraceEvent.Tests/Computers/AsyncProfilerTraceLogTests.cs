@@ -11,6 +11,7 @@ using Microsoft.Diagnostics.Tracing;
 using Microsoft.Diagnostics.Tracing.Computers;
 using Microsoft.Diagnostics.Tracing.Etlx;
 using Microsoft.Diagnostics.Tracing.Parsers;
+using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
 
 using Xunit;
 
@@ -44,6 +45,12 @@ namespace TraceEventTests
             byte[] buffer = new AsyncProfilerBufferBuilder(OsThreadId, 0x0BADF00D, StartQpc)
                 .Armed(StartQpc)
                 .ResumeStack(StartQpc + 10, dispatcher: 1, new ulong[] { 0xA, 0xB }, new[] { 0, 1 })
+                .CompleteMethod(StartQpc + 15)
+                .CreateContext(
+                    AsyncEventID.CreateStateMachineAsyncContext,
+                    StartQpc + 18,
+                    parent: 1,
+                    dispatcher: 2)
                 .ResumeStack(StartQpc + 20, dispatcher: 2, new ulong[] { 0xC }, new[] { 2 })
                 .Suspend(StartQpc + 30)   // pop D2 -> [+20,+30)
                 .Suspend(StartQpc + 40)   // pop D1 -> [+10,+40)
@@ -151,9 +158,41 @@ namespace TraceEventTests
                     IReadOnlyList<AsyncCallStack> nested = traceLog.GetAsyncCallStacks(sampleThreadIndex, sampleEventQpc);
                     Assert.Equal(2, nested.Count);
                     Assert.Equal(0, nested[0].Depth);
+                    Assert.Equal(1UL, nested[0].DispatcherId);
                     Assert.Equal(new ulong[] { 0xA, 0xB }, MethodIds(nested[0].Frames));
                     Assert.Equal(1, nested[1].Depth);
+                    Assert.Equal(2UL, nested[1].DispatcherId);
                     Assert.Equal(new ulong[] { 0xC }, MethodIds(nested[1].Frames));
+
+                    Assert.Same(
+                        nested[1],
+                        traceLog.GetAsyncCallStack(sampleThreadIndex, dispatcherId: 2, timeQPC: sampleEventQpc));
+                    Assert.Same(
+                        nested[1],
+                        traceLog.GetAsyncCallStack(
+                            ProcessId, (ulong)OsThreadId, dispatcherId: 2, timeQPC: sampleEventQpc));
+
+                    AsyncDispatcherCreation creation = traceLog.GetAsyncCallStackCreation(nested[1]);
+                    Assert.NotNull(creation);
+                    Assert.Equal(2UL, creation.ChildDispatcherId);
+                    Assert.Equal(1UL, creation.ParentDispatcherId);
+                    Assert.Equal(StartQpc + 18, creation.CreateQpc);
+
+                    Assert.True(traceLog.TryGetParentAsyncCallStack(
+                        nested[1],
+                        out AsyncCallStack parent,
+                        out long parentQpc));
+                    Assert.Same(nested[0], parent);
+                    Assert.Equal(StartQpc + 18, parentQpc);
+                    Assert.True(traceLog.AsyncMethodCompletionObserved(parent));
+                    Assert.Equal(1, parent.GetCompletedFrameCount(parentQpc));
+                    Assert.Same(parent, traceLog.GetParentAsyncCallStack(nested[1]));
+                    AsyncDispatcherCreation childCreation =
+                        Assert.Single(traceLog.GetChildAsyncCallStackCreations(parent));
+                    Assert.Equal(creation.Thread, childCreation.Thread);
+                    Assert.Equal(creation.ChildDispatcherId, childCreation.ChildDispatcherId);
+                    Assert.Equal(creation.ParentDispatcherId, childCreation.ParentDispatcherId);
+                    Assert.Equal(creation.CreateQpc, childCreation.CreateQpc);
 
                     // Releasing the materialized index preserves already-returned immutable objects and makes the
                     // next public query transparently deserialize a fresh index from the deferred ETLX region.
