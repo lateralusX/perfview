@@ -73,6 +73,81 @@ namespace TraceEventTests
         }
 
         [Fact]
+        public void RuntimeAsync_SameIpAsSyncFrame_RetainsDistinctFrameIdentity()
+        {
+            Frame repeated = Frame.App("Scenario.RepeatedWork");
+            Frame current = Frame.App("Scenario.CurrentAsync");
+            var scenario = new StitchScenario
+            {
+                Sync = new[]
+                {
+                    repeated,
+                    current,
+                    Frame.V2Wrapper(0),
+                    Frame.V2InstrumentedDispatch,
+                    Frame.V2Dispatch,
+                    Frame.ThreadPoolDispatch,
+                    Frame.WorkerThreadStart,
+                },
+                Async = new[]
+                {
+                    current,
+                    repeated,
+                    Frame.App("Program.Main"),
+                },
+                ExpectedStitched = new[]
+                {
+                    repeated,
+                    current,
+                    repeated,
+                    Frame.App("Program.Main"),
+                    Frame.ThreadPoolDispatch,
+                    Frame.WorkerThreadStart,
+                },
+                ExpectedDiagnostics = new StitchDiagnosticsExpectation
+                {
+                    SegmentsProcessed = 2,
+                    V2PlumbingFramesCollapsed = 4,
+                },
+                AssertStitchedStackSource = stackSource =>
+                {
+                    var repeatedFrames =
+                        new List<(StackSourceFrameIndex Index, CodeAddressIndex CodeAddress, bool IsAsync)>();
+                    stackSource.ForEach(sample =>
+                    {
+                        StackSourceCallStackIndex stackIndex = sample.StackIndex;
+                        while (stackIndex != StackSourceCallStackIndex.Invalid)
+                        {
+                            StackSourceFrameIndex frameIndex = stackSource.GetFrameIndex(stackIndex);
+                            string name = stackSource.GetFrameName(frameIndex, false);
+                            if (name.Contains(repeated.SymbolName))
+                            {
+                                bool isAsync = stackSource.TryGetAsyncFrameInfo(
+                                    frameIndex, out AsyncStackSourceFrameInfo info);
+                                repeatedFrames.Add(
+                                    (frameIndex, stackSource.GetFrameCodeAddress(frameIndex), isAsync));
+                                if (isAsync)
+                                {
+                                    Assert.Equal(AsyncCallstackKind.RuntimeAsync, info.Kind);
+                                    Assert.Equal(0, info.State);
+                                }
+                            }
+                            stackIndex = stackSource.GetCallerIndex(stackIndex);
+                        }
+                    });
+
+                    Assert.Equal(2, repeatedFrames.Count);
+                    Assert.NotEqual(repeatedFrames[0].Index, repeatedFrames[1].Index);
+                    Assert.Equal(repeatedFrames[0].CodeAddress, repeatedFrames[1].CodeAddress);
+                    Assert.Single(repeatedFrames.Where(frame => frame.IsAsync));
+                    Assert.Single(repeatedFrames.Where(frame => !frame.IsAsync));
+                },
+            };
+
+            scenario.AssertProductionStitch();
+        }
+
+        [Fact]
         public void RuntimeAsync_DeepResume_StitchesRealCapturedAncestry()
         {
             Frame readConsoleInput = Frame.Library(
@@ -516,6 +591,77 @@ namespace TraceEventTests
                     SegmentsProcessed = 2,
                     V1InlineFallbackUsed = 2,
                     V1InfrastructureFramesCollapsed = 6,
+                },
+            };
+
+            scenario.AssertProductionStitch();
+        }
+
+        [Fact]
+        public void StateMachineAsync_SameMethodDifferentStates_RetainsDistinctFrameIdentity()
+        {
+            Frame moveNext = Frame.App("Scenario+<RepeatedAsync>d__1.MoveNext");
+            Frame logicalMethod = moveNext.Logical("Scenario.RepeatedAsync");
+            var scenario = new StitchScenario
+            {
+                Kind = AsyncCallstackKind.StateMachineAsync,
+                Sync = new[]
+                {
+                    moveNext,
+                    Frame.V1MoveNextAsDispatcher,
+                    Frame.ThreadPoolDispatch,
+                    Frame.WorkerThreadStart,
+                },
+                AsyncSegments = new[]
+                {
+                    new AsyncSegment(
+                        AsyncCallstackKind.StateMachineAsync,
+                        new[] { logicalMethod, logicalMethod },
+                        new[] { 3, -2 }),
+                },
+                ExpectedStitched = new[]
+                {
+                    logicalMethod,
+                    logicalMethod,
+                    Frame.ThreadPoolDispatch,
+                    Frame.WorkerThreadStart,
+                },
+                ExpectedDiagnostics = new StitchDiagnosticsExpectation
+                {
+                    SegmentsProcessed = 2,
+                    V1InlineFallbackUsed = 2,
+                },
+                AssertStitchedStackSource = stackSource =>
+                {
+                    var asyncFrames = new List<(StackSourceFrameIndex Index, string Name, AsyncStackSourceFrameInfo Info)>();
+                    stackSource.ForEach(sample =>
+                    {
+                        StackSourceCallStackIndex stackIndex = sample.StackIndex;
+                        while (stackIndex != StackSourceCallStackIndex.Invalid)
+                        {
+                            StackSourceFrameIndex frameIndex = stackSource.GetFrameIndex(stackIndex);
+                            if (stackSource.TryGetAsyncFrameInfo(frameIndex, out AsyncStackSourceFrameInfo info))
+                            {
+                                asyncFrames.Add((frameIndex, stackSource.GetFrameName(frameIndex, false), info));
+                            }
+                            stackIndex = stackSource.GetCallerIndex(stackIndex);
+                        }
+                    });
+
+                    Assert.Equal(2, asyncFrames.Count);
+                    Assert.NotEqual(asyncFrames[0].Index, asyncFrames[1].Index);
+                    Assert.Equal(asyncFrames[0].Name, asyncFrames[1].Name);
+                    Assert.Equal(AsyncCallstackKind.StateMachineAsync, asyncFrames[0].Info.Kind);
+                    Assert.Equal(AsyncCallstackKind.StateMachineAsync, asyncFrames[1].Info.Kind);
+                    Assert.Equal(new[] { -2, 3 }, asyncFrames.Select(frame => frame.Info.State).OrderBy(state => state));
+                    Assert.Equal(asyncFrames[0].Info.MethodId, asyncFrames[1].Info.MethodId);
+                    Assert.Equal(asyncFrames[0].Info.CodeAddress, asyncFrames[1].Info.CodeAddress);
+                    Assert.Equal(
+                        asyncFrames[0].Info.CodeAddress,
+                        stackSource.GetFrameCodeAddress(asyncFrames[0].Index));
+                    Assert.Equal(
+                        asyncFrames[1].Info.CodeAddress,
+                        stackSource.GetFrameCodeAddress(asyncFrames[1].Index));
                 },
             };
 
@@ -1330,6 +1476,7 @@ namespace TraceEventTests
             public byte ContinuationIndexBase { get; set; }
             public int[] AsyncStates { get; set; }
             public bool VerifyComputerAndIndexLifecycle { get; set; }
+            public Action<MutableTraceEventStackSource> AssertStitchedStackSource { get; set; }
 
             public void AssertProductionStitch()
             {
@@ -1387,6 +1534,7 @@ namespace TraceEventTests
                         }
                         EmittedStack stitchedOutput = ReadSingleStack(stitchedStackSource);
                         Assert.Equal(Labels(ExpectedStitched), stitchedOutput.ScenarioFrames);
+                        AssertStitchedStackSource?.Invoke(stitchedStackSource);
 
                         Assert.Equal(syncOutput.RootFrames, stitchedOutput.RootFrames);
                         Assert.True(stitchedComputer.AsyncStitchActive);

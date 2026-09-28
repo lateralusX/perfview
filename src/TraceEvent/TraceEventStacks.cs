@@ -6,6 +6,7 @@
 // 
 using Microsoft.Diagnostics.Symbols;
 using Microsoft.Diagnostics.Tracing.Etlx;
+using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
 using Microsoft.Diagnostics.Tracing.Parsers.Kernel;
 using System;
 using System.Collections.Generic;
@@ -13,6 +14,42 @@ using System.Diagnostics;
 
 namespace Microsoft.Diagnostics.Tracing.Stacks
 {
+    /// <summary>Raw async-profiler identity associated with a frame in a generated stack source.</summary>
+    public readonly struct AsyncStackSourceFrameInfo
+    {
+        internal AsyncStackSourceFrameInfo(
+            AsyncCallstackKind kind,
+            ProcessIndex processIndex,
+            CodeAddressIndex codeAddress,
+            ulong methodId,
+            int state)
+        {
+            Kind = kind;
+            ProcessIndex = processIndex;
+            CodeAddress = codeAddress;
+            MethodId = methodId;
+            State = state;
+        }
+
+        /// <summary>The async-profiler call-stack kind.</summary>
+        public AsyncCallstackKind Kind { get; }
+
+        /// <summary>The process containing the frame.</summary>
+        public ProcessIndex ProcessIndex { get; }
+
+        /// <summary>The resolved code address, or <see cref="CodeAddressIndex.Invalid"/>.</summary>
+        public CodeAddressIndex CodeAddress { get; }
+
+        /// <summary>The original method identifier emitted by the async profiler.</summary>
+        public ulong MethodId { get; }
+
+        /// <summary>
+        /// The state-machine state for <see cref="AsyncCallstackKind.StateMachineAsync"/>. This value is not
+        /// meaningful for <see cref="AsyncCallstackKind.RuntimeAsync"/>.
+        /// </summary>
+        public int State { get; }
+    }
+
     /// <summary>
     /// TraceEventStackSource is an implementation of a StackSource for ETW information (TraceLog)
     /// It takes a TraceEvents (which is a list of TraceEvents you get get from a TraceLog) and 
@@ -153,10 +190,23 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
             uint codeAddressIndex = (uint)frameIndex - (uint)StackSourceFrameIndex.Start;
             if (codeAddressIndex >= m_log.CodeAddresses.Count)
             {
-                return CodeAddressIndex.Invalid;
+                return TryGetAsyncFrameInfo(frameIndex, out AsyncStackSourceFrameInfo asyncFrame)
+                    ? asyncFrame.CodeAddress
+                    : CodeAddressIndex.Invalid;
             }
 
             return (CodeAddressIndex)codeAddressIndex;
+        }
+
+        /// <summary>
+        /// Returns async-profiler metadata for a generated async frame. Ordinary sync and pseudo frames return false.
+        /// </summary>
+        public virtual bool TryGetAsyncFrameInfo(
+            StackSourceFrameIndex frameIndex,
+            out AsyncStackSourceFrameInfo frameInfo)
+        {
+            frameInfo = default;
+            return false;
         }
 
         #region implementation of StackSource
@@ -303,13 +353,13 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
         /// </summary>
         public SourceLocation GetSourceLine(StackSourceFrameIndex frameIndex, SymbolReader reader)
         {
-            uint codeAddressIndex = (uint)frameIndex - (uint)StackSourceFrameIndex.Start;
-            if (codeAddressIndex >= m_log.CodeAddresses.Count)
+            CodeAddressIndex codeAddressIndex = GetFrameCodeAddress(frameIndex);
+            if (codeAddressIndex == CodeAddressIndex.Invalid)
             {
                 return null;
             }
 
-            return m_log.CodeAddresses.GetSourceLine(reader, (CodeAddressIndex)codeAddressIndex);
+            return m_log.CodeAddresses.GetSourceLine(reader, codeAddressIndex);
         }
         /// <summary>
         /// Implementation of StackSource protocol. 
@@ -725,6 +775,8 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
     /// </summary>
     public class MutableTraceEventStackSource : TraceEventStackSource
     {
+        private Dictionary<StackSourceFrameIndex, AsyncStackSourceFrameInfo> m_asyncFrameInfo;
+
         /// <summary>
         /// Create a new MutableTraceEventStackSource that can represent stacks coming from any events in the given TraceLog with a stack.  
         /// You use the 'AddSample' and 'DoneAddingSamples' to specify exactly which stacks you want in your source.   
@@ -787,6 +839,39 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
         /// The Interner is the class that allows you to make new indexes out of strings and other bits.  
         /// </summary>
         public StackSourceInterner Interner { get { return m_Interner; } }
+
+        internal void SetAsyncFrameInfo(
+            StackSourceFrameIndex frameIndex,
+            AsyncStackSourceFrameInfo frameInfo)
+        {
+            if (m_asyncFrameInfo == null)
+            {
+                m_asyncFrameInfo =
+                    new Dictionary<StackSourceFrameIndex, AsyncStackSourceFrameInfo>();
+            }
+            m_asyncFrameInfo[frameIndex] = frameInfo;
+        }
+
+        internal int NextAsyncFrameIdentityTag()
+        {
+            int identityTag = ++m_nextAsyncFrameIdentityTag;
+            Debug.Assert(identityTag > 0);
+            return identityTag;
+        }
+
+        /// <inheritdoc />
+        public override bool TryGetAsyncFrameInfo(
+            StackSourceFrameIndex frameIndex,
+            out AsyncStackSourceFrameInfo frameInfo)
+        {
+            if (m_asyncFrameInfo != null && m_asyncFrameInfo.TryGetValue(frameIndex, out frameInfo))
+            {
+                return true;
+            }
+
+            frameInfo = default;
+            return false;
+        }
 
         // methods for create stacks from TraceLog structures.  
         /// <summary>
@@ -1031,6 +1116,7 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
         /// private
         /// </summary>
         protected StackSourceInterner m_Interner;
+        private int m_nextAsyncFrameIdentityTag;
 
         /// <summary>
         /// private
@@ -1041,4 +1127,3 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
         #endregion
     }
 }
-
