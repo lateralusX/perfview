@@ -108,11 +108,56 @@ namespace TraceEventTests
             "System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1[System.Int64].Start(!!0&)",
             StitchSyncFrameKind.V1MethodBuilderStart)]
         [InlineData(
+            "System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1[System.Int64].AwaitUnsafeOnCompleted(!!0&,!!1&)",
+            StitchSyncFrameKind.V1MethodBuilderAwaitUnsafeOnCompleted)]
+        [InlineData(
+            "System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1[System.Int64].AwaitUnsafeOnCompleted(!!0&,!!1&,class System.Threading.Tasks.Task`1<!0>&)",
+            StitchSyncFrameKind.V1MethodBuilderAwaitUnsafeOnCompleted)]
+        [InlineData(
+            "System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1[System.Int64].AwaitUnsafeOnCompleted(!!0&,class System.Runtime.CompilerServices.IAsyncStateMachineBox)",
+            StitchSyncFrameKind.V1MethodBuilderAwaitUnsafeOnCompleted)]
+        [InlineData(
             "System.Private.CoreLib!System.Runtime.CompilerServices.AsyncMethodBuilderCore.Start(!!0&)",
             StitchSyncFrameKind.V1MethodBuilderStart)]
         [InlineData(
             "System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1[System.Int64].SetExistingTaskResult(class System.Threading.Tasks.Task`1<!0>,!0)",
             StitchSyncFrameKind.V1MethodBuilderCompletion)]
+        [InlineData(
+            "System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1[System.Int64].GetStateMachineBox(!!0&,class System.Threading.Tasks.Task`1<!0>&)",
+            StitchSyncFrameKind.V1MethodBuilderInfrastructure)]
+        [InlineData(
+            "System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1[System.Int64].SetException(class System.Exception)",
+            StitchSyncFrameKind.V1MethodBuilderInfrastructure)]
+        [InlineData(
+            "System.Private.CoreLib!System.Runtime.CompilerServices.AsyncIteratorMethodBuilder.Complete()",
+            StitchSyncFrameKind.V1MethodBuilderInfrastructure)]
+        [InlineData(
+            "System.Private.CoreLib!System.Runtime.CompilerServices.YieldAwaitable+YieldAwaiter.System.Runtime.CompilerServices.IStateMachineBoxAwareAwaiter.AwaitUnsafeOnCompleted(class System.Runtime.CompilerServices.IAsyncStateMachineBox)",
+            StitchSyncFrameKind.V1AwaiterRegistrationInfrastructure)]
+        [InlineData(
+            "System.Private.CoreLib!System.Runtime.CompilerServices.TaskAwaiter.UnsafeOnCompletedInternal(class System.Threading.Tasks.Task,class System.Action,bool)",
+            StitchSyncFrameKind.V1AwaiterRegistrationInfrastructure)]
+        [InlineData(
+            "System.Private.CoreLib!System.Runtime.CompilerServices.ConfiguredValueTaskAwaitable+ConfiguredValueTaskAwaiter.UnsafeOnCompleted(class System.Action)",
+            StitchSyncFrameKind.V1AwaiterRegistrationInfrastructure)]
+        [InlineData(
+            "System.Private.CoreLib!System.Runtime.CompilerServices.TaskAwaiter.GetResult()",
+            StitchSyncFrameKind.None)]
+        [InlineData(
+            "System.Private.CoreLib!System.Threading.Tasks.Task.RunContinuations(class System.Object)",
+            StitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure)]
+        [InlineData(
+            "System.Private.CoreLib!System.Threading.Tasks.Task.TrySetResult()",
+            StitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure)]
+        [InlineData(
+            "System.Private.CoreLib!System.Threading.Tasks.AwaitTaskContinuation.RunOrScheduleAction(class System.Action,bool)",
+            StitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure)]
+        [InlineData(
+            "System.Private.CoreLib!System.Threading.ExecutionContext.RunInternal(class System.Threading.ExecutionContext,class System.Threading.ContextCallback,class System.Object)",
+            StitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure)]
+        [InlineData(
+            "System.Private.CoreLib!System.Threading.ExecutionContext.RunFromThreadPoolDispatchLoop(class System.Threading.Thread,class System.Threading.ExecutionContext,class System.Threading.ContextCallback,class System.Object)",
+            StitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure)]
         [InlineData(
             "Other.CoreLib!System.Runtime.CompilerServices.AsyncMethodBuilderCore.Start(!!0&)",
             StitchSyncFrameKind.None)]
@@ -121,6 +166,18 @@ namespace TraceEventTests
             StitchSyncFrameKind.None)]
         [InlineData(
             "MyBuilders!CustomAsyncMethodBuilder.Start(!!0&)",
+            StitchSyncFrameKind.None)]
+        [InlineData(
+            "MyBuilders!CustomAsyncMethodBuilder.AwaitUnsafeOnCompleted(!!0&,!!1&)",
+            StitchSyncFrameKind.None)]
+        [InlineData(
+            "MyBuilders!CustomAsyncMethodBuilder.SetException(class System.Exception)",
+            StitchSyncFrameKind.None)]
+        [InlineData(
+            "MyCoreLib!System.Threading.Tasks.Task.RunContinuations(class System.Object)",
+            StitchSyncFrameKind.None)]
+        [InlineData(
+            "MyApp!InlineContinuationAwaiter.UnsafeOnCompleted(class System.Action)",
             StitchSyncFrameKind.None)]
         [InlineData(
             "MyApp!MyType.MoveNext()",

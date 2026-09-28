@@ -173,7 +173,17 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 }
             }
 
-            if (!isHostModule || !IsRuntimeCompilerServicesMethod(frameName))
+            if (!isHostModule)
+            {
+                return StitchSyncFrameKind.None;
+            }
+
+            if (IsKnownSystemPrivateCoreLibAsyncBridge(frameName, method))
+            {
+                return StitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure;
+            }
+
+            if (!IsRuntimeCompilerServicesMethod(frameName))
             {
                 return StitchSyncFrameKind.None;
             }
@@ -190,27 +200,32 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 builderType = builderType.Substring(0, genericArity);
             }
 
+            if ((IsKnownV1AwaiterType(builderType) || IsKnownStateMachineBoxAwareAwaiter(frameName)) &&
+                IsAwaiterRegistrationMethod(method))
+            {
+                return StitchSyncFrameKind.V1AwaiterRegistrationInfrastructure;
+            }
+
             if (method == "SetExistingTaskResult" && builderType == "AsyncTaskMethodBuilder")
             {
                 return StitchSyncFrameKind.V1MethodBuilderCompletion;
             }
 
-            if (method != "Start")
+            if (method == "AwaitUnsafeOnCompleted" && IsKnownV1MethodBuilderType(builderType))
             {
-                return StitchSyncFrameKind.None;
+                return StitchSyncFrameKind.V1MethodBuilderAwaitUnsafeOnCompleted;
             }
 
-            switch (builderType)
+            if (method != "Start")
             {
-                case "AsyncMethodBuilderCore":
-                case "AsyncTaskMethodBuilder":
-                case "AsyncValueTaskMethodBuilder":
-                case "PoolingAsyncValueTaskMethodBuilder":
-                case "AsyncVoidMethodBuilder":
-                    return StitchSyncFrameKind.V1MethodBuilderStart;
-                default:
-                    return StitchSyncFrameKind.None;
+                return IsKnownV1MethodBuilderType(builderType)
+                    ? StitchSyncFrameKind.V1MethodBuilderInfrastructure
+                    : StitchSyncFrameKind.None;
             }
+
+            return IsKnownV1MethodBuilderType(builderType)
+                ? StitchSyncFrameKind.V1MethodBuilderStart
+                : StitchSyncFrameKind.None;
         }
 
         /// <summary>
@@ -291,6 +306,77 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             return declaringType.EndsWith(AsyncStateMachineBoxTypeSuffix, StringComparison.Ordinal) ||
                    declaringType == AsyncStateMachineDispatcherTypeName;
         }
+
+        private static bool IsKnownV1MethodBuilderType(string builderType)
+        {
+            switch (builderType)
+            {
+                case "AsyncMethodBuilderCore":
+                case "AsyncTaskMethodBuilder":
+                case "AsyncValueTaskMethodBuilder":
+                case "PoolingAsyncValueTaskMethodBuilder":
+                case "AsyncVoidMethodBuilder":
+                case "AsyncIteratorMethodBuilder":
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        private static bool IsKnownV1AwaiterType(string awaiterType)
+        {
+            switch (awaiterType)
+            {
+                case "TaskAwaiter":
+                case "ConfiguredTaskAwaiter":
+                case "ValueTaskAwaiter":
+                case "ConfiguredValueTaskAwaiter":
+                case "YieldAwaiter":
+                case "ForceYieldingAwaiter":
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        private static bool IsAwaiterRegistrationMethod(string method) =>
+            method == "OnCompleted" ||
+            method == "UnsafeOnCompleted" ||
+            method == "UnsafeOnCompletedInternal" ||
+            method == "AwaitUnsafeOnCompleted";
+
+        private static bool IsKnownStateMachineBoxAwareAwaiter(string frameName) =>
+            frameName.IndexOf(
+                "+YieldAwaiter.System.Runtime.CompilerServices.IStateMachineBoxAwareAwaiter.",
+                StringComparison.Ordinal) >= 0 ||
+            frameName.IndexOf(
+                "+ForceYieldingAwaiter.System.Runtime.CompilerServices.IStateMachineBoxAwareAwaiter.",
+                StringComparison.Ordinal) >= 0;
+
+        private static bool IsKnownSystemPrivateCoreLibAsyncBridge(string frameName, string method)
+        {
+            if (IsMethodOnType(frameName, "System.Threading.Tasks.Task", method))
+            {
+                return method == "RunContinuations" ||
+                       method == "TrySetResult";
+            }
+
+            if (IsMethodOnType(frameName, "System.Threading.Tasks.AwaitTaskContinuation", method))
+            {
+                return method == "RunOrScheduleAction";
+            }
+
+            if (IsMethodOnType(frameName, "System.Threading.ExecutionContext", method))
+            {
+                return method == "RunInternal" ||
+                       method == "RunFromThreadPoolDispatchLoop";
+            }
+
+            return false;
+        }
+
+        private static bool IsMethodOnType(string frameName, string fullTypeName, string method) =>
+            frameName.IndexOf(fullTypeName + "." + method, StringComparison.Ordinal) >= 0;
 
         private static bool IsHostModuleQualifiedFrame(string frameName)
         {
@@ -433,6 +519,46 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             return typeStart < typeEnd ? frameName.Substring(typeStart, typeEnd - typeStart) : null;
+        }
+
+        /// <summary>
+        /// Converts a compiler-generated V1 state-machine method name such as
+        /// <c>Namespace.Type+&lt;FooAsync&gt;d__5.MoveNext</c> to <c>Namespace.Type.FooAsync</c>.
+        /// </summary>
+        public static bool TryGetLogicalStateMachineMethodName(string methodName, out string logicalName)
+        {
+            logicalName = null;
+            if (string.IsNullOrEmpty(methodName))
+            {
+                return false;
+            }
+
+            int moveNext = methodName.IndexOf(".MoveNext", StringComparison.Ordinal);
+            if (moveNext < 0)
+            {
+                return false;
+            }
+
+            int stateMachineSuffix = methodName.LastIndexOf(">d__", moveNext, StringComparison.Ordinal);
+            if (stateMachineSuffix < 0)
+            {
+                stateMachineSuffix = methodName.LastIndexOf(">d", moveNext, StringComparison.Ordinal);
+            }
+            if (stateMachineSuffix < 0)
+            {
+                return false;
+            }
+
+            int methodStart = methodName.LastIndexOf("+<", stateMachineSuffix, StringComparison.Ordinal);
+            if (methodStart < 0 || methodStart + 2 >= stateMachineSuffix)
+            {
+                return false;
+            }
+
+            string declaringType = methodName.Substring(0, methodStart).Replace('+', '.');
+            string sourceMethod = methodName.Substring(methodStart + 2, stateMachineSuffix - methodStart - 2);
+            logicalName = declaringType + "." + sourceMethod;
+            return true;
         }
     }
 

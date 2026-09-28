@@ -424,11 +424,12 @@ namespace TraceEventTests
         }
 
         [Fact]
-        public void V1_CollapsesSynchronousMoveNextAndBuilderStartPattern()
+        public void V1_StructuralStitchPreservesSynchronousStartupPattern()
         {
             // Leaf-first physical suffix:
             //   CPU work <- generated child MoveNext <- CoreLib builder Start <- logical child kickoff <- boundary.
-            // The generated MoveNext/Start plumbing is removed, while the kickoff and real leaf work remain.
+            // Presentation normalization is a later pipeline stage, so the structural stitcher preserves this
+            // synchronous sequence while still stitching the active V1 segment around it.
             var s = new Scenario();
             AsyncCallStack seg = s.Segment(
                 AsyncCallstackKind.StateMachineAsync,
@@ -449,9 +450,13 @@ namespace TraceEventTests
             StitchResult result = s.Run(sync, new[] { seg });
 
             Assert.Equal(
-                new[] { Scenario.CA(40), Scenario.CA(44), Scenario.CA(501), Scenario.CA(46) },
+                new[]
+                {
+                    Scenario.CA(40), Scenario.CA(41), Scenario.CA(42), Scenario.CA(43),
+                    Scenario.CA(44), Scenario.CA(501), Scenario.CA(46),
+                },
                 result.Frames.Select(frame => frame.CodeAddress));
-            Assert.Equal(3, result.Diagnostics.V1SynchronousStartupFramesCollapsed);
+            Assert.Equal(0, result.Diagnostics.V1SynchronousStartupFramesCollapsed);
         }
 
         [Fact]
@@ -1140,10 +1145,11 @@ namespace TraceEventTests
         }
 
         [Fact]
-        public void V2_WrapperIsLeaf_DropsWrapperAndUsesSyncLayout()
+        public void V2_WrapperIsLeaf_PreservesSyncLayoutForPresentationPipeline()
         {
             // The CPU is in the continuation-wrapper's own transition (the wrapper is the sampled leaf), not yet
-            // inside the resumed async body: drop the wrapper frame and emit the sync layout; splice no ancestry.
+            // inside the resumed async body: preserve the sync layout and splice no ancestry. The default
+            // conservative presentation transform removes the leaf wrapper later.
             var s = new Scenario();
             s.MarkMethodCompletionObserved(AsyncCallstackKind.RuntimeAsync);
             AsyncCallStack seg = s.Segment(AsyncCallstackKind.RuntimeAsync,
@@ -1159,12 +1165,13 @@ namespace TraceEventTests
 
             StitchResult result = s.Run(sync, new[] { seg });
 
-            // Expected: sync layout minus the leaf wrapper: [81, 82, 83]; no async frames spliced.
-            Assert.Equal(3, result.Frames.Count);
+            Assert.Equal(4, result.Frames.Count);
             Assert.All(result.Frames, f => Assert.Equal(StitchedFrameOrigin.Sync, f.Origin));
-            Assert.Equal(new[] { Scenario.CA(81), Scenario.CA(82), Scenario.CA(83) }, result.Frames.Select(f => f.CodeAddress));
+            Assert.Equal(
+                new[] { Scenario.CA(80), Scenario.CA(81), Scenario.CA(82), Scenario.CA(83) },
+                result.Frames.Select(f => f.CodeAddress));
             Assert.Equal(1, result.Diagnostics.V2SyncLayoutUsed);
-            Assert.Equal(1, result.Diagnostics.V2LeafWrapperDropped);
+            Assert.Equal(0, result.Diagnostics.V2LeafWrapperDropped);
             Assert.Equal(0, result.Diagnostics.SegmentsProcessed);
         }
 

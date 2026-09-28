@@ -48,6 +48,7 @@ namespace Microsoft.Diagnostics.Tracing
             m_eventLog = eventLog;
             m_symbolReader = symbolReader;
             m_stitchAsyncCallStacks = stitchAsyncCallStacks;
+            AsyncStackTransforms = new AsyncStackTransformPipeline();
 
             m_threadState = new ThreadState[eventLog.Threads.Count];
 
@@ -89,25 +90,13 @@ namespace Microsoft.Diagnostics.Tracing
         public bool AsyncStitchActive => m_asyncStitchActive;
 
         /// <summary>
-        /// Optional complete replacement for the built-in stitching algorithm. The callback receives the native
-        /// sync stack leaf-to-root, the active async segments root-to-leaf, the sample QPC, and cleared reusable
-        /// output/diagnostic buffers to populate. The lists and diagnostics are owned and reused by this computer
-        /// and must not be retained after the callback returns.
+        /// Ordered presentation transforms applied after mandatory structural async stitching and before StackSource
+        /// interning. Conservative strong-signal normalization is enabled by default; runtime-specific
+        /// System.Private.CoreLib cleanup is opt-in; custom transforms run last in registration order. This pipeline
+        /// is only invoked for samples with active async segments. Samples without active async data continue through
+        /// the existing synchronous ActivityComputer path unchanged.
         /// </summary>
-        public Action<
-            IReadOnlyList<StitchSyncFrame>,
-            IReadOnlyList<AsyncCallStack>,
-            long,
-            List<StitchedFrame>,
-            StitchDiagnostics> AsyncStackStitcher { get; set; }
-
-        /// <summary>
-        /// Optional whole-stack presentation transform applied after structural stitching and before StackSource
-        /// interning. It receives the complete stitched stack leaf-to-root in a reusable mutable list and may remove,
-        /// reorder, or add frames in place. It does not participate in boundary discovery, completion counting, or
-        /// segment alignment. The list is owned and reused by this computer and must not be retained.
-        /// </summary>
-        public Action<List<StitchedFrame>> AsyncStitchStackTransform { get; set; }
+        public AsyncStackTransformPipeline AsyncStackTransforms { get; }
 
         /// <summary>
         /// Generate the thread time stacks, outputting to 'stackSource'.  
@@ -662,22 +651,18 @@ namespace Microsoft.Diagnostics.Tracing
             MaterializeSyncLeafToRoot(callStackIndex, m_asyncSyncFrames);
 
             m_asyncSampleDiagnostics.MessageLimit = m_asyncStitchDiagnostics.RemainingMessageCapacity;
-            if (AsyncStackStitcher == null)
-            {
-                AsyncCpuStackStitcher.StitchInto(
-                    m_asyncSyncFrames, m_asyncSegments, qpc, m_asyncClassify, m_asyncMethodCompletionObserved,
-                    processIndex, m_asyncMethodOf, TraceAsyncStitchSteps, m_asyncStitchedFrames, m_asyncSampleDiagnostics);
-            }
-            else
-            {
-                m_asyncStitchedFrames.Clear();
-                m_asyncSampleDiagnostics.Clear();
-                AsyncStackStitcher(
-                    m_asyncSyncFrames, m_asyncSegments, qpc, m_asyncStitchedFrames, m_asyncSampleDiagnostics);
-            }
+            AsyncCpuStackStitcher.StitchInto(
+                m_asyncSyncFrames, m_asyncSegments, qpc, m_asyncClassify, m_asyncMethodCompletionObserved,
+                processIndex, m_asyncMethodOf, TraceAsyncStitchSteps, m_asyncStitchedFrames, m_asyncSampleDiagnostics);
+            var transformContext = new AsyncStackTransformContext(
+                m_eventLog,
+                m_asyncSegments,
+                qpc,
+                m_asyncClassify,
+                m_asyncSampleDiagnostics,
+                m_asyncStitchedFrames);
+            AsyncStackTransforms.ApplyInPlace(transformContext);
             m_asyncSampleDiagnostics.AddTo(m_asyncStitchDiagnostics);
-
-            AsyncStitchStackTransform?.Invoke(m_asyncStitchedFrames);
 
             // When start-stop activity grouping is enabled, root the stitched stack through the same top-frames
             // provider as the non-stitched path so both layouts share identical pseudo-nodes. When grouping is
@@ -784,8 +769,7 @@ namespace Microsoft.Diagnostics.Tracing
 
         private StackSourceFrameIndex InternStitchedFrame(StitchedFrame frame)
         {
-            if (frame.Origin != StitchedFrameOrigin.Sync &&
-                frame.Segment?.Kind == AsyncCallstackKind.StateMachineAsync &&
+            if (frame.Presentation == StitchedFramePresentation.LogicalStateMachineMethod &&
                 frame.CodeAddress != CodeAddressIndex.Invalid)
             {
                 if (m_asyncLogicalFrameByCodeAddress.TryGetValue(
@@ -797,7 +781,8 @@ namespace Microsoft.Diagnostics.Tracing
                 }
 
                 TraceCodeAddress codeAddress = m_eventLog.CodeAddresses[frame.CodeAddress];
-                if (TryGetLogicalStateMachineMethodName(codeAddress.FullMethodName, out string logicalName))
+                if (AsyncStitchBoundary.TryGetLogicalStateMachineMethodName(
+                    codeAddress.FullMethodName, out string logicalName))
                 {
                     StackSourceModuleIndex module = m_outputStackSource.Interner.ModuleIntern(codeAddress.ModuleName);
                     StackSourceFrameIndex logicalFrame = m_outputStackSource.Interner.FrameIntern(logicalName, module);
@@ -811,42 +796,6 @@ namespace Microsoft.Diagnostics.Tracing
             return frame.CodeAddress != CodeAddressIndex.Invalid
                 ? m_outputStackSource.GetFrameIndex(frame.CodeAddress)
                 : InternPlaceholderFrame(frame);
-        }
-
-        private static bool TryGetLogicalStateMachineMethodName(string methodName, out string logicalName)
-        {
-            logicalName = null;
-            if (string.IsNullOrEmpty(methodName))
-            {
-                return false;
-            }
-
-            int moveNext = methodName.IndexOf(".MoveNext", StringComparison.Ordinal);
-            if (moveNext < 0)
-            {
-                return false;
-            }
-
-            int stateMachineSuffix = methodName.LastIndexOf(">d__", moveNext, StringComparison.Ordinal);
-            if (stateMachineSuffix < 0)
-            {
-                stateMachineSuffix = methodName.LastIndexOf(">d", moveNext, StringComparison.Ordinal);
-            }
-            if (stateMachineSuffix < 0)
-            {
-                return false;
-            }
-
-            int methodStart = methodName.LastIndexOf("+<", stateMachineSuffix, StringComparison.Ordinal);
-            if (methodStart < 0 || methodStart + 2 >= stateMachineSuffix)
-            {
-                return false;
-            }
-
-            string declaringType = methodName.Substring(0, methodStart).Replace('+', '.');
-            string sourceMethod = methodName.Substring(methodStart + 2, stateMachineSuffix - methodStart - 2);
-            logicalName = declaringType + "." + sourceMethod;
-            return true;
         }
 
         /// <summary>

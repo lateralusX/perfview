@@ -24,6 +24,19 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         AsyncRemaining,
     }
 
+    /// <summary>How a <see cref="StitchedFrame"/> should be presented when it is interned.</summary>
+    public enum StitchedFramePresentation
+    {
+        /// <summary>Use the frame's native symbol without presentation changes.</summary>
+        Native = 0,
+
+        /// <summary>
+        /// Present a compiler-generated V1 state-machine <c>MoveNext</c> frame as its logical source async method.
+        /// The original code address remains attached to the frame for source and identity correlation.
+        /// </summary>
+        LogicalStateMachineMethod,
+    }
+
     /// <summary>
     /// Additional classification carried by a native sync frame for V1 synchronous-startup normalization.
     /// These are not dispatch boundaries.
@@ -38,6 +51,33 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         /// <summary>A known CoreLib async method-builder <c>Start</c> frame.</summary>
         V1MethodBuilderStart,
+
+        /// <summary>
+        /// A known CoreLib async method-builder <c>AwaitUnsafeOnCompleted</c> registration frame. This is runtime
+        /// implementation machinery; user awaiter and custom-builder methods with similar names are not classified.
+        /// </summary>
+        V1MethodBuilderAwaitUnsafeOnCompleted,
+
+        /// <summary>
+        /// Another method declared on a known CoreLib async method-builder type, such as
+        /// <c>GetStateMachineBox</c>, <c>SetException</c>, or <c>SetResult</c>. These are runtime implementation
+        /// frames and are only removed by the opt-in System.Private.CoreLib cleanup transform.
+        /// </summary>
+        V1MethodBuilderInfrastructure,
+
+        /// <summary>
+        /// A registration method on a known CoreLib awaiter type, such as <c>OnCompleted</c>,
+        /// <c>UnsafeOnCompleted</c>, or the state-machine-box-aware <c>AwaitUnsafeOnCompleted</c>. User awaiters
+        /// and result-consumption methods such as <c>GetResult</c> are not classified.
+        /// </summary>
+        V1AwaiterRegistrationInfrastructure,
+
+        /// <summary>
+        /// Exact CoreLib Task-continuation or execution-context plumbing that connects physical async dispatch,
+        /// such as <c>Task.RunContinuations</c> or <c>ExecutionContext.RunInternal</c>. These frames are retained
+        /// structurally and removed only by the opt-in System.Private.CoreLib cleanup transform.
+        /// </summary>
+        SystemPrivateCoreLibAsyncBridgeInfrastructure,
 
         /// <summary>
         /// A known CoreLib method-builder frame that completes the currently executing V1 state machine's own
@@ -91,6 +131,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <summary>The frame's code address, or <see cref="CodeAddressIndex.Invalid"/> for an unsymbolized async frame.</summary>
         public readonly CodeAddressIndex CodeAddress;
 
+        /// <summary>
+        /// The canonical managed method for a physically present frame, or <see cref="MethodIndex.Invalid"/> when
+        /// unavailable. This preserves method identity for conservative transforms without requiring another symbol
+        /// lookup.
+        /// </summary>
+        public readonly MethodIndex Method;
+
         /// <summary>For an async-origin frame, the source async segment; otherwise null.</summary>
         public readonly AsyncCallStackFrames Segment;
 
@@ -100,37 +147,56 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <summary>For a sync-origin frame, its optional V1 synchronous-startup classification.</summary>
         public readonly StitchSyncFrameKind SyncFrameKind;
 
+        /// <summary>The presentation requested for this frame.</summary>
+        public readonly StitchedFramePresentation Presentation;
+
         private StitchedFrame(
             StitchedFrameOrigin origin,
             CodeAddressIndex codeAddress,
+            MethodIndex method,
             AsyncCallStackFrames segment,
             int segmentFrameIndex,
-            StitchSyncFrameKind syncFrameKind)
+            StitchSyncFrameKind syncFrameKind,
+            StitchedFramePresentation presentation)
         {
             Origin = origin;
             CodeAddress = codeAddress;
+            Method = method;
             Segment = segment;
             SegmentFrameIndex = segmentFrameIndex;
             SyncFrameKind = syncFrameKind;
+            Presentation = presentation;
         }
 
         /// <summary>Creates a stitched frame that preserves a native sync frame.</summary>
         public static StitchedFrame CreateSync(StitchSyncFrame frame) =>
-            new StitchedFrame(StitchedFrameOrigin.Sync, frame.CodeAddress, null, -1, frame.Kind);
+            new StitchedFrame(
+                StitchedFrameOrigin.Sync, frame.CodeAddress, frame.Method, null, -1, frame.Kind,
+                StitchedFramePresentation.Native);
 
         /// <summary>Creates the physically present current V1 frame with its logical async identity.</summary>
         public static StitchedFrame CreateAsyncCurrent(
-            CodeAddressIndex codeAddress, AsyncCallStackFrames segment, int segmentFrameIndex) =>
-            new StitchedFrame(StitchedFrameOrigin.AsyncCurrent, codeAddress, segment, segmentFrameIndex, StitchSyncFrameKind.None);
+            CodeAddressIndex codeAddress, MethodIndex method, AsyncCallStackFrames segment, int segmentFrameIndex) =>
+            new StitchedFrame(
+                StitchedFrameOrigin.AsyncCurrent, codeAddress, method, segment, segmentFrameIndex,
+                StitchSyncFrameKind.None, StitchedFramePresentation.LogicalStateMachineMethod);
 
         /// <summary>Creates a suspended-ancestry frame from an async call-stack segment.</summary>
         public static StitchedFrame CreateAsync(AsyncCallStackFrames segment, int segmentFrameIndex) =>
             new StitchedFrame(
                 StitchedFrameOrigin.AsyncRemaining,
                 segment.CodeAddressAt(segmentFrameIndex),
+                MethodIndex.Invalid,
                 segment,
                 segmentFrameIndex,
-                StitchSyncFrameKind.None);
+                StitchSyncFrameKind.None,
+                segment.Kind == AsyncCallstackKind.StateMachineAsync
+                    ? StitchedFramePresentation.LogicalStateMachineMethod
+                    : StitchedFramePresentation.Native);
+
+        /// <summary>Returns this frame with a different presentation while preserving its structural identity.</summary>
+        public StitchedFrame WithPresentation(StitchedFramePresentation presentation) =>
+            new StitchedFrame(Origin, CodeAddress, Method, Segment, SegmentFrameIndex, SyncFrameKind, presentation);
     }
 
     /// <summary>
@@ -167,9 +233,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// machinery, not a resumed continuation body, so there is no suspended ancestry to splice.</summary>
         public int V2SyncLayoutUsed;
 
-        /// <summary>V2 samples (a subset of <see cref="V2SyncLayoutUsed"/>) where the sampled leaf frame was a
-        /// continuation-wrapper that was dropped, leaving the dispatch-continuation frame root-ward of it (the next
-        /// leaf-&gt;root index) as the leaf.</summary>
+        /// <summary>V2 samples (a subset of <see cref="V2SyncLayoutUsed"/>) where the conservative presentation
+        /// transform dropped a sampled-leaf continuation wrapper, leaving the dispatch-continuation frame
+        /// root-ward of it as the leaf.</summary>
         public int V2LeafWrapperDropped;
 
         /// <summary>V2 dispatch-continuation plumbing frames (<c>InstrumentedDispatchContinuations</c> /
@@ -181,9 +247,23 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// dispatcher boundary.</summary>
         public int V1InfrastructureFramesCollapsed;
 
-        /// <summary>V1 synchronous startup frames collapsed from a recognized
-        /// <c>stateMachine.MoveNext -&gt; methodBuilder.Start+</c> sequence.</summary>
+        /// <summary>Physical V1 state-machine <c>MoveNext</c> frames presented as their logical source methods by
+        /// the conservative presentation transform.</summary>
+        public int V1SynchronousMoveNextFramesNormalized;
+
+        /// <summary>
+        /// Duplicate V1 startup representations removed from an exact synchronously reentrant activation pattern
+        /// by the conservative presentation transform.
+        /// </summary>
+        public int V1ReentrantFramesCollapsed;
+
+        /// <summary>V1 method-builder <c>Start</c> frames removed by the conservative presentation transform from
+        /// a recognized <c>stateMachine.MoveNext -&gt; methodBuilder.Start+</c> sequence.</summary>
         public int V1SynchronousStartupFramesCollapsed;
+
+        /// <summary>Known System.Private.CoreLib async implementation frames removed by the optional runtime-specific
+        /// cleanup transform.</summary>
+        public int SystemPrivateCoreLibFramesCollapsed;
 
         /// <summary>Human-readable notes: the anomalies above, plus per-segment happy-path trace steps when
         /// stitching is run with tracing enabled.</summary>
@@ -228,7 +308,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             V2LeafWrapperDropped = 0;
             V2PlumbingFramesCollapsed = 0;
             V1InfrastructureFramesCollapsed = 0;
+            V1SynchronousMoveNextFramesNormalized = 0;
+            V1ReentrantFramesCollapsed = 0;
             V1SynchronousStartupFramesCollapsed = 0;
+            SystemPrivateCoreLibFramesCollapsed = 0;
             MessagesDropped = 0;
             m_messages?.Clear();
         }
@@ -245,7 +328,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             target.V2LeafWrapperDropped += V2LeafWrapperDropped;
             target.V2PlumbingFramesCollapsed += V2PlumbingFramesCollapsed;
             target.V1InfrastructureFramesCollapsed += V1InfrastructureFramesCollapsed;
+            target.V1SynchronousMoveNextFramesNormalized += V1SynchronousMoveNextFramesNormalized;
+            target.V1ReentrantFramesCollapsed += V1ReentrantFramesCollapsed;
             target.V1SynchronousStartupFramesCollapsed += V1SynchronousStartupFramesCollapsed;
+            target.SystemPrivateCoreLibFramesCollapsed += SystemPrivateCoreLibFramesCollapsed;
             target.MessagesDropped += MessagesDropped;
             if (m_messages != null)
             {
@@ -437,10 +523,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             // V2 gate: a V2 (RuntimeAsync) segment is only stitched when the CPU is physically inside a resumed
             // continuation body, which is true exactly when a continuation-wrapper frame sits root-ward of the
             // sampled leaf (at a higher leaf->root index). Two shapes are dispatch machinery rather than a resumed
-            // body, so they are not stitched - the sync layout is used and only the wrapper frame (when present) is
-            // collapsed:
-            //   * Case 2 - the wrapper is the sampled leaf: it has not yet entered the resumed async body. Drop the
-            //     wrapper frame (dispatch machinery) so the dispatch-continuation frame root-ward of it becomes the leaf.
+            // body, so they are not stitched and the sync layout is used:
+            //   * Case 2 - the wrapper is the sampled leaf: it has not yet entered the resumed async body. The
+            //     structural result preserves the wrapper; the default conservative presentation transform removes it.
             //   * Case 3 - no wrapper anywhere, but the sample sits in dispatch-continuation plumbing
             //     (InstrumentedDispatchContinuations / DispatchContinuations): emit the sync layout unchanged.
             // A V2 segment whose sync stack carries no async-boundary frame at all is a different anomaly (e.g. a
@@ -450,17 +535,16 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 int wrapperPos = FirstWrapperIndex(syncLeafToRoot, classify, out bool hasDispatchContinuation);
                 bool wrapperFound = wrapperPos < syncLeafToRoot.Count;
 
-                if (wrapperFound && wrapperPos == 0) // Case 2: drop the leaf wrapper, keep the rest as sync.
+                if (wrapperFound && wrapperPos == 0) // Case 2: preserve the sync layout for presentation transforms.
                 {
                     diagnostics.V2SyncLayoutUsed++;
-                    diagnostics.V2LeafWrapperDropped++;
-                    for (int i = 1; i < syncLeafToRoot.Count; i++)
+                    for (int i = 0; i < syncLeafToRoot.Count; i++)
                     {
                         output.Add(StitchedFrame.CreateSync(syncLeafToRoot[i]));
                     }
                     if (trace)
                     {
-                        diagnostics.Note("V2 not stitched: continuation-wrapper is the sampled leaf; dropped it and used the sync layout.");
+                        diagnostics.Note("V2 not stitched: continuation-wrapper is the sampled leaf; used the sync layout.");
                     }
                     return;
                 }
@@ -481,15 +565,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             int pSync = 0;
-            bool v1SegmentProcessed = false;
             for (int segmentIndex = segmentsRootToLeaf.Count - 1; segmentIndex >= 0; segmentIndex--)
             {
                 AsyncCallStack segment = segmentsRootToLeaf[segmentIndex];
                 diagnostics.SegmentsProcessed++;
                 AsyncCallStackFrames frames = segment.Frames;
                 AsyncCallstackKind kind = frames.Kind;
-                v1SegmentProcessed |= kind == AsyncCallstackKind.StateMachineAsync;
-
                 int boundaryPos = FindBoundary(syncLeafToRoot, pSync, kind, classify, out AsyncStitchBoundaryInfo boundaryInfo);
                 bool boundaryFound = boundaryPos < syncLeafToRoot.Count;
                 if (!boundaryFound)
@@ -538,7 +619,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     }
 
                     output.Add(i == currentSyncPos
-                        ? StitchedFrame.CreateAsyncCurrent(syncLeafToRoot[i].CodeAddress, frames, completed)
+                        ? StitchedFrame.CreateAsyncCurrent(
+                            syncLeafToRoot[i].CodeAddress, syncLeafToRoot[i].Method, frames, completed)
                         : StitchedFrame.CreateSync(syncLeafToRoot[i]));
                 }
 
@@ -608,44 +690,6 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 output.Add(StitchedFrame.CreateSync(syncLeafToRoot[i]));
             }
 
-            if (v1SegmentProcessed)
-            {
-                CollapseV1SynchronousStartup(output, diagnostics);
-            }
-
-        }
-
-        private static void CollapseV1SynchronousStartup(List<StitchedFrame> output, StitchDiagnostics diagnostics)
-        {
-            for (int i = 0; i < output.Count - 1;)
-            {
-                if (output[i].Origin != StitchedFrameOrigin.Sync ||
-                    output[i].SyncFrameKind != StitchSyncFrameKind.V1StateMachineMoveNext)
-                {
-                    i++;
-                    continue;
-                }
-
-                int end = i + 1;
-                while (end < output.Count &&
-                       output[end].Origin == StitchedFrameOrigin.Sync &&
-                       output[end].SyncFrameKind == StitchSyncFrameKind.V1MethodBuilderStart)
-                {
-                    end++;
-                }
-
-                // A generated MoveNext is real executing code. It is startup plumbing only when immediately
-                // followed root-ward by at least one known method-builder Start frame.
-                if (end == i + 1)
-                {
-                    i++;
-                    continue;
-                }
-
-                int count = end - i;
-                output.RemoveRange(i, count);
-                diagnostics.V1SynchronousStartupFramesCollapsed += count;
-            }
         }
 
         private static bool HasEmptySegment(IReadOnlyList<AsyncCallStack> segments)
