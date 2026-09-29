@@ -127,6 +127,9 @@ namespace TraceEventTests
 
                 using (var traceLog = new TraceLog(etlxPath))
                 {
+                    Assert.True(traceLog.HasAsyncProfilerEvents);
+                    Assert.False(traceLog.IsAsyncCallStacksLoaded);
+
                     // Find the CPU sample event's thread + QPC from the reopened ETLX. The raw AsyncEvents
                     // records are omitted by default because the persisted index supersedes them.
                     int asyncEventsCount = 0;
@@ -254,6 +257,9 @@ namespace TraceEventTests
                     new TraceLogOptions { KeepAsyncProfilerEvents = true });
                 using (var traceLog = new TraceLog(preservedEtlxPath))
                 {
+                    Assert.True(traceLog.HasAsyncProfilerEvents);
+                    Assert.False(traceLog.IsAsyncCallStacksLoaded);
+
                     int asyncEventsCount = 0;
                     foreach (TraceEvent e in traceLog.Events)
                     {

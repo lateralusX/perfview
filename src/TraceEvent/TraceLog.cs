@@ -511,6 +511,28 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
         /// </summary>
         public TraceEventStats Stats { get { return stats; } }
 
+        /// <summary>
+        /// True if the source trace contained async-profiler event batches. This is a cheap capability check backed
+        /// by persisted event statistics; it does not load the deferred async-callstack index. A trace containing
+        /// only profiler metadata or reset events can return true without having stitchable async call stacks.
+        /// </summary>
+        public bool HasAsyncProfilerEvents
+        {
+            get
+            {
+                foreach (TraceEventCounts counts in stats)
+                {
+                    if (counts.ProviderGuid == AsyncProfilerTraceEventParser.ProviderGuid &&
+                        counts.EventID == (TraceEventID)AsyncProfilerTraceEventParser.AsyncEventsEventId &&
+                        counts.Count != 0)
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            }
+        }
+
         // operations on events
         /// <summary>
         /// If the event has a call stack associated with it, retrieve it.   Returns null if there is not call stack associated with the event.

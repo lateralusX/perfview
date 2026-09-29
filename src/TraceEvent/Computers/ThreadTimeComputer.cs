@@ -1,6 +1,8 @@
 ﻿using Microsoft.Diagnostics.Symbols;
+using Microsoft.Diagnostics.Tracing.Computers;
 using Microsoft.Diagnostics.Tracing.Etlx;
 using Microsoft.Diagnostics.Tracing.Parsers;
+using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
 using Microsoft.Diagnostics.Tracing.Parsers.AspNet;
 // Copyright (c) Microsoft Corporation.  All rights reserved
 // This file is best viewed using outline mode (Ctrl-M Ctrl-O)
@@ -35,9 +37,19 @@ namespace Microsoft.Diagnostics.Tracing
         /// Create a new ThreadTimeComputer
         /// </summary>
         public ThreadTimeStackComputer(TraceLog eventLog, SymbolReader symbolReader)
+            : this(eventLog, symbolReader, false)
+        {
+        }
+
+        /// <summary>
+        /// Create a new ThreadTimeComputer, optionally stitching async-profiler ancestry into CPU and wait stacks.
+        /// </summary>
+        public ThreadTimeStackComputer(TraceLog eventLog, SymbolReader symbolReader, bool stitchAsyncCallStacks)
         {
             m_eventLog = eventLog;
             m_symbolReader = symbolReader;
+            m_stitchAsyncCallStacks = stitchAsyncCallStacks;
+            AsyncStackTransforms = new AsyncStackTransformPipeline();
 
             m_threadState = new ThreadState[eventLog.Threads.Count];
             for (int i = 0; i < m_threadState.Length; i++)
@@ -48,7 +60,7 @@ namespace Microsoft.Diagnostics.Tracing
             m_IRPToThread = new Dictionary<Address, TraceThread>(32);
 
             // We assume to begin with that all processors are idle (it will fix itself shortly).  
-            m_numIdleProcs = eventLog.NumberOfProcessors;
+            m_numIdleProcs = Math.Max(eventLog.NumberOfProcessors, 1);
             m_threadIDUsingProc = new int[m_numIdleProcs];
             m_threadIndexUsingProc = new ThreadIndex[m_numIdleProcs];
             for(int i=0; i< m_threadIndexUsingProc.Length; i++)
@@ -95,6 +107,26 @@ namespace Microsoft.Diagnostics.Tracing
         /// LIke the GroupByAspNetRequest but use start-stop activities instead of ASP.NET Requests as the grouping construct. 
         /// </summary>
         public bool GroupByStartStopActivity;
+
+        /// <summary>
+        /// True after generation when async stitching was requested and the trace contained async-profiler data.
+        /// </summary>
+        public bool AsyncStitchActive => m_asyncStackSourceBuilder != null;
+
+        /// <summary>
+        /// Ordered presentation transforms applied to stitched CPU and wait stacks before StackSource interning.
+        /// </summary>
+        public AsyncStackTransformPipeline AsyncStackTransforms { get; }
+
+        /// <summary>
+        /// Aggregate diagnostics from stitched CPU and wait stacks, or null when stitching was inactive.
+        /// </summary>
+        public StitchDiagnostics AsyncStitchDiagnostics => m_asyncStackSourceBuilder?.Diagnostics;
+
+        /// <summary>
+        /// Emit per-segment stitch details into <see cref="AsyncStitchDiagnostics"/>.
+        /// </summary>
+        public bool TraceAsyncStitchSteps { get; set; }
 
         /// <summary>
         /// Reduce nested application insights requests by using related activity id.
@@ -344,6 +376,12 @@ namespace Microsoft.Diagnostics.Tracing
                         return;
                     }
 
+                    // The persisted async index supersedes the optional raw batch records.
+                    if (data.ProviderGuid == AsyncProfilerTraceEventParser.ProviderGuid)
+                    {
+                        return;
+                    }
+
                     // TODO decide what the correct heuristic is.  
                     // Currently I only do this for things that might be an EventSoruce (uses the name->Guid hashing)
                     // Most importantly, it excludes the high volume CLR providers.   
@@ -413,6 +451,7 @@ namespace Microsoft.Diagnostics.Tracing
             eventSource.Kernel.TcpIpRecv += OnTcIpRecv;
             eventSource.Kernel.MemoryHardFault += OnHardFault;
 
+            InitializeAsyncStitchingIfRequested();
             eventSource.Process();
 
             var endSessionRelativeMSec = m_eventLog.SessionDuration.TotalMilliseconds;
@@ -451,6 +490,7 @@ namespace Microsoft.Diagnostics.Tracing
 
             m_outputStackSource.DoneAddingSamples();
             m_threadState = null;
+            m_asyncStackSourceBuilder?.ClearResources();
         }
 
         private void InitializeForUniversal()
@@ -651,7 +691,7 @@ namespace Microsoft.Diagnostics.Tracing
                 TraceThread newThread = data.Thread();
                 if (newThread != null)
                 {
-                    StackSourceCallStackIndex stackIndex = GetCallStack(data, newThread);
+                    StackSourceCallStackIndex stackIndex = GetCallStack(data, newThread, allowAsyncStitching: true);
                     m_threadState[(int)newThread.ThreadIndex].LogBlockingEnd(
                         data.TimeStampRelativeMSec, data.ProcessorNumber, stackIndex, newThread, this);
                 }
@@ -690,8 +730,9 @@ namespace Microsoft.Diagnostics.Tracing
             TraceThread thread = data.Thread();
             if (thread != null)
             {
-                StackSourceCallStackIndex stackIndex = GetCallStack(data, thread);
-                m_threadState[(int)thread.ThreadIndex].LogCPUStack(data.TimeStampRelativeMSec, stackIndex, thread, this, data is SampledProfileTraceData);
+                bool isCpuSample = data is SampledProfileTraceData;
+                StackSourceCallStackIndex stackIndex = GetCallStack(data, thread, allowAsyncStitching: isCpuSample);
+                m_threadState[(int)thread.ThreadIndex].LogCPUStack(data.TimeStampRelativeMSec, stackIndex, thread, this, isCpuSample);
             }
             else
             {
@@ -713,7 +754,7 @@ namespace Microsoft.Diagnostics.Tracing
             }
 
             // Get the blocking stack.
-            StackSourceCallStackIndex stackIndex = GetCallStack(data, thread);
+            StackSourceCallStackIndex stackIndex = GetCallStack(data, thread, allowAsyncStitching: true);
 
             // If the thread wasn't previously marked as blocked, then mark it.
             if (!m_threadState[(int)thread.ThreadIndex].ThreadBlocked)
@@ -769,7 +810,7 @@ namespace Microsoft.Diagnostics.Tracing
                 }
             }
 
-            StackSourceCallStackIndex stackIndex = GetCallStack(data, thread);
+            StackSourceCallStackIndex stackIndex = GetCallStack(data, thread, allowAsyncStitching: true);
             m_threadState[(int)thread.ThreadIndex].LogCPUStack(
                 data.TimeStampRelativeMSec,
                 stackIndex,
@@ -888,9 +929,21 @@ namespace Microsoft.Diagnostics.Tracing
         /// <summary>
         /// Get the call stack for 'data'  Note that you thread must be data.Thread().   We pass it just to save the lookup.  
         /// </summary>
-        private StackSourceCallStackIndex GetCallStack(TraceEvent data, TraceThread thread)
+        private StackSourceCallStackIndex GetCallStack(
+            TraceEvent data,
+            TraceThread thread,
+            bool allowAsyncStitching = false)
         {
             Debug.Assert(data.Thread() == thread);
+
+            if (allowAsyncStitching &&
+                m_asyncStackSourceBuilder != null &&
+                m_asyncStackSourceBuilder.TryGetStitchedCallStack(
+                    data, thread, out StackSourceCallStackIndex stitched))
+            {
+                return stitched;
+            }
+
             StackSourceCallStackIndex ret;
 
             if (m_activityComputer != null)
@@ -912,6 +965,39 @@ namespace Microsoft.Diagnostics.Tracing
                 }
             }
             return ret;
+        }
+
+        private void InitializeAsyncStitchingIfRequested()
+        {
+            if (!m_stitchAsyncCallStacks)
+            {
+                return;
+            }
+
+            m_asyncStackSourceBuilder = AsyncCpuStackSourceBuilder.TryCreate(
+                m_eventLog,
+                m_outputStackSource,
+                AsyncStackTransforms,
+                GetAsyncStitchRoot);
+            if (m_asyncStackSourceBuilder != null)
+            {
+                m_asyncStackSourceBuilder.TraceSteps = TraceAsyncStitchSteps;
+            }
+        }
+
+        private StackSourceCallStackIndex GetAsyncStitchRoot(TraceEvent data, TraceThread thread)
+        {
+            if (GroupByAspNetRequest)
+            {
+                Guid aspNetGuid = m_activityComputer != null
+                    ? GetAspNetGuid(m_activityComputer.GetCurrentActivity(thread))
+                    : m_threadState[(int)thread.ThreadIndex].AspNetRequestGuid;
+                return GetAspNetFromProcessFrameThroughThreadFrameStack(aspNetGuid, data, thread);
+            }
+
+            return m_startStopActivities != null
+                ? m_startStopActivities.GetCurrentStartStopActivityStack(m_outputStackSource, thread, thread)
+                : m_outputStackSource.GetCallStackForThread(thread);
         }
 
         /// <summary>
@@ -1476,6 +1562,8 @@ namespace Microsoft.Diagnostics.Tracing
         private MutableTraceEventStackSource m_outputStackSource; // The output source we are generating. 
         private TraceLog m_eventLog;                        // The event log associated with m_stackSource.  
         private SymbolReader m_symbolReader;
+        private readonly bool m_stitchAsyncCallStacks;
+        private AsyncCpuStackSourceBuilder m_asyncStackSourceBuilder;
 
         // These are boring caches of frame names which speed things up a bit.  
         private Dictionary<double, StackSourceFrameIndex> m_nodeNameInternTable;

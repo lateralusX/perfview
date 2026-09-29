@@ -113,8 +113,10 @@ namespace TraceEventTests
                 },
                 IncludeTplActivity = true,
                 IncludeStartStopActivity = true,
+                IncludeEventSourceEvents = false,
                 AllowSupplementalSamples = true,
                 SkipNormalStackAssertion = true,
+                VerifyThreadTimeComputer = true,
                 AssertOutputs = (normal, stitched) =>
                 {
                     Assert.Contains(normal.GroupingFrames, name =>
@@ -1535,6 +1537,7 @@ namespace TraceEventTests
             public byte ContinuationIndexBase { get; set; }
             public int[] AsyncStates { get; set; }
             public bool VerifyComputerAndIndexLifecycle { get; set; }
+            public bool VerifyThreadTimeComputer { get; set; }
             public bool IncludeTplActivity { get; set; }
             public bool IncludeStartStopActivity { get; set; }
             public bool AllowSupplementalSamples { get; set; }
@@ -1607,6 +1610,25 @@ namespace TraceEventTests
                         Assert.Equal(syncOutput.RootFrames, stitchedOutput.RootFrames);
                         Assert.True(stitchedComputer.AsyncStitchActive);
                         (ExpectedDiagnostics ?? new StitchDiagnosticsExpectation()).Assert(stitchedComputer.AsyncStitchDiagnostics);
+
+                        if (VerifyThreadTimeComputer)
+                        {
+                            var threadTimeStackSource = new MutableTraceEventStackSource(traceLog);
+#pragma warning disable CS0618 // ThreadTimeStackComputer is intentionally experimental.
+                            var threadTimeComputer = new ThreadTimeStackComputer(
+                                traceLog, symbolReader, stitchAsyncCallStacks: true)
+#pragma warning restore CS0618
+                            {
+                                GroupByStartStopActivity = GroupByStartStopActivity,
+                                IncludeEventSourceEvents = false,
+                            };
+                            threadTimeComputer.GenerateThreadTimeStacks(threadTimeStackSource);
+                            AssertThreadTimeStack(
+                                threadTimeStackSource, "CPU_TIME", Labels(ExpectedStitched));
+                            AssertThreadTimeStack(
+                                threadTimeStackSource, "BLOCKED_TIME", Labels(ExpectedStitched));
+                            Assert.True(threadTimeComputer.AsyncStitchActive);
+                        }
 
                         if (ExpectedWithoutConservativeTransforms != null)
                         {
@@ -1754,6 +1776,18 @@ namespace TraceEventTests
                     ProviderId = new Guid("3b268b3d-903f-5835-c77e-790d518a26c4"),
                     OpCode = (byte)EventOpcode.Start,
                 };
+                var universalCpuMetadata = new EventMetadata(
+                    8, UniversalEventsTraceEventParser.ProviderName, "cpu", 1,
+                    new MetadataParameter("Value", MetadataTypeCode.VarUInt))
+                {
+                    ProviderId = UniversalEventsTraceEventParser.ProviderGuid,
+                };
+                var universalCSwitchMetadata = new EventMetadata(
+                    9, UniversalEventsTraceEventParser.ProviderName, "cswitch", 2,
+                    new MetadataParameter("Value", MetadataTypeCode.VarUInt))
+                {
+                    ProviderId = UniversalEventsTraceEventParser.ProviderGuid,
+                };
 
                 var writer = new EventPipeFixtureWriter();
                 writer.WriteHeadersWithNonZeroSyncTime();
@@ -1764,7 +1798,9 @@ namespace TraceEventTests
                     symbolMetadata,
                     taskScheduledMetadata,
                     taskStartedMetadata,
-                    activityStartMetadata);
+                    activityStartMetadata,
+                    universalCpuMetadata,
+                    universalCSwitchMetadata);
                 writer.WriteThreadBlock(w =>
                 {
                     w.WriteThreadEntry(ThreadStreamIndex, OsThreadId, ProcessId);
@@ -1836,6 +1872,15 @@ namespace TraceEventTests
 
                     // Thread-time computation emits a CPU sample when the following sample arrives.
                     int stackId = SampleHasStack ? 1 : 0;
+                    if (VerifyThreadTimeComputer)
+                    {
+                        w.WriteEventBlob(EventOptions(9, sequence++, SampleQpc - 3, stackId),
+                            p => p.WriteVarUInt(1));
+                        w.WriteEventBlob(EventOptions(8, sequence++, SampleQpc - 2, stackId),
+                            p => p.WriteVarUInt(1));
+                        w.WriteEventBlob(EventOptions(8, sequence++, SampleQpc - 1, stackId),
+                            p => p.WriteVarUInt(1));
+                    }
                     w.WriteEventBlob(EventOptions(2, sequence++, SampleQpc, stackId),
                         p => p.Write((int)ClrThreadSampleType.Managed));
                     w.WriteEventBlob(EventOptions(2, sequence++, SampleQpc + 1, stackId),
@@ -1934,6 +1979,29 @@ namespace TraceEventTests
                     Assert.Equal(1, sampleCount);
                 }
                 return result;
+            }
+
+            private void AssertThreadTimeStack(
+                MutableTraceEventStackSource stackSource,
+                string metricFrame,
+                string[] expectedScenarioFrames)
+            {
+                bool found = false;
+                stackSource.ForEach(sample =>
+                {
+                    EmittedStack stack = ReadStack(stackSource, sample.StackIndex);
+                    if (stack.GroupingFrames.Contains(metricFrame) &&
+                        stack.ScenarioFrames.SequenceEqual(expectedScenarioFrames))
+                    {
+                        if (IncludeStartStopActivity)
+                        {
+                            Assert.Contains(stack.RootFrames, name =>
+                                name.IndexOf("Activity Request", StringComparison.Ordinal) >= 0);
+                        }
+                        found = true;
+                    }
+                });
+                Assert.True(found, $"No {metricFrame} sample was emitted.");
             }
 
             private EmittedStack ReadStack(MutableTraceEventStackSource stackSource, StackSourceCallStackIndex stackIndex)

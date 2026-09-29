@@ -87,7 +87,7 @@ namespace Microsoft.Diagnostics.Tracing
         /// callers can use this to warn that <c>--async</c> had no effect. Always false when stitching was not
         /// requested.
         /// </summary>
-        public bool AsyncStitchActive => m_asyncStitchActive;
+        public bool AsyncStitchActive => m_asyncStackSourceBuilder != null;
 
         /// <summary>
         /// Ordered presentation transforms applied after mandatory structural async stitching and before StackSource
@@ -518,8 +518,9 @@ namespace Microsoft.Diagnostics.Tracing
         {
             Debug.Assert(data.Thread() == thread);
 
-            if (m_asyncStitchActive &&
-                TryGetStitchedCallStack(data, thread, out StackSourceCallStackIndex stitched) == StitchOutcome.Stitched)
+            if (m_asyncStackSourceBuilder != null &&
+                m_asyncStackSourceBuilder.TryGetStitchedCallStack(
+                    data, thread, out StackSourceCallStackIndex stitched))
             {
                 return stitched;
             }
@@ -537,36 +538,20 @@ namespace Microsoft.Diagnostics.Tracing
         /// </summary>
         private void InitializeAsyncStitchingIfRequested()
         {
-            m_asyncStitchActive = false;
             if (!m_stitchAsyncCallStacks)
             {
                 return;
             }
 
-            AsyncCallStacksIndex index = m_eventLog.AsyncCallStacks;
-            if (index == null)
+            m_asyncStackSourceBuilder = AsyncCpuStackSourceBuilder.TryCreate(
+                m_eventLog,
+                m_outputStackSource,
+                AsyncStackTransforms,
+                GetAsyncStitchRoot);
+            if (m_asyncStackSourceBuilder != null)
             {
-                return;
+                m_asyncStackSourceBuilder.TraceSteps = TraceAsyncStitchSteps;
             }
-
-            m_asyncIndex = index;
-            m_asyncBoundaries = new AsyncStitchBoundaryCache(m_eventLog.CodeAddresses);
-            m_asyncClassify = m_asyncBoundaries.Classify;
-            m_asyncMethodCompletionObserved = m_asyncIndex.MethodCompletionObserved;
-            m_asyncCanonicalMethodByMethodIndex = new Dictionary<MethodIndex, MethodIndex>();
-            m_asyncCanonicalMethodByIdentity = new Dictionary<AsyncManagedMethodIdentity, MethodIndex>();
-            m_asyncMethodOf = ca => NormalizeAsyncMethod(m_eventLog.CodeAddresses.MethodIndex(ca));
-            m_asyncStitchDiagnostics = new StitchDiagnostics();
-            m_asyncSampleDiagnostics = new StitchDiagnostics();
-            m_asyncSegments = new List<AsyncCallStack>();
-            m_asyncSyncFrames = new List<StitchSyncFrame>();
-            m_asyncStitchedFrames = new List<StitchedFrame>();
-            m_asyncSyncFrameKinds = new Dictionary<CodeAddressIndex, StitchSyncFrameKind>();
-            m_asyncLogicalSyncFrameByCodeAddress =
-                new Dictionary<CodeAddressIndex, StackSourceFrameIndex>();
-            m_asyncFrameByIdentity =
-                new Dictionary<AsyncStackSourceFrameIdentity, StackSourceFrameIndex>();
-            m_asyncStitchActive = true;
         }
 
         /// <summary>
@@ -575,20 +560,7 @@ namespace Microsoft.Diagnostics.Tracing
         /// </summary>
         private void ClearAsyncStitchingResources()
         {
-            m_asyncIndex = null;
-            m_asyncBoundaries = null;
-            m_asyncClassify = null;
-            m_asyncMethodCompletionObserved = null;
-            m_asyncMethodOf = null;
-            m_asyncCanonicalMethodByMethodIndex = null;
-            m_asyncCanonicalMethodByIdentity = null;
-            m_asyncSegments = null;
-            m_asyncSyncFrames = null;
-            m_asyncStitchedFrames = null;
-            m_asyncSyncFrameKinds = null;
-            m_asyncSampleDiagnostics = null;
-            m_asyncLogicalSyncFrameByCodeAddress = null;
-            m_asyncFrameByIdentity = null;
+            m_asyncStackSourceBuilder?.ClearResources();
         }
 
         /// <summary>
@@ -596,7 +568,7 @@ namespace Microsoft.Diagnostics.Tracing
         /// <see cref="GenerateThreadTimeStacks"/> run, or null when async stitching was never active. All counters
         /// at 0 indicates every stitched sample merged cleanly.
         /// </summary>
-        public StitchDiagnostics AsyncStitchDiagnostics => m_asyncStitchDiagnostics;
+        public StitchDiagnostics AsyncStitchDiagnostics => m_asyncStackSourceBuilder?.Diagnostics;
 
         /// <summary>
         /// When true, each stitched sample records a per-segment happy-path trace step (kind / boundary / completed
@@ -606,261 +578,11 @@ namespace Microsoft.Diagnostics.Tracing
         /// </summary>
         public bool TraceAsyncStitchSteps { get; set; }
 
-        /// <summary>
-        /// The result of attempting to stitch async ancestry onto a CPU sample.
-        /// </summary>
-        private enum StitchOutcome
+        private StackSourceCallStackIndex GetAsyncStitchRoot(TraceEvent data, TraceThread thread)
         {
-            /// <summary>The sample's suspended async ancestry was stitched into the out stack.</summary>
-            Stitched,
-
-            /// <summary>The sample has no async ancestry; use the normal path (native sync stack emitted verbatim).</summary>
-            NoAsync,
-        }
-
-        /// <summary>
-        /// Attempts to produce a native call stack for <paramref name="data"/> with the suspended async ancestry
-        /// stitched in. Returns <see cref="StitchOutcome.Stitched"/> (with <paramref name="stitchedStack"/> set)
-        /// when the sampled thread has async call stacks active at the sample's instant, otherwise
-        /// <see cref="StitchOutcome.NoAsync"/> so the caller falls back to the normal (non-async) path - emitting the
-        /// native sync stack verbatim, so any async coverage gap stays plainly visible.
-        /// </summary>
-        private StitchOutcome TryGetStitchedCallStack(TraceEvent data, TraceThread thread, out StackSourceCallStackIndex stitchedStack)
-        {
-            stitchedStack = StackSourceCallStackIndex.Invalid;
-
-            CallStackIndex callStackIndex = data.CallStackIndex();
-            if (callStackIndex == CallStackIndex.Invalid)
-            {
-                return StitchOutcome.NoAsync;
-            }
-
-#pragma warning disable CS0618 // We deliberately need the sample's exact QPC to align with the async index; it never leaves this assembly.
-            long qpc = data.TimeStampQPC;
-#pragma warning restore CS0618
-
-            ProcessIndex processIndex = thread.Process.ProcessIndex;
-            m_asyncIndex.GetAsyncCallStacks(
-                new AsyncThreadKey(processIndex, (ulong)thread.ThreadID), qpc, m_asyncSegments);
-            if (m_asyncSegments.Count == 0)
-            {
-                // No async ancestry recorded for this thread at this instant: fall back to the normal path and emit
-                // the native sync stack as-is (including any continuation-wrapper / dispatch machinery). Keeping the
-                // frames verbatim makes the coverage gap visible instead of hiding it behind synthetic edits.
-                return StitchOutcome.NoAsync;
-            }
-
-            MaterializeSyncLeafToRoot(callStackIndex, m_asyncSyncFrames);
-
-            m_asyncSampleDiagnostics.MessageLimit = m_asyncStitchDiagnostics.RemainingMessageCapacity;
-            AsyncCpuStackStitcher.StitchInto(
-                m_asyncSyncFrames, m_asyncSegments, qpc, m_asyncClassify, m_asyncMethodCompletionObserved,
-                processIndex, m_asyncMethodOf, TraceAsyncStitchSteps, m_asyncStitchedFrames, m_asyncSampleDiagnostics);
-            var transformContext = new AsyncStackTransformContext(
-                m_eventLog,
-                m_asyncSegments,
-                qpc,
-                m_asyncClassify,
-                m_asyncSampleDiagnostics,
-                m_asyncStitchedFrames);
-            AsyncStackTransforms.ApplyInPlace(transformContext);
-            m_asyncSampleDiagnostics.AddTo(m_asyncStitchDiagnostics);
-
-            // When start-stop activity grouping is enabled, root the stitched stack through the same top-frames
-            // provider as the non-stitched path so both layouts share identical pseudo-nodes. When grouping is
-            // disabled, use the normal thread root rather than dereferencing an activity computer that was not built.
-            StackSourceCallStackIndex threadRoot = m_startStopActivities != null
+            return m_startStopActivities != null
                 ? m_startStopActivities.GetCurrentStartStopActivityStack(m_outputStackSource, thread, thread)
                 : m_outputStackSource.GetCallStackForThread(thread);
-            stitchedStack = InternStitchedStack(m_asyncStitchedFrames, threadRoot, processIndex);
-            return StitchOutcome.Stitched;
-        }
-
-        /// <summary>
-        /// Walks the native call stack <paramref name="callStackIndex"/> (leaf-&gt;root) into
-        /// <see cref="StitchSyncFrame"/>s, resolving each frame's <see cref="MethodIndex"/> for the V1 identity
-        /// match. The thread/process pseudo-root is not part of the native walk; it is supplied during interning.
-        /// </summary>
-        private void MaterializeSyncLeafToRoot(CallStackIndex callStackIndex, List<StitchSyncFrame> sync)
-        {
-            sync.Clear();
-            TraceCallStacks callStacks = m_eventLog.CallStacks;
-            TraceCodeAddresses codeAddresses = m_eventLog.CodeAddresses;
-
-            for (CallStackIndex csi = callStackIndex; csi != CallStackIndex.Invalid; csi = callStacks.Caller(csi))
-            {
-                CodeAddressIndex ca = callStacks.CodeAddressIndex(csi);
-                MethodIndex method = ca != CodeAddressIndex.Invalid
-                    ? NormalizeAsyncMethod(codeAddresses.MethodIndex(ca))
-                    : MethodIndex.Invalid;
-                if (!m_asyncSyncFrameKinds.TryGetValue(ca, out StitchSyncFrameKind kind))
-                {
-                    TraceCodeAddress codeAddress = ca == CodeAddressIndex.Invalid ? null : codeAddresses[ca];
-                    string frameName = codeAddress?.FullMethodName;
-                    bool isHostModule = codeAddress != null &&
-                        (string.Equals(
-                             codeAddress.ModuleName,
-                             AsyncStitchBoundary.HostModuleName,
-                             StringComparison.OrdinalIgnoreCase) ||
-                         string.Equals(
-                             codeAddress.ModuleName,
-                             AsyncStitchBoundary.HostModuleName + ".dll",
-                             StringComparison.OrdinalIgnoreCase));
-                    kind = AsyncStitchBoundary.ClassifyV1SynchronousFrame(frameName, isHostModule);
-                    m_asyncSyncFrameKinds.Add(ca, kind);
-                }
-                sync.Add(new StitchSyncFrame(ca, method, kind));
-            }
-        }
-
-        /// <summary>
-        /// Maps every code version of one managed method to the first <see cref="MethodIndex"/> observed for that
-        /// method. TraceLog assigns separate MethodIndexes to tiered/re-JITted bodies, while V1 async frames identify
-        /// the managed method independently of its current code version. Caching both directions keeps the per-sample
-        /// stitch path to one dictionary lookup after the first occurrence of each MethodIndex.
-        /// </summary>
-        private MethodIndex NormalizeAsyncMethod(MethodIndex method)
-        {
-            if (method == MethodIndex.Invalid)
-            {
-                return MethodIndex.Invalid;
-            }
-            if (m_asyncCanonicalMethodByMethodIndex.TryGetValue(method, out MethodIndex canonical))
-            {
-                return canonical;
-            }
-
-            TraceMethod traceMethod = m_eventLog.CodeAddresses.Methods[method];
-            if (traceMethod.MethodToken == 0)
-            {
-                m_asyncCanonicalMethodByMethodIndex.Add(method, method);
-                return method;
-            }
-
-            var identity = new AsyncManagedMethodIdentity(
-                traceMethod.MethodModuleFileIndex, traceMethod.MethodToken, traceMethod.FullMethodName);
-            if (!m_asyncCanonicalMethodByIdentity.TryGetValue(identity, out canonical))
-            {
-                canonical = method;
-                m_asyncCanonicalMethodByIdentity.Add(identity, canonical);
-            }
-            m_asyncCanonicalMethodByMethodIndex.Add(method, canonical);
-            return canonical;
-        }
-
-        /// <summary>
-        /// Interns a <see cref="StitchResult"/> (leaf-&gt;root) into the output stack source on top of
-        /// <paramref name="threadRoot"/>, building the stack bottom-up (root-&gt;leaf) so the native leaf ends up on
-        /// top. Sync frames retain their ordinary identity. Async frames receive a distinct tagged identity so
-        /// RuntimeAsync frames cannot collapse into sync frames at the same IP and StateMachineAsync frames retain
-        /// their state-machine state.
-        /// </summary>
-        private StackSourceCallStackIndex InternStitchedStack(
-            IReadOnlyList<StitchedFrame> frames,
-            StackSourceCallStackIndex threadRoot,
-            ProcessIndex processIndex)
-        {
-            StackSourceCallStackIndex caller = threadRoot;
-
-            for (int i = frames.Count - 1; i >= 0; i--)
-            {
-                StitchedFrame frame = frames[i];
-                StackSourceFrameIndex frameIdx = InternStitchedFrame(frame, processIndex);
-                caller = m_outputStackSource.Interner.CallStackIntern(frameIdx, caller);
-            }
-
-            return caller;
-        }
-
-        private StackSourceFrameIndex InternStitchedFrame(StitchedFrame frame, ProcessIndex processIndex)
-        {
-            if (frame.Origin != StitchedFrameOrigin.Sync && frame.Segment != null)
-            {
-                return InternAsyncFrame(frame, processIndex);
-            }
-
-            if (frame.Presentation == StitchedFramePresentation.LogicalStateMachineMethod &&
-                frame.CodeAddress != CodeAddressIndex.Invalid)
-            {
-                if (m_asyncLogicalSyncFrameByCodeAddress.TryGetValue(
-                    frame.CodeAddress, out StackSourceFrameIndex cachedFrame))
-                {
-                    return cachedFrame != StackSourceFrameIndex.Invalid
-                        ? cachedFrame
-                        : m_outputStackSource.GetFrameIndex(frame.CodeAddress);
-                }
-
-                TraceCodeAddress codeAddress = m_eventLog.CodeAddresses[frame.CodeAddress];
-                if (AsyncStitchBoundary.TryGetLogicalStateMachineMethodName(
-                    codeAddress.FullMethodName, out string logicalName))
-                {
-                    StackSourceModuleIndex module = m_outputStackSource.Interner.ModuleIntern(codeAddress.ModuleName);
-                    StackSourceFrameIndex logicalFrame = m_outputStackSource.Interner.FrameIntern(logicalName, module);
-                    m_asyncLogicalSyncFrameByCodeAddress.Add(frame.CodeAddress, logicalFrame);
-                    return logicalFrame;
-                }
-
-                m_asyncLogicalSyncFrameByCodeAddress.Add(frame.CodeAddress, StackSourceFrameIndex.Invalid);
-            }
-
-            return frame.CodeAddress != CodeAddressIndex.Invalid
-                ? m_outputStackSource.GetFrameIndex(frame.CodeAddress)
-                : m_outputStackSource.Interner.FrameIntern("?!?");
-        }
-
-        private StackSourceFrameIndex InternAsyncFrame(StitchedFrame frame, ProcessIndex processIndex)
-        {
-            AsyncCallStackFrames segment = frame.Segment;
-            int segmentFrameIndex = frame.SegmentFrameIndex;
-            AsyncCallstackKind kind = segment.Kind;
-            ulong methodId = segment.MethodIdAt(segmentFrameIndex);
-            int state = kind == AsyncCallstackKind.StateMachineAsync
-                ? segment.FrameStateAt(segmentFrameIndex)
-                : 0;
-            var identity = new AsyncStackSourceFrameIdentity(
-                kind, processIndex, frame.CodeAddress, methodId, state);
-            if (m_asyncFrameByIdentity.TryGetValue(identity, out StackSourceFrameIndex existingFrame))
-            {
-                return existingFrame;
-            }
-
-            int identityTag = m_outputStackSource.NextAsyncFrameIdentityTag();
-            StackSourceFrameIndex asyncFrame;
-            if (frame.Presentation == StitchedFramePresentation.LogicalStateMachineMethod &&
-                frame.CodeAddress != CodeAddressIndex.Invalid)
-            {
-                TraceCodeAddress codeAddress = m_eventLog.CodeAddresses[frame.CodeAddress];
-                if (AsyncStitchBoundary.TryGetLogicalStateMachineMethodName(
-                    codeAddress.FullMethodName, out string logicalName))
-                {
-                    StackSourceModuleIndex module =
-                        m_outputStackSource.Interner.ModuleIntern(codeAddress.ModuleName);
-                    asyncFrame =
-                        m_outputStackSource.Interner.FrameIntern(logicalName, module, identityTag);
-                }
-                else
-                {
-                    asyncFrame = m_outputStackSource.Interner.FrameIntern(
-                        m_outputStackSource.GetFrameIndex(frame.CodeAddress), string.Empty, identityTag);
-                }
-            }
-            else if (frame.CodeAddress != CodeAddressIndex.Invalid)
-            {
-                asyncFrame = m_outputStackSource.Interner.FrameIntern(
-                    m_outputStackSource.GetFrameIndex(frame.CodeAddress), string.Empty, identityTag);
-            }
-            else
-            {
-                string name = "AsyncFrame(0x" + methodId.ToString("x") + ")";
-                asyncFrame = m_outputStackSource.Interner.FrameIntern(
-                    name, StackSourceModuleIndex.Invalid, identityTag);
-            }
-
-            m_asyncFrameByIdentity.Add(identity, asyncFrame);
-            m_outputStackSource.SetAsyncFrameInfo(
-                asyncFrame,
-                new AsyncStackSourceFrameInfo(kind, processIndex, frame.CodeAddress, methodId, state));
-            return asyncFrame;
         }
 
         #endregion
@@ -1012,97 +734,7 @@ namespace Microsoft.Diagnostics.Tracing
         // Async CPU stack stitching (opt-in via the constructor; only active when the trace has async-profiler data).
         private readonly bool m_stitchAsyncCallStacks;
         private bool m_hasGeneratedThreadTimeStacks;
-        private bool m_asyncStitchActive;
-        private AsyncCallStacksIndex m_asyncIndex;
-        private AsyncStitchBoundaryCache m_asyncBoundaries;
-        private Func<CodeAddressIndex, AsyncStitchBoundaryInfo> m_asyncClassify;
-        private Func<ProcessIndex, AsyncCallstackKind, long, bool> m_asyncMethodCompletionObserved;
-        private Func<CodeAddressIndex, MethodIndex> m_asyncMethodOf;
-        private Dictionary<MethodIndex, MethodIndex> m_asyncCanonicalMethodByMethodIndex;
-        private Dictionary<AsyncManagedMethodIdentity, MethodIndex> m_asyncCanonicalMethodByIdentity;
-        private StitchDiagnostics m_asyncStitchDiagnostics;
-        private StitchDiagnostics m_asyncSampleDiagnostics;
-        private List<AsyncCallStack> m_asyncSegments;
-        private List<StitchSyncFrame> m_asyncSyncFrames;
-        private List<StitchedFrame> m_asyncStitchedFrames;
-        private Dictionary<CodeAddressIndex, StitchSyncFrameKind> m_asyncSyncFrameKinds;
-        private Dictionary<CodeAddressIndex, StackSourceFrameIndex> m_asyncLogicalSyncFrameByCodeAddress;
-        private Dictionary<AsyncStackSourceFrameIdentity, StackSourceFrameIndex> m_asyncFrameByIdentity;
-
-        private readonly struct AsyncStackSourceFrameIdentity : IEquatable<AsyncStackSourceFrameIdentity>
-        {
-            public AsyncStackSourceFrameIdentity(
-                AsyncCallstackKind kind,
-                ProcessIndex processIndex,
-                CodeAddressIndex codeAddress,
-                ulong methodId,
-                int state)
-            {
-                Kind = kind;
-                ProcessIndex = processIndex;
-                CodeAddress = codeAddress;
-                MethodId = methodId;
-                State = state;
-            }
-
-            public bool Equals(AsyncStackSourceFrameIdentity other) =>
-                Kind == other.Kind &&
-                ProcessIndex == other.ProcessIndex &&
-                CodeAddress == other.CodeAddress &&
-                MethodId == other.MethodId &&
-                State == other.State;
-
-            public override bool Equals(object obj) =>
-                obj is AsyncStackSourceFrameIdentity other && Equals(other);
-
-            public override int GetHashCode()
-            {
-                unchecked
-                {
-                    int hash = (int)Kind;
-                    hash = (hash * 397) ^ (int)ProcessIndex;
-                    hash = (hash * 397) ^ (int)CodeAddress;
-                    hash = (hash * 397) ^ MethodId.GetHashCode();
-                    return (hash * 397) ^ State;
-                }
-            }
-
-            private readonly AsyncCallstackKind Kind;
-            private readonly ProcessIndex ProcessIndex;
-            private readonly CodeAddressIndex CodeAddress;
-            private readonly ulong MethodId;
-            private readonly int State;
-        }
-
-        private readonly struct AsyncManagedMethodIdentity : IEquatable<AsyncManagedMethodIdentity>
-        {
-            public AsyncManagedMethodIdentity(ModuleFileIndex module, int token, string name)
-            {
-                Module = module;
-                Token = token;
-                Name = name;
-            }
-
-            public bool Equals(AsyncManagedMethodIdentity other) =>
-                Module == other.Module && Token == other.Token &&
-                string.Equals(Name, other.Name, StringComparison.Ordinal);
-
-            public override bool Equals(object obj) =>
-                obj is AsyncManagedMethodIdentity other && Equals(other);
-
-            public override int GetHashCode()
-            {
-                unchecked
-                {
-                    int hash = ((int)Module * 397) ^ Token;
-                    return (hash * 397) ^ (Name?.GetHashCode() ?? 0);
-                }
-            }
-
-            private readonly ModuleFileIndex Module;
-            private readonly int Token;
-            private readonly string Name;
-        }
+        private AsyncCpuStackSourceBuilder m_asyncStackSourceBuilder;
 
         // These are boring caches of frame names which speed things up a bit.  
         private Dictionary<double, StackSourceFrameIndex> m_nodeNameInternTable;
