@@ -1,6 +1,7 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using System;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -20,6 +21,7 @@ namespace Microsoft.Diagnostics.Tracing.Tests.Computers
             List<StitchedFrame> frames = StartupFrames();
             var pipeline = new AsyncStackTransformPipeline();
 
+            Assert.False(pipeline.EnableActiveAsyncFrameAnnotations);
             pipeline.ApplyInPlace(Context(frames, diagnostics));
 
             Assert.Equal(new[] { CA(10), CA(11), CA(14) }, frames.Select(frame => frame.CodeAddress));
@@ -28,6 +30,18 @@ namespace Microsoft.Diagnostics.Tracing.Tests.Computers
                 frames[1].Presentation);
             Assert.Equal(1, diagnostics.V1SynchronousMoveNextFramesNormalized);
             Assert.Equal(2, diagnostics.V1SynchronousStartupFramesCollapsed);
+        }
+
+        [Fact]
+        public void MaximumContextAncestryDepth_MustBePositive()
+        {
+            var pipeline = new AsyncStackTransformPipeline();
+
+            Assert.Throws<ArgumentOutOfRangeException>(
+                () => pipeline.MaximumContextAncestryDepth = 0);
+            Assert.Equal(
+                AsyncContextAncestryAugmenter.DefaultMaximumDepth,
+                pipeline.MaximumContextAncestryDepth);
         }
 
         [Fact]
@@ -211,7 +225,9 @@ namespace Microsoft.Diagnostics.Tracing.Tests.Computers
             };
 
         private static StitchedFrame Sync(int codeAddress, StitchSyncFrameKind kind = StitchSyncFrameKind.None) =>
-            StitchedFrame.CreateSync(new StitchSyncFrame(CA(codeAddress), MethodIndex.Invalid, kind));
+            StitchedFrame.CreateSync(
+                new StitchSyncFrame(CA(codeAddress), MethodIndex.Invalid, kind),
+                null);
 
         private static AsyncStackTransformContext Context(
             List<StitchedFrame> frames,

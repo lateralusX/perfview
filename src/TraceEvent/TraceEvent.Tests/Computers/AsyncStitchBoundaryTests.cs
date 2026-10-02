@@ -38,6 +38,29 @@ namespace TraceEventTests
         }
 
         [Theory]
+        [InlineData(
+            "Namespace.Type+<FooAsync>d__17.MoveNext()",
+            "Namespace.Type.FooAsync",
+            "d__17")]
+        [InlineData(
+            "Namespace.Outer+Nested+<Run>d_4.MoveNext()",
+            "Namespace.Outer.Nested.Run",
+            "d_4")]
+        public void TryGetLogicalStateMachineMethodName_ReturnsGeneratedSuffix(
+            string methodName,
+            string expectedLogicalName,
+            string expectedStateMachineSuffix)
+        {
+            Assert.True(
+                AsyncStitchBoundary.TryGetLogicalStateMachineMethodName(
+                    methodName,
+                    out string logicalName,
+                    out string stateMachineSuffix));
+            Assert.Equal(expectedLogicalName, logicalName);
+            Assert.Equal(expectedStateMachineSuffix, stateMachineSuffix);
+        }
+
+        [Theory]
         [InlineData("Continuation_Wrapper_0", true, 0)]
         [InlineData("Continuation_Wrapper_31", true, 31)]                                                     // last valid slot
         [InlineData("Continuation_Wrapper_32", false, -1)]                                                    // one past the pool

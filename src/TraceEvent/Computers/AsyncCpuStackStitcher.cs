@@ -22,6 +22,22 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <summary>A suspended-ancestry frame spliced in from an async call stack segment (an async frame that
         /// is <b>not</b> physically present on the native sync stack because it is awaiting).</summary>
         AsyncRemaining,
+
+        /// <summary>A historical parent-context frame reached through a dispatcher creation relationship.</summary>
+        AsyncContextParent,
+    }
+
+    /// <summary>The async-context membership of a <see cref="StitchedFrame"/>.</summary>
+    public enum StitchedFrameContextKind
+    {
+        /// <summary>The frame does not belong to an async context.</summary>
+        None = 0,
+
+        /// <summary>The frame belongs to an async context active on the sampled execution stack.</summary>
+        Active,
+
+        /// <summary>The frame belongs to a historical creation-parent context.</summary>
+        HistoricalParent,
     }
 
     /// <summary>How a <see cref="StitchedFrame"/> should be presented when it is interned.</summary>
@@ -150,6 +166,17 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <summary>The presentation requested for this frame.</summary>
         public readonly StitchedFramePresentation Presentation;
 
+        /// <summary>The async activation to which this frame belongs, or null for physical root frames.</summary>
+        public readonly AsyncCallStack Context;
+
+        /// <summary>How <see cref="Context"/> participates in the stitched stack.</summary>
+        public StitchedFrameContextKind ContextKind =>
+            Context == null
+                ? StitchedFrameContextKind.None
+                : (Origin == StitchedFrameOrigin.AsyncContextParent
+                    ? StitchedFrameContextKind.HistoricalParent
+                    : StitchedFrameContextKind.Active);
+
         private StitchedFrame(
             StitchedFrameOrigin origin,
             CodeAddressIndex codeAddress,
@@ -157,7 +184,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             AsyncCallStackFrames segment,
             int segmentFrameIndex,
             StitchSyncFrameKind syncFrameKind,
-            StitchedFramePresentation presentation)
+            StitchedFramePresentation presentation,
+            AsyncCallStack context)
         {
             Origin = origin;
             CodeAddress = codeAddress;
@@ -166,37 +194,78 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             SegmentFrameIndex = segmentFrameIndex;
             SyncFrameKind = syncFrameKind;
             Presentation = presentation;
+            Context = context;
         }
 
         /// <summary>Creates a stitched frame that preserves a native sync frame.</summary>
-        public static StitchedFrame CreateSync(StitchSyncFrame frame) =>
+        public static StitchedFrame CreateSync(
+            StitchSyncFrame frame,
+            AsyncCallStack context) =>
             new StitchedFrame(
                 StitchedFrameOrigin.Sync, frame.CodeAddress, frame.Method, null, -1, frame.Kind,
-                StitchedFramePresentation.Native);
+                StitchedFramePresentation.Native, context);
 
         /// <summary>Creates the physically present current V1 frame with its logical async identity.</summary>
         public static StitchedFrame CreateAsyncCurrent(
-            CodeAddressIndex codeAddress, MethodIndex method, AsyncCallStackFrames segment, int segmentFrameIndex) =>
+            CodeAddressIndex codeAddress,
+            MethodIndex method,
+            AsyncCallStack context,
+            int segmentFrameIndex) =>
             new StitchedFrame(
-                StitchedFrameOrigin.AsyncCurrent, codeAddress, method, segment, segmentFrameIndex,
-                StitchSyncFrameKind.None, StitchedFramePresentation.LogicalStateMachineMethod);
+                StitchedFrameOrigin.AsyncCurrent, codeAddress, method, context.Frames, segmentFrameIndex,
+                StitchSyncFrameKind.None, StitchedFramePresentation.LogicalStateMachineMethod,
+                context);
 
         /// <summary>Creates a suspended-ancestry frame from an async call-stack segment.</summary>
-        public static StitchedFrame CreateAsync(AsyncCallStackFrames segment, int segmentFrameIndex) =>
+        public static StitchedFrame CreateAsync(AsyncCallStack context, int segmentFrameIndex) =>
             new StitchedFrame(
                 StitchedFrameOrigin.AsyncRemaining,
-                segment.CodeAddressAt(segmentFrameIndex),
+                context.Frames.CodeAddressAt(segmentFrameIndex),
                 MethodIndex.Invalid,
-                segment,
+                context.Frames,
                 segmentFrameIndex,
                 StitchSyncFrameKind.None,
-                segment.Kind == AsyncCallstackKind.StateMachineAsync
+                context.Frames.Kind == AsyncCallstackKind.StateMachineAsync
                     ? StitchedFramePresentation.LogicalStateMachineMethod
-                    : StitchedFramePresentation.Native);
+                    : StitchedFramePresentation.Native,
+                context);
+
+        /// <summary>Creates a historical parent-context frame reached through dispatcher creation ancestry.</summary>
+        public static StitchedFrame CreateAsyncContextParent(
+            AsyncCallStack context, int segmentFrameIndex) =>
+            new StitchedFrame(
+                StitchedFrameOrigin.AsyncContextParent,
+                context.Frames.CodeAddressAt(segmentFrameIndex),
+                MethodIndex.Invalid,
+                context.Frames,
+                segmentFrameIndex,
+                StitchSyncFrameKind.None,
+                context.Frames.Kind == AsyncCallstackKind.StateMachineAsync
+                    ? StitchedFramePresentation.LogicalStateMachineMethod
+                    : StitchedFramePresentation.Native,
+                context);
 
         /// <summary>Returns this frame with a different presentation while preserving its structural identity.</summary>
         public StitchedFrame WithPresentation(StitchedFramePresentation presentation) =>
-            new StitchedFrame(Origin, CodeAddress, Method, Segment, SegmentFrameIndex, SyncFrameKind, presentation);
+            new StitchedFrame(
+                Origin, CodeAddress, Method, Segment, SegmentFrameIndex, SyncFrameKind, presentation,
+                Context);
+    }
+
+    /// <summary>The complete leaf-to-root output span emitted for one active async activation.</summary>
+    internal readonly struct AsyncSegmentPlacement
+    {
+        internal AsyncSegmentPlacement(
+            AsyncCallStack activation, int leafIndex, int rootIndexExclusive)
+        {
+            Activation = activation;
+            LeafIndex = leafIndex;
+            RootIndexExclusive = rootIndexExclusive;
+        }
+
+        internal AsyncCallStack Activation { get; }
+        internal int LeafIndex { get; }
+        internal int RootIndexExclusive { get; }
     }
 
     /// <summary>
@@ -257,8 +326,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// </summary>
         public int V1ReentrantFramesCollapsed;
 
-        /// <summary>V1 method-builder <c>Start</c> frames removed by the conservative presentation transform from
-        /// a recognized <c>stateMachine.MoveNext -&gt; methodBuilder.Start+</c> sequence.</summary>
+        /// <summary>Generated V1 startup frames removed by the conservative presentation transform. When an exact
+        /// matching kickoff follows <c>stateMachine.MoveNext -&gt; methodBuilder.Start+</c>, the generated
+        /// <c>MoveNext</c> and builder frames are folded into that native kickoff so its full signature is retained;
+        /// otherwise only the known builder frames are removed.</summary>
         public int V1SynchronousStartupFramesCollapsed;
 
         /// <summary>Known System.Private.CoreLib async implementation frames removed by the optional runtime-specific
@@ -353,9 +424,19 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     public sealed class StitchResult
     {
         public StitchResult(IReadOnlyList<StitchedFrame> frames, StitchDiagnostics diagnostics)
+            : this(frames, diagnostics, Array.Empty<AsyncSegmentPlacement>())
+        {
+        }
+
+        internal StitchResult(
+            IReadOnlyList<StitchedFrame> frames,
+            StitchDiagnostics diagnostics,
+            IReadOnlyList<AsyncSegmentPlacement> segmentPlacements)
         {
             Frames = frames ?? throw new ArgumentNullException(nameof(frames));
             Diagnostics = diagnostics ?? throw new ArgumentNullException(nameof(diagnostics));
+            SegmentPlacements =
+                segmentPlacements ?? throw new ArgumentNullException(nameof(segmentPlacements));
         }
 
         /// <summary>The stitched frames, leaf-&gt;root (the native leaf first, the thread/process root last).</summary>
@@ -363,6 +444,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         /// <summary>Soft anomalies observed while stitching.</summary>
         public StitchDiagnostics Diagnostics { get; }
+
+        internal IReadOnlyList<AsyncSegmentPlacement> SegmentPlacements { get; }
     }
 
     /// <summary>
@@ -424,9 +507,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
             var diagnostics = new StitchDiagnostics();
             var output = new List<StitchedFrame>(syncLeafToRoot.Count + 8);
+            var placements = new List<AsyncSegmentPlacement>(segmentsRootToLeaf?.Count ?? 0);
             StitchInto(syncLeafToRoot, segmentsRootToLeaf, qpc, boundaries.Classify, null,
-                index.MethodCompletionObserved, processIndex, methodOf, trace, output, diagnostics);
-            return new StitchResult(output, diagnostics);
+                index.MethodCompletionObserved, processIndex, methodOf, trace, output, diagnostics, placements);
+            return new StitchResult(output, diagnostics, placements);
         }
 
         /// <summary>
@@ -463,9 +547,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
             var diagnostics = new StitchDiagnostics();
             var output = new List<StitchedFrame>(syncLeafToRoot.Count + 8);
+            var placements = new List<AsyncSegmentPlacement>(segmentsRootToLeaf?.Count ?? 0);
             StitchInto(syncLeafToRoot, segmentsRootToLeaf, qpc, classify, methodCompletionObserved, null,
-                ProcessIndex.Invalid, methodOf, trace, output, diagnostics);
-            return new StitchResult(output, diagnostics);
+                ProcessIndex.Invalid, methodOf, trace, output, diagnostics, placements);
+            return new StitchResult(output, diagnostics, placements);
         }
 
         internal static void StitchInto(
@@ -480,6 +565,24 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             List<StitchedFrame> output,
             StitchDiagnostics diagnostics)
         {
+            StitchInto(
+                syncLeafToRoot, segmentsRootToLeaf, qpc, classify, methodCompletionObserved,
+                processIndex, methodOf, trace, output, diagnostics, null);
+        }
+
+        internal static void StitchInto(
+            IReadOnlyList<StitchSyncFrame> syncLeafToRoot,
+            IReadOnlyList<AsyncCallStack> segmentsRootToLeaf,
+            long qpc,
+            Func<CodeAddressIndex, AsyncStitchBoundaryInfo> classify,
+            Func<ProcessIndex, AsyncCallstackKind, long, bool> methodCompletionObserved,
+            ProcessIndex processIndex,
+            Func<CodeAddressIndex, MethodIndex> methodOf,
+            bool trace,
+            List<StitchedFrame> output,
+            StitchDiagnostics diagnostics,
+            List<AsyncSegmentPlacement> placements)
+        {
             if (syncLeafToRoot is null) throw new ArgumentNullException(nameof(syncLeafToRoot));
             if (classify is null) throw new ArgumentNullException(nameof(classify));
             if (methodCompletionObserved is null) throw new ArgumentNullException(nameof(methodCompletionObserved));
@@ -488,7 +591,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             if (diagnostics is null) throw new ArgumentNullException(nameof(diagnostics));
 
             StitchInto(syncLeafToRoot, segmentsRootToLeaf, qpc, classify, null, methodCompletionObserved,
-                processIndex, methodOf, trace, output, diagnostics);
+                processIndex, methodOf, trace, output, diagnostics, placements);
         }
 
         private static void StitchInto(
@@ -502,10 +605,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             Func<CodeAddressIndex, MethodIndex> methodOf,
             bool trace,
             List<StitchedFrame> output,
-            StitchDiagnostics diagnostics)
+            StitchDiagnostics diagnostics,
+            List<AsyncSegmentPlacement> placements)
         {
             output.Clear();
             diagnostics.Clear();
+            placements?.Clear();
 
             // With no segment there is no suspended ancestry to splice. An empty segment is also unusable: it may
             // identify an active async context, but it has no current frame with which to align a physical boundary.
@@ -515,7 +620,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             {
                 for (int i = 0; i < syncLeafToRoot.Count; i++)
                 {
-                    output.Add(StitchedFrame.CreateSync(syncLeafToRoot[i]));
+                    output.Add(StitchedFrame.CreateSync(
+                        syncLeafToRoot[i], null));
                 }
                 return;
             }
@@ -540,7 +646,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     diagnostics.V2SyncLayoutUsed++;
                     for (int i = 0; i < syncLeafToRoot.Count; i++)
                     {
-                        output.Add(StitchedFrame.CreateSync(syncLeafToRoot[i]));
+                        output.Add(StitchedFrame.CreateSync(
+                            syncLeafToRoot[i], null));
                     }
                     if (trace)
                     {
@@ -554,7 +661,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     diagnostics.V2SyncLayoutUsed++;
                     for (int i = 0; i < syncLeafToRoot.Count; i++)
                     {
-                        output.Add(StitchedFrame.CreateSync(syncLeafToRoot[i]));
+                        output.Add(StitchedFrame.CreateSync(
+                            syncLeafToRoot[i], null));
                     }
                     if (trace)
                     {
@@ -568,6 +676,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             for (int segmentIndex = segmentsRootToLeaf.Count - 1; segmentIndex >= 0; segmentIndex--)
             {
                 AsyncCallStack segment = segmentsRootToLeaf[segmentIndex];
+                int segmentLeafIndex = output.Count;
                 diagnostics.SegmentsProcessed++;
                 AsyncCallStackFrames frames = segment.Frames;
                 AsyncCallstackKind kind = frames.Kind;
@@ -620,8 +729,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
                     output.Add(i == currentSyncPos
                         ? StitchedFrame.CreateAsyncCurrent(
-                            syncLeafToRoot[i].CodeAddress, syncLeafToRoot[i].Method, frames, completed)
-                        : StitchedFrame.CreateSync(syncLeafToRoot[i]));
+                            syncLeafToRoot[i].CodeAddress, syncLeafToRoot[i].Method, segment, completed)
+                        : StitchedFrame.CreateSync(
+                            syncLeafToRoot[i], segment));
                 }
 
                 // The current (running) frame is segment[completed]; it is physically present on the sync stack
@@ -634,8 +744,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
                 for (int k = completed + 1; k < frames.FrameCount; k++)
                 {
-                    output.Add(StitchedFrame.CreateAsync(frames, k));
+                    output.Add(StitchedFrame.CreateAsync(segment, k));
                 }
+
+                placements?.Add(
+                    new AsyncSegmentPlacement(segment, segmentLeafIndex, output.Count));
 
                 if (trace && diagnostics.CanRetainMessage)
                 {
@@ -687,7 +800,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             // Emit the clean sync tail (includes the thread/process root).
             for (int i = pSync; i < syncLeafToRoot.Count; i++)
             {
-                output.Add(StitchedFrame.CreateSync(syncLeafToRoot[i]));
+                output.Add(StitchedFrame.CreateSync(
+                    syncLeafToRoot[i], null));
             }
 
         }

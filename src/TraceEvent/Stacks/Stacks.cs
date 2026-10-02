@@ -981,6 +981,7 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
             var frameIndexOffset = (int)(frameIndex - m_frameStartIndex);
             Debug.Assert(0 <= frameIndexOffset && frameIndexOffset < m_frameIntern.Count);
             var frameName = m_frameIntern[frameIndexOffset].FrameName;
+            var displayPrefix = m_frameIntern[frameIndexOffset].DisplayPrefix;
             var baseFrameIndex = m_frameIntern[frameIndexOffset].BaseFrameIndex;
             if (baseFrameIndex != StackSourceFrameIndex.Invalid)
             {
@@ -996,15 +997,15 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
 
                 if(!string.IsNullOrEmpty(frameName))
                 {
-                    return baseName + " " + frameName;
+                    return displayPrefix + baseName + " " + frameName;
                 }
 
-                return baseName;
+                return displayPrefix + baseName;
             }
             var moduleName = m_moduleIntern[m_frameIntern[frameIndexOffset].ModuleIndex - m_moduleStackStartIndex];
             if (moduleName.Length == 0)
             {
-                return frameName;
+                return displayPrefix + frameName;
             }
 
             if (!fullModulePath)
@@ -1026,7 +1027,7 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
                 moduleName = moduleName.Substring(0, lastDot);
             }
 
-            return moduleName + "!" + frameName;
+            return displayPrefix + moduleName + "!" + frameName;
         }
         /// <summary>
         /// Given a StackSourceFrameIndex return the StackSourceModuleIndex associated with the frame 
@@ -1082,6 +1083,18 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
             StackSourceModuleIndex moduleIndex,
             int identityTag)
         {
+            return FrameIntern(frameName, moduleIndex, identityTag, string.Empty);
+        }
+
+        /// <summary>
+        /// Lookup or create a frame with a presentation prefix that appears before the module-qualified frame name.
+        /// </summary>
+        internal StackSourceFrameIndex FrameIntern(
+            string frameName,
+            StackSourceModuleIndex moduleIndex,
+            int identityTag,
+            string displayPrefix)
+        {
             Debug.Assert(identityTag > 0);
             if (moduleIndex == StackSourceModuleIndex.Invalid)
             {
@@ -1089,7 +1102,9 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
             }
 
             Debug.Assert(frameName != null);
-            return m_frameIntern.Intern(new FrameInfo(frameName, moduleIndex, identityTag)) + m_frameStartIndex;
+            Debug.Assert(displayPrefix != null);
+            return m_frameIntern.Intern(
+                new FrameInfo(frameName, moduleIndex, identityTag, displayPrefix)) + m_frameStartIndex;
         }
 
         /// <summary>
@@ -1143,11 +1158,20 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
             {
             }
             public FrameInfo(string frameName, StackSourceModuleIndex moduleIndex, int identityTag)
+                : this(frameName, moduleIndex, identityTag, string.Empty)
+            {
+            }
+            public FrameInfo(
+                string frameName,
+                StackSourceModuleIndex moduleIndex,
+                int identityTag,
+                string displayPrefix)
             {
                 ModuleIndex = moduleIndex;
                 FrameName = frameName;
                 BaseFrameIndex = StackSourceFrameIndex.Invalid;
                 IdentityTag = identityTag;
+                DisplayPrefix = displayPrefix;
             }
             public FrameInfo(string frameSuffix, StackSourceFrameIndex baseFrame)
                 : this(frameSuffix, baseFrame, 0)
@@ -1159,16 +1183,19 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
                 BaseFrameIndex = baseFrame;
                 FrameName = frameSuffix;
                 IdentityTag = identityTag;
+                DisplayPrefix = string.Empty;
             }
             // TODO we could make this smaller if we care since BaseFrame and ModuleIndex are never used together.  
             public readonly StackSourceFrameIndex BaseFrameIndex;
             public readonly StackSourceModuleIndex ModuleIndex;
             public readonly string FrameName;       // This is the suffix if this is a derived frame
             public readonly int IdentityTag;
+            public readonly string DisplayPrefix;
 
             public override int GetHashCode()
             {
-                return (int)ModuleIndex + (int)BaseFrameIndex + FrameName.GetHashCode() + IdentityTag * 31;
+                return (int)ModuleIndex + (int)BaseFrameIndex + FrameName.GetHashCode() +
+                    DisplayPrefix.GetHashCode() + IdentityTag * 31;
             }
             public override bool Equals(object obj) { throw new NotImplementedException(); }
             public bool Equals(FrameInfo other)
@@ -1176,7 +1203,8 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
                 return ModuleIndex == other.ModuleIndex &&
                     BaseFrameIndex == other.BaseFrameIndex &&
                     FrameName == other.FrameName &&
-                    IdentityTag == other.IdentityTag;
+                    IdentityTag == other.IdentityTag &&
+                    DisplayPrefix == other.DisplayPrefix;
             }
         }
         private struct CallStackInfo : IEquatable<CallStackInfo>

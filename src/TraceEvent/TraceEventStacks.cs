@@ -22,13 +22,15 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
             ProcessIndex processIndex,
             CodeAddressIndex codeAddress,
             ulong methodId,
-            int state)
+            int state,
+            bool isHistoricalParent)
         {
             Kind = kind;
             ProcessIndex = processIndex;
             CodeAddress = codeAddress;
             MethodId = methodId;
             State = state;
+            IsHistoricalParent = isHistoricalParent;
         }
 
         /// <summary>The async-profiler call-stack kind.</summary>
@@ -48,6 +50,9 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
         /// meaningful for <see cref="AsyncCallstackKind.RuntimeAsync"/>.
         /// </summary>
         public int State { get; }
+
+        /// <summary>True when this frame was reconstructed from a historical creation-parent context.</summary>
+        public bool IsHistoricalParent { get; }
     }
 
     /// <summary>

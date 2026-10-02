@@ -80,6 +80,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <summary>True if no async call stacks were recorded (used to avoid persisting an empty index).</summary>
         public bool IsEmpty => _threads.Count == 0;
 
+        internal bool HasCreationRecords => _creations.Count != 0;
+
         /// <summary>The threads that have at least one recorded async call stack.</summary>
         public IEnumerable<AsyncThreadKey> Threads => _threads.Keys;
 
@@ -244,28 +246,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             ulong childDispatcherId,
             long qpc)
         {
-            EnsureCreationIndexes();
-            var key = new DispatcherKey(processIndex, childDispatcherId);
-            if (!_creationsByChild.TryGetValue(key, out List<int> creations))
-            {
-                return null;
-            }
-
-            int lo = 0;
-            int hi = creations.Count;
-            while (lo < hi)
-            {
-                int mid = (lo + hi) >> 1;
-                if (_creations[creations[mid]].CreateQpc <= qpc)
-                {
-                    lo = mid + 1;
-                }
-                else
-                {
-                    hi = mid;
-                }
-            }
-            return lo == 0 ? null : MaterializeCreation(_creations[creations[lo - 1]]);
+            int creationIndex = GetCreationIndex(processIndex, childDispatcherId, qpc);
+            return creationIndex < 0 ? null : MaterializeCreation(_creations[creationIndex]);
         }
 
         /// <summary>Returns the creation record associated with <paramref name="callStack"/>, if captured.</summary>
@@ -362,6 +344,55 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 ? null
                 : GetAsyncCallStack(creation.Thread, creation.ParentDispatcherId, creation.CreateQpc);
             return parent != null;
+        }
+
+        internal bool TryGetParentAsyncCallStack(
+            AsyncCallStack child,
+            List<AsyncCallStack> candidates,
+            out AsyncCallStack parent,
+            out long parentQpc)
+        {
+            if (child == null)
+            {
+                throw new ArgumentNullException(nameof(child));
+            }
+            if (candidates == null)
+            {
+                throw new ArgumentNullException(nameof(candidates));
+            }
+
+            int creationIndex = GetCreationIndex(
+                child.Thread.ProcessIndex, child.DispatcherId, child.StartQpc);
+            if (creationIndex < 0)
+            {
+                parent = null;
+                parentQpc = 0;
+                return false;
+            }
+
+            AsyncDispatcherCreationRecord creation = _creations[creationIndex];
+            parentQpc = creation.CreateQpc;
+            if (creation.ParentDispatcherId == 0 ||
+                !_threads.TryGetValue(creation.Thread, out ThreadCallStacks callStacks))
+            {
+                parent = null;
+                return false;
+            }
+
+            candidates.Clear();
+            callStacks.Query(
+                creation.CreateQpc, candidates, this, cacheMaterialized: true);
+            for (int i = candidates.Count - 1; i >= 0; i--)
+            {
+                if (candidates[i].DispatcherId == creation.ParentDispatcherId)
+                {
+                    parent = candidates[i];
+                    return true;
+                }
+            }
+
+            parent = null;
+            return false;
         }
 
         internal void GetAsyncCallStacks(AsyncThreadKey thread, long qpc, List<AsyncCallStack> result)
@@ -535,6 +566,35 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 index.Add(key, creations);
             }
             creations.Add(creationIndex);
+        }
+
+        private int GetCreationIndex(
+            ProcessIndex processIndex,
+            ulong childDispatcherId,
+            long qpc)
+        {
+            EnsureCreationIndexes();
+            var key = new DispatcherKey(processIndex, childDispatcherId);
+            if (!_creationsByChild.TryGetValue(key, out List<int> creations))
+            {
+                return -1;
+            }
+
+            int lo = 0;
+            int hi = creations.Count;
+            while (lo < hi)
+            {
+                int mid = (lo + hi) >> 1;
+                if (_creations[creations[mid]].CreateQpc <= qpc)
+                {
+                    lo = mid + 1;
+                }
+                else
+                {
+                    hi = mid;
+                }
+            }
+            return lo == 0 ? -1 : creations[lo - 1];
         }
 
         private static AsyncDispatcherCreation MaterializeCreation(AsyncDispatcherCreationRecord creation) =>

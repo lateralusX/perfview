@@ -90,6 +90,32 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         public bool EnableConservativeTransforms { get; set; }
 
         /// <summary>
+        /// Enables structural async-context ancestry. When enabled, historical creation-parent frames retain their
+        /// activation identity and role so renderers can distinguish contexts after presentation transforms run.
+        /// </summary>
+        public bool EnableContextAncestry { get; set; }
+
+        /// <summary>
+        /// Prefixes active async-profiler frames with <c>[Async]</c> when they are interned. Retained synchronous
+        /// frames keep their ordinary names, and this option does not add sync/async transition frames.
+        /// </summary>
+        public bool EnableActiveAsyncFrameAnnotations { get; set; }
+
+        /// <summary>The maximum number of missing parent contexts inserted for one active segment.</summary>
+        public int MaximumContextAncestryDepth
+        {
+            get => m_maximumContextAncestryDepth;
+            set
+            {
+                if (value <= 0)
+                {
+                    throw new ArgumentOutOfRangeException(nameof(MaximumContextAncestryDepth));
+                }
+                m_maximumContextAncestryDepth = value;
+            }
+        }
+
+        /// <summary>
         /// Enables cleanup tied to the current System.Private.CoreLib implementation. This is disabled by default
         /// because these frames are implementation details rather than part of the async-profiler contract.
         /// </summary>
@@ -204,9 +230,6 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     continue;
                 }
 
-                frames[i] = frame.WithPresentation(StitchedFramePresentation.LogicalStateMachineMethod);
-                context.Diagnostics.V1SynchronousMoveNextFramesNormalized++;
-
                 int end = i + 1;
                 while (end < frames.Count &&
                        frames[end].Origin == StitchedFrameOrigin.Sync &&
@@ -215,12 +238,26 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     end++;
                 }
 
+                int builderCount = end - i - 1;
+                if (builderCount != 0 &&
+                    end < frames.Count &&
+                    context.TraceLog != null &&
+                    IsMatchingV1Kickoff(context.TraceLog, frame, frames[end]))
+                {
+                    int generatedFrameCount = builderCount + 1;
+                    frames.RemoveRange(i, generatedFrameCount);
+                    context.Diagnostics.V1SynchronousStartupFramesCollapsed += generatedFrameCount;
+                    continue;
+                }
+
+                frames[i] = frame.WithPresentation(StitchedFramePresentation.LogicalStateMachineMethod);
+                context.Diagnostics.V1SynchronousMoveNextFramesNormalized++;
+
                 if (end == i + 1)
                 {
                     continue;
                 }
 
-                int builderCount = end - i - 1;
                 frames.RemoveRange(i + 1, builderCount);
                 context.Diagnostics.V1SynchronousStartupFramesCollapsed += builderCount;
             }
@@ -281,13 +318,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 return false;
             }
 
-            // Keep the resumed AsyncCurrent representation. Remove the still-unwinding startup MoveNext,
-            // its builder Start frames, and the matching kickoff method. Await-registration frames remain for
-            // the optional SPC pass, which independently controls runtime-implementation cleanup.
-            int startupFrameCount = kickoffIndex - startupMoveNextIndex;
-            frames.RemoveAt(kickoffIndex);
-            frames.RemoveRange(startupMoveNextIndex, startupFrameCount);
-            context.Diagnostics.V1ReentrantFramesCollapsed += startupFrameCount + 1;
+            // Keep the resumed AsyncCurrent representation. The exact match proves that the intervening CoreLib
+            // await-registration frames, duplicate startup MoveNext, builder Start frames, and kickoff all belong
+            // to the same reentrant activation, so collapse that complete generated span.
+            int duplicateFrameCount = kickoffIndex - registrationStart + 1;
+            frames.RemoveRange(registrationStart, duplicateFrameCount);
+            context.Diagnostics.V1ReentrantFramesCollapsed += duplicateFrameCount;
             return true;
         }
 
@@ -369,6 +405,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         #region private
 
+        private int m_maximumContextAncestryDepth = AsyncContextAncestryAugmenter.DefaultMaximumDepth;
         private readonly List<AsyncStackTransform> m_customTransforms;
 
         #endregion

@@ -46,6 +46,9 @@ namespace TraceEventTests
 
             public void MarkMethodCompletionObserved(AsyncCallstackKind kind) => _methodCompletionObserved.Add(kind);
 
+            public void RegisterMethod(int codeAddr, int method) =>
+                _methodOf[CA(codeAddr)] = MI(method);
+
             /// <summary>Declares a sync frame with a code address whose method is <paramref name="method"/>.</summary>
             public StitchSyncFrame Sync(int codeAddr, int method) => new StitchSyncFrame(CA(codeAddr), MI(method));
 
@@ -819,6 +822,584 @@ namespace TraceEventTests
             Assert.Equal(Scenario.CA(54), result.Frames[4].CodeAddress);
             Assert.Equal(2, result.Diagnostics.SegmentsProcessed);
             Assert.Equal(0, result.Diagnostics.BoundariesNotFound);
+
+            Assert.Equal(2, result.SegmentPlacements.Count);
+            Assert.Same(leaf, result.SegmentPlacements[0].Activation);
+            Assert.Equal(0, result.SegmentPlacements[0].LeafIndex);
+            Assert.Equal(2, result.SegmentPlacements[0].RootIndexExclusive);
+            Assert.Same(root, result.SegmentPlacements[1].Activation);
+            Assert.Equal(2, result.SegmentPlacements[1].LeafIndex);
+            Assert.Equal(4, result.SegmentPlacements[1].RootIndexExclusive);
+        }
+
+        [Fact]
+        public void ContextAncestry_TracksEveryHistoricalParentSegment()
+        {
+            var s = new Scenario();
+            s.MarkMethodCompletionObserved(AsyncCallstackKind.RuntimeAsync);
+            var index = new AsyncCallStacksIndex();
+            ProcessIndex process = (ProcessIndex)1;
+            var sampledThread = new AsyncThreadKey(process, 100);
+            var p3Thread = new AsyncThreadKey(process, 200);
+            var p2Thread = new AsyncThreadKey(process, 300);
+            var p1Thread = new AsyncThreadKey(process, 400);
+
+            AsyncCallStack outer = AddIndexedSegment(
+                s, index, sampledThread, dispatcherId: 40, depth: 0,
+                startQpc: 0, endQpc: 2000, firstCodeAddress: 400);
+            AsyncCallStack p3 = AddIndexedSegment(
+                s, index, p3Thread, dispatcherId: 30, depth: 0,
+                startQpc: 200, endQpc: 800, firstCodeAddress: 300);
+            AsyncCallStack p2 = AddIndexedSegment(
+                s, index, p2Thread, dispatcherId: 20, depth: 0,
+                startQpc: 400, endQpc: 900, firstCodeAddress: 200);
+            AsyncCallStack p1 = AddIndexedSegment(
+                s, index, p1Thread, dispatcherId: 10, depth: 0,
+                startQpc: 600, endQpc: 950, firstCodeAddress: 100);
+            AsyncCallStack inner = AddIndexedSegment(
+                s, index, sampledThread, dispatcherId: 1, depth: 1,
+                startQpc: 1000, endQpc: 2000, firstCodeAddress: 10);
+
+            index.AddCreation(sampledThread, childDispatcherId: 30, parentDispatcherId: 40, createQpc: 100);
+            index.AddCreation(p3Thread, childDispatcherId: 20, parentDispatcherId: 30, createQpc: 300);
+            index.AddCreation(p2Thread, childDispatcherId: 10, parentDispatcherId: 20, createQpc: 500);
+            index.AddCreation(p1Thread, childDispatcherId: 1, parentDispatcherId: 10, createQpc: 800);
+
+            var sync = new[]
+            {
+                s.Sync(50, 10),
+                s.Boundary(51, Wrapper(0)),
+                s.Sync(52, 400),
+                s.Boundary(53, Wrapper(0)),
+                s.Sync(54, 999),
+            };
+
+            StitchResult structural = s.Run(sync, new[] { outer, inner });
+            var frames = structural.Frames.ToList();
+            var augmenter = new AsyncContextAncestryAugmenter();
+
+            augmenter.Augment(
+                index,
+                new[] { outer, inner },
+                structural.SegmentPlacements,
+                frames,
+                AsyncContextAncestryAugmenter.DefaultMaximumDepth);
+
+            Assert.Equal(
+                new[]
+                {
+                    StitchedFrameOrigin.Sync,
+                    StitchedFrameOrigin.AsyncRemaining,
+                    StitchedFrameOrigin.AsyncContextParent,
+                    StitchedFrameOrigin.AsyncContextParent,
+                    StitchedFrameOrigin.AsyncContextParent,
+                    StitchedFrameOrigin.AsyncContextParent,
+                    StitchedFrameOrigin.AsyncContextParent,
+                    StitchedFrameOrigin.AsyncContextParent,
+                    StitchedFrameOrigin.Sync,
+                    StitchedFrameOrigin.AsyncRemaining,
+                    StitchedFrameOrigin.Sync,
+                },
+                frames.Select(frame => frame.Origin));
+
+            Assert.Equal(
+                new[]
+                {
+                    StitchedFrameContextKind.Active,
+                    StitchedFrameContextKind.Active,
+                    StitchedFrameContextKind.HistoricalParent,
+                    StitchedFrameContextKind.HistoricalParent,
+                    StitchedFrameContextKind.HistoricalParent,
+                    StitchedFrameContextKind.HistoricalParent,
+                    StitchedFrameContextKind.HistoricalParent,
+                    StitchedFrameContextKind.HistoricalParent,
+                    StitchedFrameContextKind.Active,
+                    StitchedFrameContextKind.Active,
+                    StitchedFrameContextKind.None,
+                },
+                frames.Select(frame => frame.ContextKind));
+            Assert.All(frames.Take(2), frame => Assert.Same(inner, frame.Context));
+            Assert.All(frames.Skip(2).Take(2), frame => Assert.Same(p1, frame.Context));
+            Assert.All(frames.Skip(4).Take(2), frame => Assert.Same(p2, frame.Context));
+            Assert.All(frames.Skip(6).Take(2), frame => Assert.Same(p3, frame.Context));
+            Assert.All(frames.Skip(8).Take(2), frame => Assert.Same(outer, frame.Context));
+            Assert.Null(frames[10].Context);
+            Assert.Equal(
+                new[]
+                {
+                    Scenario.CA(100), Scenario.CA(101),
+                    Scenario.CA(200), Scenario.CA(201),
+                    Scenario.CA(300), Scenario.CA(301),
+                },
+                frames
+                    .Where(frame => frame.Origin == StitchedFrameOrigin.AsyncContextParent)
+                    .Select(frame => frame.CodeAddress));
+
+            var limitedFrames = structural.Frames.ToList();
+            augmenter.Augment(
+                index,
+                new[] { outer, inner },
+                structural.SegmentPlacements,
+                limitedFrames,
+                maximumDepth: 2);
+            Assert.Equal(
+                new[]
+                {
+                    Scenario.CA(100), Scenario.CA(101),
+                    Scenario.CA(200), Scenario.CA(201),
+                },
+                limitedFrames
+                    .Where(frame => frame.Origin == StitchedFrameOrigin.AsyncContextParent)
+                    .Select(frame => frame.CodeAddress));
+            Assert.DoesNotContain(
+                limitedFrames,
+                frame => frame.ContextKind == StitchedFrameContextKind.HistoricalParent &&
+                         ReferenceEquals(frame.Context, p3));
+        }
+
+        [Fact]
+        public void ContextAncestry_PreservesOverlappingDistinctParentActivations()
+        {
+            var s = new Scenario();
+            var index = new AsyncCallStacksIndex();
+            ProcessIndex process = (ProcessIndex)1;
+            var childThread = new AsyncThreadKey(process, 100);
+            var parentThread = new AsyncThreadKey(process, 200);
+            var grandparentThread = new AsyncThreadKey(process, 300);
+            AsyncCallStack child = AddIndexedSegment(
+                s, index, childThread, dispatcherId: 1, depth: 0,
+                startQpc: 100, endQpc: 200, firstCodeAddress: 10, frameCount: 3);
+            AsyncCallStack parent = AddIndexedSegment(
+                s, index, parentThread, dispatcherId: 2, depth: 0,
+                startQpc: 50, endQpc: 99, firstCodeAddress: 11, frameCount: 3);
+            AsyncCallStack grandparent = AddIndexedSegment(
+                s, index, grandparentThread, dispatcherId: 3, depth: 0,
+                startQpc: 0, endQpc: 99, firstCodeAddress: 12, frameCount: 3);
+            index.AddCreation(
+                parentThread, childDispatcherId: 1, parentDispatcherId: 2, createQpc: 90);
+            index.AddCreation(
+                grandparentThread, childDispatcherId: 2, parentDispatcherId: 3, createQpc: 40);
+
+            var frames = new List<StitchedFrame>
+            {
+                StitchedFrame.CreateAsync(child, 0),
+                StitchedFrame.CreateAsync(child, 1),
+                StitchedFrame.CreateAsync(child, 2),
+            };
+            var placements = new[]
+            {
+                new AsyncSegmentPlacement(child, leafIndex: 0, rootIndexExclusive: 3),
+            };
+
+            new AsyncContextAncestryAugmenter().Augment(
+                index,
+                new[] { child },
+                placements,
+                frames,
+                AsyncContextAncestryAugmenter.DefaultMaximumDepth);
+
+            StitchedFrame[] historical = frames
+                .Where(frame => frame.Origin == StitchedFrameOrigin.AsyncContextParent)
+                .ToArray();
+            Assert.Equal(
+                new[]
+                {
+                    Scenario.CA(11), Scenario.CA(12), Scenario.CA(13),
+                    Scenario.CA(12), Scenario.CA(13), Scenario.CA(14),
+                },
+                historical.Select(frame => frame.CodeAddress));
+            Assert.All(historical.Take(3), frame => Assert.Same(parent, frame.Context));
+            Assert.All(historical.Skip(3), frame => Assert.Same(grandparent, frame.Context));
+        }
+
+        [Fact]
+        public void ContextAncestry_PreservesRecursiveV1ParentWithIdenticalFramesAndStates()
+        {
+            var s = new Scenario();
+            var index = new AsyncCallStacksIndex();
+            ProcessIndex process = (ProcessIndex)1;
+            var childThread = new AsyncThreadKey(process, 100);
+            var parentThread = new AsyncThreadKey(process, 200);
+            AsyncCallStack child = AddIndexedSegment(
+                s, index, childThread, dispatcherId: 1, depth: 0,
+                startQpc: 100, endQpc: 200, firstCodeAddress: 10, frameCount: 2,
+                kind: AsyncCallstackKind.StateMachineAsync,
+                frameStates: new[] { 1, 2 });
+            AsyncCallStack parent = AddIndexedSegment(
+                s, index, parentThread, dispatcherId: 2, depth: 0,
+                startQpc: 0, endQpc: 90, firstCodeAddress: 10, frameCount: 2,
+                kind: AsyncCallstackKind.StateMachineAsync,
+                frameStates: new[] { 1, 2 });
+            index.AddCreation(
+                parentThread, childDispatcherId: 1, parentDispatcherId: 2, createQpc: 50);
+
+            var frames = new List<StitchedFrame>
+            {
+                StitchedFrame.CreateAsync(child, 0),
+                StitchedFrame.CreateAsync(child, 1),
+            };
+            var placements = new[]
+            {
+                new AsyncSegmentPlacement(child, leafIndex: 0, rootIndexExclusive: 2),
+            };
+
+            new AsyncContextAncestryAugmenter().Augment(
+                index,
+                new[] { child },
+                placements,
+                frames,
+                AsyncContextAncestryAugmenter.DefaultMaximumDepth);
+
+            StitchedFrame[] historical = frames
+                .Where(frame =>
+                    frame.ContextKind == StitchedFrameContextKind.HistoricalParent)
+                .ToArray();
+            Assert.Equal(2, historical.Length);
+            Assert.All(historical, frame => Assert.Same(parent, frame.Context));
+        }
+
+        [Fact]
+        public void ContextAncestry_DoesNotTrimAcrossAsyncKinds()
+        {
+            var s = new Scenario();
+            var index = new AsyncCallStacksIndex();
+            ProcessIndex process = (ProcessIndex)1;
+            var childThread = new AsyncThreadKey(process, 100);
+            var parentThread = new AsyncThreadKey(process, 200);
+            AsyncCallStack child = AddIndexedSegment(
+                s, index, childThread, dispatcherId: 1, depth: 0,
+                startQpc: 100, endQpc: 200, firstCodeAddress: 10,
+                kind: AsyncCallstackKind.RuntimeAsync);
+            AddIndexedSegment(
+                s, index, parentThread, dispatcherId: 2, depth: 0,
+                startQpc: 0, endQpc: 90, firstCodeAddress: 10,
+                kind: AsyncCallstackKind.StateMachineAsync);
+            index.AddCreation(
+                parentThread, childDispatcherId: 1, parentDispatcherId: 2, createQpc: 50);
+
+            var frames = new List<StitchedFrame>
+            {
+                StitchedFrame.CreateAsync(child, 0),
+                StitchedFrame.CreateAsync(child, 1),
+            };
+            var placements = new[]
+            {
+                new AsyncSegmentPlacement(child, leafIndex: 0, rootIndexExclusive: 2),
+            };
+
+            new AsyncContextAncestryAugmenter().Augment(
+                index,
+                new[] { child },
+                placements,
+                frames,
+                AsyncContextAncestryAugmenter.DefaultMaximumDepth);
+
+            Assert.Equal(
+                2,
+                frames.Count(frame =>
+                    frame.ContextKind == StitchedFrameContextKind.HistoricalParent));
+        }
+
+        [Fact]
+        public void ContextAncestry_DoesNotTrimDifferentV1States()
+        {
+            var s = new Scenario();
+            var index = new AsyncCallStacksIndex();
+            ProcessIndex process = (ProcessIndex)1;
+            var childThread = new AsyncThreadKey(process, 100);
+            var parentThread = new AsyncThreadKey(process, 200);
+            AsyncCallStack child = AddIndexedSegment(
+                s, index, childThread, dispatcherId: 1, depth: 0,
+                startQpc: 100, endQpc: 200, firstCodeAddress: 10,
+                kind: AsyncCallstackKind.StateMachineAsync,
+                frameStates: new[] { 1, 2 });
+            AddIndexedSegment(
+                s, index, parentThread, dispatcherId: 2, depth: 0,
+                startQpc: 0, endQpc: 90, firstCodeAddress: 10,
+                kind: AsyncCallstackKind.StateMachineAsync,
+                frameStates: new[] { 1, 3 });
+            index.AddCreation(
+                parentThread, childDispatcherId: 1, parentDispatcherId: 2, createQpc: 50);
+
+            var frames = new List<StitchedFrame>
+            {
+                StitchedFrame.CreateAsync(child, 0),
+                StitchedFrame.CreateAsync(child, 1),
+            };
+            var placements = new[]
+            {
+                new AsyncSegmentPlacement(child, leafIndex: 0, rootIndexExclusive: 2),
+            };
+
+            new AsyncContextAncestryAugmenter().Augment(
+                index,
+                new[] { child },
+                placements,
+                frames,
+                AsyncContextAncestryAugmenter.DefaultMaximumDepth);
+
+            Assert.Equal(
+                2,
+                frames.Count(frame =>
+                    frame.ContextKind == StitchedFrameContextKind.HistoricalParent));
+        }
+
+        [Fact]
+        public void ContextAncestry_CycleStopsBeforeRepeatingAnActivation()
+        {
+            var s = new Scenario();
+            var index = new AsyncCallStacksIndex();
+            ProcessIndex process = (ProcessIndex)1;
+            var aThread = new AsyncThreadKey(process, 100);
+            var bThread = new AsyncThreadKey(process, 200);
+            AsyncCallStack a = AddIndexedSegment(
+                s, index, aThread, dispatcherId: 1, depth: 0,
+                startQpc: 0, endQpc: 100, firstCodeAddress: 10);
+            AsyncCallStack b = AddIndexedSegment(
+                s, index, bThread, dispatcherId: 2, depth: 0,
+                startQpc: 0, endQpc: 100, firstCodeAddress: 20);
+
+            index.AddCreation(
+                bThread, childDispatcherId: 1, parentDispatcherId: 2, createQpc: 0);
+            index.AddCreation(
+                aThread, childDispatcherId: 2, parentDispatcherId: 1, createQpc: 0);
+
+            var frames = new List<StitchedFrame>
+            {
+                StitchedFrame.CreateAsync(a, 0),
+            };
+            var placements = new[]
+            {
+                new AsyncSegmentPlacement(a, leafIndex: 0, rootIndexExclusive: 1),
+            };
+            var augmenter = new AsyncContextAncestryAugmenter();
+
+            Assert.True(augmenter.Prepare(index, new[] { a }));
+            augmenter.Augment(
+                index,
+                new[] { a },
+                placements,
+                frames,
+                AsyncContextAncestryAugmenter.DefaultMaximumDepth);
+
+            StitchedFrame[] parents = frames
+                .Where(frame => frame.Origin == StitchedFrameOrigin.AsyncContextParent)
+                .ToArray();
+            Assert.Equal(b.Frames.FrameCount, parents.Length);
+            Assert.All(parents, frame => Assert.Same(b, frame.Context));
+            Assert.DoesNotContain(parents, frame => ReferenceEquals(a, frame.Context));
+        }
+
+        [Fact]
+        public void ContextAncestry_SharedParentIsInsertedForEachIndependentSample()
+        {
+            var s = new Scenario();
+            var index = new AsyncCallStacksIndex();
+            ProcessIndex process = (ProcessIndex)1;
+            var parentThread = new AsyncThreadKey(process, 100);
+            var firstChildThread = new AsyncThreadKey(process, 200);
+            var secondChildThread = new AsyncThreadKey(process, 300);
+            AsyncCallStack parent = AddIndexedSegment(
+                s, index, parentThread, dispatcherId: 10, depth: 0,
+                startQpc: 0, endQpc: 500, firstCodeAddress: 100);
+            AsyncCallStack firstChild = AddIndexedSegment(
+                s, index, firstChildThread, dispatcherId: 1, depth: 0,
+                startQpc: 100, endQpc: 200, firstCodeAddress: 10);
+            AsyncCallStack secondChild = AddIndexedSegment(
+                s, index, secondChildThread, dispatcherId: 2, depth: 0,
+                startQpc: 200, endQpc: 300, firstCodeAddress: 20);
+
+            index.AddCreation(
+                parentThread, childDispatcherId: 1, parentDispatcherId: 10, createQpc: 50);
+            index.AddCreation(
+                parentThread, childDispatcherId: 2, parentDispatcherId: 10, createQpc: 150);
+
+            var augmenter = new AsyncContextAncestryAugmenter();
+            AssertSharedParent(firstChild);
+            AssertSharedParent(secondChild);
+
+            void AssertSharedParent(AsyncCallStack child)
+            {
+                var frames = new List<StitchedFrame>
+                {
+                    StitchedFrame.CreateAsync(child, 0),
+                };
+                var placements = new[]
+                {
+                    new AsyncSegmentPlacement(child, leafIndex: 0, rootIndexExclusive: 1),
+                };
+
+                Assert.True(augmenter.Prepare(index, new[] { child }));
+                augmenter.Augment(
+                    index,
+                    new[] { child },
+                    placements,
+                    frames,
+                    AsyncContextAncestryAugmenter.DefaultMaximumDepth);
+
+                StitchedFrame[] parents = frames
+                    .Where(frame => frame.Origin == StitchedFrameOrigin.AsyncContextParent)
+                    .ToArray();
+                Assert.Equal(parent.Frames.FrameCount, parents.Length);
+                Assert.All(parents, frame => Assert.Same(parent, frame.Context));
+            }
+        }
+
+        [Fact]
+        public void ContextParent_UsesExactCompletionAndUnwindHistoryAtChildCreation()
+        {
+            var s = new Scenario();
+            s.MarkMethodCompletionObserved(AsyncCallstackKind.RuntimeAsync);
+            var index = new AsyncCallStacksIndex();
+            ProcessIndex process = (ProcessIndex)1;
+            var parentThread = new AsyncThreadKey(process, 100);
+            var childThread = new AsyncThreadKey(process, 200);
+            index.StartCompletionAvailabilityEpoch(process, startQpc: 0);
+            index.MarkMethodCompletionObserved(
+                process, AsyncCallstackKind.RuntimeAsync, qpc: 20);
+
+            AsyncCallStack parent = AddIndexedSegment(
+                s, index, parentThread, dispatcherId: 10, depth: 0,
+                startQpc: 0, endQpc: 90, firstCodeAddress: 100,
+                frameCount: 3,
+                methodCompletions: new[] { new AsyncCallStack.CompletionDelta(20, 1) },
+                exceptionCompletions: new[] { new AsyncCallStack.CompletionDelta(30, 1) });
+            AsyncCallStack child = AddIndexedSegment(
+                s, index, childThread, dispatcherId: 1, depth: 0,
+                startQpc: 100, endQpc: 2000, firstCodeAddress: 10);
+            index.AddCreation(
+                parentThread, childDispatcherId: 1, parentDispatcherId: 10, createQpc: 50);
+
+            var sync = new[]
+            {
+                s.Sync(50, 10),
+                s.Boundary(51, Wrapper(0)),
+                s.Sync(52, 999),
+            };
+            StitchResult structural = s.Run(sync, new[] { child });
+            var frames = structural.Frames.ToList();
+
+            new AsyncContextAncestryAugmenter().Augment(
+                index,
+                new[] { child },
+                structural.SegmentPlacements,
+                frames,
+                AsyncContextAncestryAugmenter.DefaultMaximumDepth);
+
+            Assert.Equal(
+                new[] { Scenario.CA(102) },
+                frames
+                    .Where(frame => frame.Origin == StitchedFrameOrigin.AsyncContextParent)
+                    .Select(frame => frame.CodeAddress));
+            Assert.All(
+                frames.Where(frame => frame.Origin == StitchedFrameOrigin.AsyncContextParent),
+                frame =>
+                {
+                    Assert.Same(parent, frame.Context);
+                    Assert.Equal(StitchedFrameContextKind.HistoricalParent, frame.ContextKind);
+                });
+        }
+
+        [Theory]
+        [InlineData(AsyncCallstackKind.RuntimeAsync, AsyncCallstackKind.RuntimeAsync)]
+        [InlineData(AsyncCallstackKind.RuntimeAsync, AsyncCallstackKind.StateMachineAsync)]
+        [InlineData(AsyncCallstackKind.StateMachineAsync, AsyncCallstackKind.RuntimeAsync)]
+        [InlineData(AsyncCallstackKind.StateMachineAsync, AsyncCallstackKind.StateMachineAsync)]
+        public void ContextAncestry_PreservesParentKindAcrossMixedKinds(
+            AsyncCallstackKind childKind,
+            AsyncCallstackKind parentKind)
+        {
+            var s = new Scenario();
+            var index = new AsyncCallStacksIndex();
+            ProcessIndex process = (ProcessIndex)1;
+            var parentThread = new AsyncThreadKey(process, 100);
+            var childThread = new AsyncThreadKey(process, 200);
+            AsyncCallStack parent = AddIndexedSegment(
+                s, index, parentThread, dispatcherId: 10, depth: 0,
+                startQpc: 0, endQpc: 90, firstCodeAddress: 100,
+                kind: parentKind);
+            AsyncCallStack child = AddIndexedSegment(
+                s, index, childThread, dispatcherId: 1, depth: 0,
+                startQpc: 100, endQpc: 2000, firstCodeAddress: 10,
+                kind: childKind);
+            index.AddCreation(
+                parentThread, childDispatcherId: 1, parentDispatcherId: 10, createQpc: 50);
+
+            var frames = new List<StitchedFrame>
+            {
+                StitchedFrame.CreateAsync(child, 0),
+            };
+            var placements = new[]
+            {
+                new AsyncSegmentPlacement(child, leafIndex: 0, rootIndexExclusive: 1),
+            };
+
+            new AsyncContextAncestryAugmenter().Augment(
+                index,
+                new[] { child },
+                placements,
+                frames,
+                AsyncContextAncestryAugmenter.DefaultMaximumDepth);
+
+            StitchedFrame[] parentContextFrames =
+                frames.Where(frame => frame.Origin == StitchedFrameOrigin.AsyncContextParent).ToArray();
+            Assert.Equal(parent.Frames.FrameCount, parentContextFrames.Length);
+            Assert.All(parentContextFrames, frame =>
+            {
+                Assert.Same(parent.Frames, frame.Segment);
+                Assert.Equal(
+                    parentKind == AsyncCallstackKind.StateMachineAsync
+                        ? StitchedFramePresentation.LogicalStateMachineMethod
+                        : StitchedFramePresentation.Native,
+                    frame.Presentation);
+            });
+        }
+
+        private static AsyncCallStack AddIndexedSegment(
+            Scenario scenario,
+            AsyncCallStacksIndex index,
+            AsyncThreadKey thread,
+            ulong dispatcherId,
+            int depth,
+            long startQpc,
+            long endQpc,
+            int firstCodeAddress,
+            int frameCount = 2,
+            AsyncCallStack.CompletionDelta[] methodCompletions = null,
+            AsyncCallStack.CompletionDelta[] exceptionCompletions = null,
+            AsyncCallstackKind kind = AsyncCallstackKind.RuntimeAsync,
+            int[] frameStates = null)
+        {
+            var methodIds = new ulong[frameCount];
+            for (int i = 0; i < methodIds.Length; i++)
+            {
+                methodIds[i] = (ulong)(firstCodeAddress + i);
+            }
+            index.Add(
+                thread,
+                kind,
+                methodIds,
+                frameStates: kind == AsyncCallstackKind.StateMachineAsync
+                    ? (frameStates ?? new int[frameCount])
+                    : null,
+                dispatcherId,
+                depth,
+                continuationIndexBase: 0,
+                wrapperCount: 32,
+                startQpc,
+                endQpc,
+                methodCompletions: methodCompletions ?? Array.Empty<AsyncCallStack.CompletionDelta>(),
+                exceptionCompletions: exceptionCompletions ?? Array.Empty<AsyncCallStack.CompletionDelta>(),
+                wrapperResets: Array.Empty<long>());
+
+            AsyncCallStack segment =
+                index.GetAsyncCallStack(thread, dispatcherId, startQpc);
+            for (int i = 0; i < frameCount; i++)
+            {
+                segment.Frames.SetCodeAddressAt(i, Scenario.CA(firstCodeAddress + i));
+                scenario.RegisterMethod(firstCodeAddress + i, firstCodeAddress + i);
+            }
+            return segment;
         }
 
         [Fact]
@@ -870,6 +1451,14 @@ namespace TraceEventTests
             Assert.Equal(2, result.Diagnostics.V1InfrastructureFramesCollapsed);
             Assert.Equal(1, result.Diagnostics.V1InlineFallbackUsed);
             Assert.Equal(0, result.Diagnostics.BoundariesNotFound);
+
+            Assert.Equal(2, result.SegmentPlacements.Count);
+            Assert.Same(inner, result.SegmentPlacements[0].Activation);
+            Assert.Equal(0, result.SegmentPlacements[0].LeafIndex);
+            Assert.Equal(3, result.SegmentPlacements[0].RootIndexExclusive);
+            Assert.Same(outer, result.SegmentPlacements[1].Activation);
+            Assert.Equal(3, result.SegmentPlacements[1].LeafIndex);
+            Assert.Equal(8, result.SegmentPlacements[1].RootIndexExclusive);
         }
 
         [Fact]

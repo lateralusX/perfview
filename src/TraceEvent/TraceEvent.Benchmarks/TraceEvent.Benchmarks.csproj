@@ -6,7 +6,7 @@
     <TargetFrameworks>net8.0;net462</TargetFrameworks>
     <RootNamespace>TraceEventBenchmarks</RootNamespace>
     <AssemblyName>TraceEvent.Benchmarks</AssemblyName>
-    <Description>BenchmarkDotNet benchmarks for TraceEvent demanglers.</Description>
+    <Description>BenchmarkDotNet benchmarks for TraceEvent.</Description>
     <Copyright>Copyright © Microsoft 2025</Copyright>
   </PropertyGroup>
 

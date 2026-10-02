@@ -527,7 +527,21 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// </summary>
         public static bool TryGetLogicalStateMachineMethodName(string methodName, out string logicalName)
         {
+            return TryGetLogicalStateMachineMethodName(
+                methodName, out logicalName, out _);
+        }
+
+        /// <summary>
+        /// Converts a compiler-generated V1 state-machine method name to its logical source method and returns
+        /// the generated state-machine suffix, such as <c>d__5</c>, for unambiguous fallback presentation.
+        /// </summary>
+        public static bool TryGetLogicalStateMachineMethodName(
+            string methodName,
+            out string logicalName,
+            out string stateMachineSuffix)
+        {
             logicalName = null;
+            stateMachineSuffix = null;
             if (string.IsNullOrEmpty(methodName))
             {
                 return false;
@@ -539,25 +553,30 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 return false;
             }
 
-            int stateMachineSuffix = methodName.LastIndexOf(">d__", moveNext, StringComparison.Ordinal);
-            if (stateMachineSuffix < 0)
+            int stateMachineSuffixStart = methodName.LastIndexOf(">d__", moveNext, StringComparison.Ordinal);
+            if (stateMachineSuffixStart < 0)
             {
-                stateMachineSuffix = methodName.LastIndexOf(">d", moveNext, StringComparison.Ordinal);
+                stateMachineSuffixStart = methodName.LastIndexOf(">d", moveNext, StringComparison.Ordinal);
             }
-            if (stateMachineSuffix < 0)
+            if (stateMachineSuffixStart < 0)
             {
                 return false;
             }
 
-            int methodStart = methodName.LastIndexOf("+<", stateMachineSuffix, StringComparison.Ordinal);
-            if (methodStart < 0 || methodStart + 2 >= stateMachineSuffix)
+            int methodStart = methodName.LastIndexOf("+<", stateMachineSuffixStart, StringComparison.Ordinal);
+            if (methodStart < 0 || methodStart + 2 >= stateMachineSuffixStart)
             {
                 return false;
             }
 
             string declaringType = methodName.Substring(0, methodStart).Replace('+', '.');
-            string sourceMethod = methodName.Substring(methodStart + 2, stateMachineSuffix - methodStart - 2);
+            string sourceMethod = methodName.Substring(
+                methodStart + 2,
+                stateMachineSuffixStart - methodStart - 2);
             logicalName = declaringType + "." + sourceMethod;
+            stateMachineSuffix = methodName.Substring(
+                stateMachineSuffixStart + 1,
+                moveNext - stateMachineSuffixStart - 1);
             return true;
         }
     }
