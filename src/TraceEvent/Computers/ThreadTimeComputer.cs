@@ -44,6 +44,14 @@ namespace Microsoft.Diagnostics.Tracing
         /// <summary>
         /// Create a new ThreadTimeComputer, optionally stitching async-profiler ancestry into CPU and wait stacks.
         /// </summary>
+        /// <param name="eventLog">The trace to compute stacks over.</param>
+        /// <param name="symbolReader">Used to resolve managed method symbols.</param>
+        /// <param name="stitchAsyncCallStacks">
+        /// Opt-in: when true and a usable async index exists, physical stacks with active async intervals use
+        /// <see cref="AsyncCpuStackStitcher"/> instead of the normal activity/TPL reconstruction, retaining the
+        /// configured thread/process or request roots. Stacks without usable async data keep existing behavior.
+        /// The two-argument constructor leaves this disabled; configure <see cref="AsyncStackTransforms"/> before generation.
+        /// </param>
         public ThreadTimeStackComputer(TraceLog eventLog, SymbolReader symbolReader, bool stitchAsyncCallStacks)
         {
             m_eventLog = eventLog;
@@ -109,22 +117,30 @@ namespace Microsoft.Diagnostics.Tracing
         public bool GroupByStartStopActivity;
 
         /// <summary>
-        /// True after generation when async stitching was requested and the trace contained async-profiler data.
+        /// True after generation initializes requested async stitching with a usable async index. Does not
+        /// guarantee a sampled stack matched an activation; consult <see cref="AsyncStitchDiagnostics"/>.
+        /// <see cref="TraceLog.HasAsyncProfilerEvents"/> alone is not sufficient to make this true.
         /// </summary>
         public bool AsyncStitchActive => m_asyncStackSourceBuilder != null;
 
         /// <summary>
         /// Ordered presentation transforms applied to stitched CPU and wait stacks before StackSource interning.
+        /// Conservative normalization is enabled by default; async-infrastructure cleanup, context ancestry, and active
+        /// frame annotations are opt-in. Custom transforms run last. Configure before stack generation;
+        /// samples without active async intervals do not enter this pipeline.
         /// </summary>
         public AsyncStackTransformPipeline AsyncStackTransforms { get; }
 
         /// <summary>
         /// Aggregate diagnostics from stitched CPU and wait stacks, or null when stitching was inactive.
+        /// Counters include normal stitching, fallback, and presentation activity as well as anomalies.
+        /// Messages are bounded.
         /// </summary>
         public StitchDiagnostics AsyncStitchDiagnostics => m_asyncStackSourceBuilder?.Diagnostics;
 
         /// <summary>
-        /// Emit per-segment stitch details into <see cref="AsyncStitchDiagnostics"/>.
+        /// Emit per-segment stitch details into <see cref="AsyncStitchDiagnostics"/>'s bounded messages.
+        /// Disabled by default; configure before generation.
         /// </summary>
         public bool TraceAsyncStitchSteps { get; set; }
 

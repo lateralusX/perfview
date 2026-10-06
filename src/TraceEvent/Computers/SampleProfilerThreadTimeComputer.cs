@@ -35,13 +35,12 @@ namespace Microsoft.Diagnostics.Tracing
         /// <param name="eventLog">The trace to compute stacks over.</param>
         /// <param name="symbolReader">Used to resolve managed method symbols.</param>
         /// <param name="stitchAsyncCallStacks">
-        /// Opt-in: when true <b>and</b> the trace contains async-profiler data
-        /// (<see cref="TraceLog.AsyncCallStacks"/> is present), each CPU sample that has active async call stacks
-        /// is emitted as a native call stack with the suspended async continuation ancestry stitched in (see
+        /// Opt-in: when true and a usable persisted async index exists, samples with a physical stack and active
+        /// async intervals are projected with suspended async continuation ancestry (see
         /// <see cref="AsyncCpuStackStitcher"/>), bypassing the activity/TPL reconstruction for that sample. Samples
-        /// without active async segments (and all samples when the trace has no async-profiler data) keep the
-        /// normal behavior. This is off by default because the stitched view is only meaningful with async-profiler
-        /// data present.
+        /// without usable async intervals keep the normal behavior, including their physical wrapper/dispatcher
+        /// frames. The two-argument constructor leaves this disabled. Presentation options are configured through
+        /// <see cref="AsyncStackTransforms"/> before generation.
         /// </param>
         public SampleProfilerThreadTimeComputer(TraceLog eventLog, SymbolReader symbolReader, bool stitchAsyncCallStacks)
         {
@@ -80,21 +79,20 @@ namespace Microsoft.Diagnostics.Tracing
         public bool IgnoreApplicationInsightsRequestsWithRelatedActivityId  { get; set; } = true;
 
         /// <summary>
-        /// True once <see cref="GenerateThreadTimeStacks"/> has run if async CPU stack stitching was both requested
-        /// (via the <c>stitchAsyncCallStacks</c> constructor argument) <b>and</b> the trace actually contained
-        /// async-profiler data (so stitching was performed). When stitching was requested but the trace had no
-        /// async-profiler data this stays false and the normal (non-stitched) path was used for every sample —
-        /// callers can use this to warn that <c>--async</c> had no effect. Always false when stitching was not
-        /// requested.
+        /// True after generation initializes async CPU stitching because it was requested and a usable async index
+        /// exists. Does not guarantee any sampled stack matched an activation; consult <see cref="AsyncStitchDiagnostics"/>
+        /// for outcomes. False when stitching was not requested or no usable index exists, even if
+        /// <see cref="TraceLog.HasAsyncProfilerEvents"/> is true.
         /// </summary>
         public bool AsyncStitchActive => m_asyncStackSourceBuilder != null;
 
         /// <summary>
         /// Ordered presentation transforms applied after mandatory structural async stitching and before StackSource
         /// interning. Conservative strong-signal normalization is enabled by default; runtime-specific
-        /// System.Private.CoreLib cleanup is opt-in; custom transforms run last in registration order. This pipeline
+        /// async-infrastructure cleanup is opt-in; custom transforms run last in registration order. This pipeline
         /// is only invoked for samples with active async segments. Samples without active async data continue through
-        /// the existing synchronous ActivityComputer path unchanged.
+        /// the existing synchronous ActivityComputer path unchanged. Configure before
+        /// <see cref="GenerateThreadTimeStacks"/>; ancestry and annotation options are applied by the host builder/emitter.
         /// </summary>
         public AsyncStackTransformPipeline AsyncStackTransforms { get; }
 
@@ -565,8 +563,9 @@ namespace Microsoft.Diagnostics.Tracing
 
         /// <summary>
         /// Aggregate soft diagnostics from every stitched CPU sample of the last
-        /// <see cref="GenerateThreadTimeStacks"/> run, or null when async stitching was never active. All counters
-        /// at 0 indicates every stitched sample merged cleanly.
+        /// <see cref="GenerateThreadTimeStacks"/> run, or null when async stitching was inactive. Counters include
+        /// successful segments and normal fallback/presentation activity as well as anomalies; nonzero counters
+        /// do not by themselves indicate failure. Diagnostic messages are bounded.
         /// </summary>
         public StitchDiagnostics AsyncStitchDiagnostics => m_asyncStackSourceBuilder?.Diagnostics;
 

@@ -55,13 +55,16 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
     }
 
     /// <summary>
-    /// The instrumentation family that produced an async callstack: the runtime-async (V2) path captures
-    /// native instruction pointers, while the state-machine (V1) path captures compiler state-machine
-    /// method handles plus a per-frame state value. Names mirror the <see cref="AsyncEventID"/> families.
+    /// The instrumentation family that produced an async callstack. Both families encode native code
+    /// instruction pointers: V2 captures runtime-async continuation IPs; V1 captures state-machine
+    /// <c>MoveNext</c> body IPs plus raw signed compiler states. V1/V2 instrumentation is independent of
+    /// the buffer layout version and the per-event schema versions in <see cref="AsyncProfilerManifest"/>.
     /// </summary>
     public enum AsyncCallstackKind : byte
     {
+        /// <summary>V2 runtime-async instrumentation.</summary>
         RuntimeAsync = 0,
+        /// <summary>V1 compiler-generated state-machine instrumentation.</summary>
         StateMachineAsync = 1,
     }
 
@@ -126,7 +129,8 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
 
         /// <summary>
         /// Classifies a callstack event's frame family. StateMachineAsync callstacks (ids 16, 19) encode a
-        /// per-frame state value and carry CLR MethodIDs; RuntimeAsync callstacks encode native IPs only.
+        /// raw signed compiler state alongside each <c>MoveNext</c> body IP; RuntimeAsync callstacks
+        /// encode native continuation IPs without per-frame states.
         /// </summary>
         public static AsyncCallstackKind GetCallstackKind(AsyncEventID eventId) =>
             eventId == AsyncEventID.ResumeStateMachineAsyncCallstack || eventId == AsyncEventID.AppendStateMachineAsyncCallstack
@@ -142,10 +146,12 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
     /// does not statically know, and (b) track each event's emitted schema version.
     /// <para>
     /// The runtime emits the metadata only once per configuration revision (not per buffer), so a single
-    /// manifest instance must persist across all buffers of a session for the dynamic framing to take
-    /// effect on later buffers. <see cref="AsyncProfilerTraceEventParser"/> does this automatically; callers
-    /// of the static <see cref="AsyncProfilerTraceEventParser.ParseBuffer(byte[], AsyncProfilerManifest, IAsyncProfilerSubEventSink)"/>
-    /// overload should reuse one instance across buffers.
+    /// manifest instance must persist across buffers from the same process instance. The caller owns this
+    /// state: <see cref="Computers.AsyncProfilerComputer"/> maintains one manifest per process instance,
+    /// while direct decoder callers must pass their retained manifest to
+    /// <see cref="AsyncProfilerTraceEventParser.ParseBuffer(byte[], AsyncProfilerManifest, IAsyncProfilerSubEventSink)"/>.
+    /// The overload without a manifest creates fresh defaults for each call. Do not share a manifest between
+    /// different process instances.
     /// </para>
     /// </summary>
     public sealed class AsyncProfilerManifest
@@ -155,6 +161,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
         private readonly PayloadLengthFieldSize[] _fieldSize = new PayloadLengthFieldSize[256];
         private readonly byte[] _version = new byte[256];
 
+        /// <summary>Creates a manifest seeded with the known version-1 event layouts.</summary>
         public AsyncProfilerManifest()
         {
             // Seed with the built-in v1 layout for the ids we statically know (1..23). Unknown ids default
@@ -169,13 +176,19 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
         /// <summary>The payload-length prefix width to use when framing <paramref name="eventId"/>.</summary>
         public PayloadLengthFieldSize GetPayloadLengthFieldSize(AsyncEventID eventId) => _fieldSize[(byte)eventId];
 
-        /// <summary>The most recently advertised schema version of <paramref name="eventId"/> (0 if never described).</summary>
+        /// <summary>
+        /// The most recently advertised schema version of <paramref name="eventId"/>, or the built-in version 1
+        /// for a known event before metadata is seen. Unknown events default to 0.
+        /// </summary>
         public byte GetVersion(AsyncEventID eventId) => _version[(byte)eventId];
 
         /// <summary>Applies the manifest carried by an <c>AsyncProfilerMetadata</c> sub-event.</summary>
         public void Apply(in AsyncMetadataEvent metadata) => Apply(metadata.Manifest);
 
-        /// <summary>Applies a set of manifest entries, overriding the framing width and version for each listed id.</summary>
+        /// <summary>
+        /// Applies a set of manifest entries, overriding the framing width and version for each listed id.
+        /// Unlisted ids retain their previous entries; null or empty input leaves the manifest unchanged.
+        /// </summary>
         public void Apply(AsyncManifestEntry[] entries)
         {
             if (entries == null)
@@ -437,9 +450,9 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
     }
 
     /// <summary>
-    /// An async callstack sub-event. Frames are ordered leaf-first; <see cref="MethodIds"/> holds either
-    /// native IPs (RuntimeAsync kind) or CLR MethodIDs (StateMachineAsync kind), with <see cref="FrameStates"/>
-    /// carrying the per-frame state-machine state for StateMachineAsync callstacks (null for RuntimeAsync).
+    /// An async callstack sub-event. Frames are ordered leaf-first; <see cref="MethodIds"/> holds native code IPs
+    /// for both families, not CLR MethodLoad identifiers or MethodDesc handles. <see cref="FrameStates"/>
+    /// carries raw signed compiler states for StateMachineAsync callstacks (null for RuntimeAsync).
     /// A <see cref="IsCached"/> callstack (frame count 0) references a previously emitted callstack by
     /// dispatcher id and carries no frame data.
     /// </summary>
@@ -452,7 +465,9 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
         public readonly byte FrameCount;
         public readonly ulong ParentDispatcherId;
         public readonly ulong DispatcherId;
+        /// <summary>Native continuation IPs for V2, or state-machine <c>MoveNext</c> body IPs for V1.</summary>
         public readonly ulong[] MethodIds;
+        /// <summary>Raw V1 compiler states, not IL/native offsets; null for V2.</summary>
         public readonly int[] FrameStates;
 
         private AsyncCallstackEvent(AsyncEventID eventId, long timestampQpc, in AsyncProfilerBufferHeader header,
@@ -718,13 +733,29 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
     /// <summary>Reports a recoverable decode problem in a buffer (truncation, unexpected layout).</summary>
     public readonly struct AsyncProfilerParseError
     {
+        /// <summary>The decoding failure.</summary>
         public readonly string Message;
+        /// <summary>The byte offset of the failure within the buffer.</summary>
         public readonly int ByteOffset;
+        /// <summary>The decoded header, or null when the header could not be read.</summary>
+        public readonly AsyncProfilerBufferHeader? BufferHeader;
+        /// <summary>
+        /// The failing sub-event's QPC, or the last decoded QPC when its timestamp is unavailable.
+        /// Null when the header could not be read.
+        /// </summary>
+        public readonly long? TimestampQpc;
+        /// <summary>The failing sub-event's id, or null for a buffer-level failure.</summary>
+        public readonly AsyncEventID? EventId;
 
-        public AsyncProfilerParseError(string message, int byteOffset)
+        /// <summary>Creates a decode diagnostic, with any available buffer and sub-event context.</summary>
+        public AsyncProfilerParseError(string message, int byteOffset,
+            AsyncProfilerBufferHeader? bufferHeader = null, long? timestampQpc = null, AsyncEventID? eventId = null)
         {
             Message = message;
             ByteOffset = byteOffset;
+            BufferHeader = bufferHeader;
+            TimestampQpc = timestampQpc;
+            EventId = eventId;
         }
 
         public override string ToString() => "AsyncProfiler parse error @" + ByteOffset + ": " + Message;

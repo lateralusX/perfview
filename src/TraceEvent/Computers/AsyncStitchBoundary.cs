@@ -147,19 +147,29 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         public const string HostModuleName = "System.Private.CoreLib";
 
         /// <summary>
-        /// Classifies frames used by the V1 synchronous async-method startup sequence. Builder frames must be
-        /// declared in <c>System.Private.CoreLib!System.Runtime.CompilerServices</c>; the generated state-machine
-        /// <c>MoveNext</c> is expected in the application module.
+        /// Classifies synchronous frames used by async completion counting and presentation: generated V1
+        /// state-machine methods, known CoreLib builders and awaiters, and Task/execution-context infrastructure
+        /// shared by V1 and V2. These classifications are not dispatch boundaries; use <see cref="Classify"/>
+        /// for structural boundary recognition.
         /// </summary>
-        public static StitchSyncFrameKind ClassifyV1SynchronousFrame(string frameName) =>
-            ClassifyV1SynchronousFrame(frameName, IsHostModuleQualifiedFrame(frameName));
+        /// <param name="frameName">
+        /// A method name, optionally including parameters. CoreLib infrastructure requires the
+        /// <c>System.Private.CoreLib!</c> module prefix; generated V1 <c>MoveNext</c> methods do not.
+        /// </param>
+        public static StitchSyncFrameKind ClassifySynchronousFrame(string frameName) =>
+            ClassifySynchronousFrame(frameName, IsHostModuleQualifiedFrame(frameName));
 
         /// <summary>
-        /// Classifies a V1 synchronous-startup frame when the caller has already determined whether the method is
-        /// declared in <c>System.Private.CoreLib</c>. This overload supports TraceEvent's split module/method model,
-        /// where <c>TraceCodeAddress.ModuleName</c> and <c>FullMethodName</c> are separate.
+        /// Classifies an async-related synchronous frame when module ownership is supplied separately.
+        /// This supports TraceEvent's split module/method model, where <c>TraceCodeAddress.ModuleName</c>
+        /// and <c>FullMethodName</c> are separate.
         /// </summary>
-        public static StitchSyncFrameKind ClassifyV1SynchronousFrame(string frameName, bool isHostModule)
+        /// <param name="frameName">The qualified method name, optionally including a module prefix and parameters.</param>
+        /// <param name="isHostModule">
+        /// True when the method belongs to <see cref="HostModuleName"/>. Required for known runtime infrastructure,
+        /// but not for generated application state-machine methods.
+        /// </param>
+        public static StitchSyncFrameKind ClassifySynchronousFrame(string frameName, bool isHostModule)
         {
             string method = GetBareMethodName(frameName);
             if (method == AsyncStateMachineDispatcherMethodName)
@@ -178,9 +188,16 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 return StitchSyncFrameKind.None;
             }
 
-            if (IsKnownSystemPrivateCoreLibAsyncBridge(frameName, method))
+            StitchSyncFrameKind profilerKind = ClassifyAsyncProfilerInfrastructure(frameName, method);
+            if (profilerKind != StitchSyncFrameKind.None)
             {
-                return StitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure;
+                return profilerKind;
+            }
+
+            StitchSyncFrameKind bridgeKind = ClassifySystemPrivateCoreLibAsyncBridge(frameName, method);
+            if (bridgeKind != StitchSyncFrameKind.None)
+            {
+                return bridgeKind;
             }
 
             if (!IsRuntimeCompilerServicesMethod(frameName))
@@ -353,30 +370,133 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 "+ForceYieldingAwaiter.System.Runtime.CompilerServices.IStateMachineBoxAwareAwaiter.",
                 StringComparison.Ordinal) >= 0;
 
-        private static bool IsKnownSystemPrivateCoreLibAsyncBridge(string frameName, string method)
+        private static StitchSyncFrameKind ClassifySystemPrivateCoreLibAsyncBridge(
+            string frameName,
+            string method)
         {
-            if (IsMethodOnType(frameName, "System.Threading.Tasks.Task", method))
+            if (method == "Dispatch" &&
+                IsMethodOnType(frameName, "System.Threading.ThreadPoolWorkQueue", method))
             {
-                return method == "RunContinuations" ||
-                       method == "TrySetResult";
+                return StitchSyncFrameKind.SystemPrivateCoreLibThreadPoolDispatch;
+            }
+
+            if (IsMethodOnType(frameName, "System.Threading.Tasks.Task", method) ||
+                IsMethodOnType(frameName, "System.Threading.Tasks.Task`1", method))
+            {
+                if (method == "RunContinuations")
+                {
+                    return StitchSyncFrameKind.SystemPrivateCoreLibTaskRunContinuations;
+                }
+                if (method == "TrySetResult")
+                {
+                    return StitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult;
+                }
+            }
+
+            if ((IsMethodOnType(frameName, "System.Threading.Tasks.TaskCompletionSource", method) ||
+                 IsMethodOnType(frameName, "System.Threading.Tasks.TaskCompletionSource`1", method)) &&
+                method == "SetResult")
+            {
+                return StitchSyncFrameKind.SystemPrivateCoreLibTaskCompletionSourceSetResult;
             }
 
             if (IsMethodOnType(frameName, "System.Threading.Tasks.AwaitTaskContinuation", method))
             {
-                return method == "RunOrScheduleAction";
+                return method == "RunOrScheduleAction"
+                    ? StitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure
+                    : StitchSyncFrameKind.None;
             }
 
             if (IsMethodOnType(frameName, "System.Threading.ExecutionContext", method))
             {
                 return method == "RunInternal" ||
-                       method == "RunFromThreadPoolDispatchLoop";
+                       method == "RunFromThreadPoolDispatchLoop"
+                    ? StitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure
+                    : StitchSyncFrameKind.None;
             }
 
-            return false;
+            return StitchSyncFrameKind.None;
         }
 
-        private static bool IsMethodOnType(string frameName, string fullTypeName, string method) =>
-            frameName.IndexOf(fullTypeName + "." + method, StringComparison.Ordinal) >= 0;
+        private static StitchSyncFrameKind ClassifyAsyncProfilerInfrastructure(string frameName, string method)
+        {
+            if (method == "CreateDispatcher" &&
+                IsMethodOnType(frameName, "System.Runtime.CompilerServices.AsyncStateMachineDispatcherInfo", method))
+            {
+                return StitchSyncFrameKind.V1DispatcherCreationInfrastructure;
+            }
+
+            const string callstackType = "System.Runtime.CompilerServices.AsyncProfiler+AsyncCallstack";
+            if (method == "CaptureStateMachineAsyncCallstack" &&
+                IsMethodOnType(frameName, callstackType, method))
+            {
+                return StitchSyncFrameKind.AsyncProfilerCallstackCapture;
+            }
+            if ((method == "EmitAsyncCallstack" || method == "EmitEvent") &&
+                IsMethodOnType(frameName, callstackType, method))
+            {
+                return StitchSyncFrameKind.AsyncProfilerCallstackEmission;
+            }
+            if (method == "Resume" &&
+                IsMethodOnType(frameName, "System.Runtime.CompilerServices.AsyncProfiler+ResumeAsyncContext", method))
+            {
+                return StitchSyncFrameKind.AsyncProfilerContextResume;
+            }
+            if ((method == "ResetContext" &&
+                 IsMethodOnType(frameName, "System.Runtime.CompilerServices.AsyncProfiler+SyncPoint", method)) ||
+                ((method == "get_MethodId" || method == "get_StateOffset" || method == "cctor") &&
+                 IsMethodOnType(frameName, "System.Runtime.CompilerServices.AsyncStateMachineDiagnostics`1",
+                     method == "cctor" ? ".cctor" : method)) ||
+                ((method == "CallClassConstructor" || method == "InitClassHelper" || method == "InitClassSlow") &&
+                 IsMethodOnType(frameName, "System.Runtime.CompilerServices.InitHelpers", method)) ||
+                (method == "GetNonGCStaticBaseSlow" &&
+                 IsMethodOnType(frameName, "System.Runtime.CompilerServices.StaticsHelpers", method)) ||
+                (method == "GetDiagnosticData" && IsV1DispatcherInfrastructure(frameName)))
+            {
+                return StitchSyncFrameKind.AsyncProfilerInfrastructure;
+            }
+            return StitchSyncFrameKind.None;
+        }
+
+        private static bool IsMethodOnType(string frameName, string fullTypeName, string method)
+        {
+            if (GetBareMethodName(frameName) != (method == ".cctor" ? "cctor" : method))
+            {
+                return false;
+            }
+
+            int typeStart = IsHostModuleQualifiedFrame(frameName)
+                ? HostModuleName.Length + 1
+                : 0;
+            if (frameName.Length - typeStart <= fullTypeName.Length ||
+                string.CompareOrdinal(frameName, typeStart, fullTypeName, 0, fullTypeName.Length) != 0)
+            {
+                return false;
+            }
+
+            int typeEnd = typeStart + fullTypeName.Length;
+            if (fullTypeName.IndexOf('`') >= 0 && frameName[typeEnd] == '[')
+            {
+                int depth = 0;
+                do
+                {
+                    char c = frameName[typeEnd++];
+                    if (c == '[') depth++;
+                    else if (c == ']') depth--;
+                }
+                while (typeEnd < frameName.Length && depth != 0);
+                if (depth != 0)
+                {
+                    return false;
+                }
+            }
+
+            return typeEnd < frameName.Length &&
+                   frameName[typeEnd] == '.' &&
+                   string.CompareOrdinal(frameName, typeEnd + 1, method, 0, method.Length) == 0 &&
+                   (typeEnd + 1 + method.Length == frameName.Length ||
+                    frameName[typeEnd + 1 + method.Length] == '(');
+        }
 
         private static bool IsHostModuleQualifiedFrame(string frameName)
         {
@@ -519,6 +639,82 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             return typeStart < typeEnd ? frameName.Substring(typeStart, typeEnd - typeStart) : null;
+        }
+
+        internal static bool TryGetBoxedStateMachineTypeName(
+            string frameName, bool isHostModule, out string stateMachineType)
+        {
+            stateMachineType = null;
+            string method = GetBareMethodName(frameName);
+            if (!isHostModule ||
+                (method != "MoveNext" && method != "InstrumentedMoveNext") ||
+                !IsV1DispatcherInfrastructure(frameName))
+            {
+                return false;
+            }
+
+            string declaringType = GetDeclaringTypeName(frameName);
+            int argumentsStart = declaringType.IndexOf('[');
+            if (argumentsStart < 0 ||
+                !declaringType.Substring(0, argumentsStart).EndsWith(
+                    AsyncStateMachineBoxTypeSuffix + "`1", StringComparison.Ordinal) ||
+                declaringType[declaringType.Length - 1] != ']')
+            {
+                return false;
+            }
+
+            // Nested boxes include their builder's type arguments. TStateMachine is the final argument;
+            // commas inside its own constructed generic type must not split that argument.
+            int argumentStart = argumentsStart + 1;
+            int depth = 0;
+            for (int i = argumentStart; i < declaringType.Length - 1; i++)
+            {
+                char c = declaringType[i];
+                if (c == '[')
+                {
+                    depth++;
+                }
+                else if (c == ']')
+                {
+                    if (--depth < 0)
+                    {
+                        return false;
+                    }
+                }
+                else if (c == ',' && depth == 0)
+                {
+                    if (i == argumentStart)
+                    {
+                        return false;
+                    }
+                    argumentStart = i + 1;
+                }
+            }
+
+            if (depth != 0 || argumentStart >= declaringType.Length - 1)
+            {
+                return false;
+            }
+
+            stateMachineType = declaringType.Substring(
+                argumentStart, declaringType.Length - 1 - argumentStart).Trim();
+            return stateMachineType.Length != 0;
+        }
+
+        internal static string GetStateMachineTypeName(string methodName)
+        {
+            if (GetBareMethodName(methodName) != "MoveNext")
+            {
+                return null;
+            }
+
+            int paren = methodName.IndexOf('(');
+            int end = paren >= 0 ? paren : methodName.Length;
+            int methodDot = methodName.LastIndexOf('.', end - 1, end);
+            int typeStart = methodName.IndexOf('!') + 1;
+            return methodDot > typeStart
+                ? methodName.Substring(typeStart, methodDot - typeStart)
+                : null;
         }
 
         /// <summary>

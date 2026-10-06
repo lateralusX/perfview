@@ -15,10 +15,13 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
     /// The EventSource emits a single <c>AsyncEvents</c> event (id = 1) whose payload is an opaque,
     /// densely packed binary buffer that batches many logical async-profiler sub-events. Each sub-event
     /// carries a delta-encoded timestamp and (for callstacks) delta-encoded method ids. This parser
-    /// registers the raw <c>AsyncEvents</c> event so it round-trips through TraceLog/ETLX and shows up
-    /// unaltered in the Events View, and additionally exposes <see cref="ParseBuffer(byte[], IAsyncProfilerSubEventSink)"/> which decodes the
+    /// registers the raw <c>AsyncEvents</c> event and additionally exposes
+    /// <see cref="ParseBuffer(byte[], IAsyncProfilerSubEventSink)"/> which decodes the
     /// buffer into strongly typed sub-events for both the V2 (RuntimeAsync) and V1 (StateMachineAsync)
-    /// instrumentation.
+    /// instrumentation. Decoded sub-events are delivered to a sink, not materialized as individual TraceEvents.
+    /// TraceLog builds a persisted async index and omits the raw batches by default; set
+    /// <see cref="Etlx.TraceLogOptions.KeepAsyncProfilerEvents"/> or
+    /// <see cref="Etlx.TraceLogOptions.KeepAllEvents"/> to retain them in ETLX for raw-event inspection.
     /// </para>
     /// <para>
     /// The buffer/wire format is defined by <c>AsyncProfiler.cs</c> and
@@ -46,6 +49,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
 
         private static volatile TraceEvent[] s_templates;
 
+        /// <summary>Creates the raw-event parser for the specified trace source.</summary>
         public AsyncProfilerTraceEventParser(TraceEventSource source) : base(source)
         {
         }
@@ -91,12 +95,20 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
         /// using <paramref name="manifest"/> to frame sub-events. The manifest supplies the payload-length
         /// prefix width for each event id (so events whose id or width this parser does not statically know can
         /// still be skipped) and is refreshed in place whenever an <c>AsyncProfilerMetadata</c> sub-event is
-        /// decoded. Reuse a single <paramref name="manifest"/> instance across all buffers of a session, because
-        /// the runtime advertises the manifest only once per configuration revision.
+        /// decoded. Reuse a single <paramref name="manifest"/> instance across buffers from the same process
+        /// instance, because the runtime advertises the manifest only once per configuration revision.
         /// </summary>
         /// <param name="buffer">The raw async-profiler buffer (the <c>Buffer</c> payload of <see cref="AsyncEventsTraceData"/>).</param>
         /// <param name="manifest">The live per-event manifest used to frame sub-events; updated in place from metadata.</param>
         /// <param name="sink">Receives the decoded sub-events and any parse errors.</param>
+        /// <remarks>
+        /// Decoding is synchronous. Known payloads are read using their supported fields; appended fields and
+        /// advertised unknown events are skipped using the declared payload length. New schemas must preserve the
+        /// known layout and append fields rather than change it. Malformed typed payloads are reported to
+        /// <see cref="IAsyncProfilerSubEventSink.OnParseError"/> and decoding continues at their declared end;
+        /// header or framing failures stop this buffer. The decoder itself does not recover activation state.
+        /// <see cref="Computers.AsyncProfilerComputer"/> provides that recovery and per-process manifest ownership.
+        /// </remarks>
         public static void ParseBuffer(byte[] buffer, AsyncProfilerManifest manifest, IAsyncProfilerSubEventSink sink)
         {
             if (buffer == null)
@@ -120,12 +132,14 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
 
             if (header.TotalSize < AsyncProfilerBufferHeader.Size)
             {
-                sink.OnParseError(new AsyncProfilerParseError("Async-profiler buffer total size is smaller than its header", 1));
+                sink.OnParseError(new AsyncProfilerParseError("Async-profiler buffer total size is smaller than its header", 1,
+                    header, header.StartTimestampQpc));
                 return;
             }
             if (header.TotalSize > buffer.Length)
             {
-                sink.OnParseError(new AsyncProfilerParseError("Async-profiler buffer is truncated before its declared total size", buffer.Length));
+                sink.OnParseError(new AsyncProfilerParseError("Async-profiler buffer is truncated before its declared total size", buffer.Length,
+                    header, header.StartTimestampQpc));
                 return;
             }
 
@@ -139,7 +153,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
                 if (index >= limit)
                 {
                     sink.OnParseError(new AsyncProfilerParseError(
-                        "Async-profiler buffer ended before its declared event count was reached", index));
+                        "Async-profiler buffer ended before its declared event count was reached", index, header, timestampQpc));
                     return;
                 }
 
@@ -149,21 +163,24 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
                     deltaTicks > long.MaxValue ||
                     timestampQpc > long.MaxValue - (long)deltaTicks)
                 {
-                    sink.OnParseError(new AsyncProfilerParseError("Invalid or truncated sub-event timestamp delta", index));
+                    sink.OnParseError(new AsyncProfilerParseError("Invalid or truncated sub-event timestamp delta", index,
+                        header, timestampQpc, eventId));
                     return;
                 }
                 timestampQpc += (long)deltaTicks;
 
                 if (!TryReadPayloadLengthPrefix(buffer, eventId, manifest, ref index, limit, out int payloadLength))
                 {
-                    sink.OnParseError(new AsyncProfilerParseError("Invalid or truncated sub-event payload-length prefix", index));
+                    sink.OnParseError(new AsyncProfilerParseError("Invalid or truncated sub-event payload-length prefix", index,
+                        header, timestampQpc, eventId));
                     return;
                 }
 
                 int payloadStart = index;
                 if (payloadLength > limit - payloadStart)
                 {
-                    sink.OnParseError(new AsyncProfilerParseError("Sub-event payload extends beyond the async-profiler buffer", payloadStart));
+                    sink.OnParseError(new AsyncProfilerParseError("Sub-event payload extends beyond the async-profiler buffer", payloadStart,
+                        header, timestampQpc, eventId));
                     return;
                 }
 
@@ -181,7 +198,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
             if (index != limit)
             {
                 sink.OnParseError(new AsyncProfilerParseError(
-                    "Async-profiler buffer contains logical bytes beyond its declared event count", index));
+                    "Async-profiler buffer contains logical bytes beyond its declared event count", index, header, timestampQpc));
             }
         }
 
@@ -256,7 +273,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
                     if (!AsyncProfilerReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong parentDispatcherId) ||
                         !AsyncProfilerReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong dispatcherId))
                     {
-                        ReportMalformedPayload(eventId, payloadStart, sink);
+                        ReportMalformedPayload(eventId, timestampQpc, header, payloadStart, sink);
                         return;
                     }
                     sink.OnContextCreate(new AsyncContextEvent(eventId, timestampQpc, header, parentDispatcherId, dispatcherId));
@@ -267,7 +284,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
                 {
                     if (!AsyncProfilerReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong dispatcherId))
                     {
-                        ReportMalformedPayload(eventId, payloadStart, sink);
+                        ReportMalformedPayload(eventId, timestampQpc, header, payloadStart, sink);
                         return;
                     }
                     sink.OnContextResume(new AsyncContextEvent(eventId, timestampQpc, header, 0, dispatcherId));
@@ -290,7 +307,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
                 {
                     if (!AsyncProfilerReader.TryReadCompressedUInt32(buffer, ref index, payloadEnd, out uint unwoundFrames))
                     {
-                        ReportMalformedPayload(eventId, payloadStart, sink);
+                        ReportMalformedPayload(eventId, timestampQpc, header, payloadStart, sink);
                         return;
                     }
                     sink.OnException(new AsyncUnwindEvent(eventId, timestampQpc, header, unwoundFrames));
@@ -319,7 +336,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
 
                     if (!parsed)
                     {
-                        ReportMalformedPayload(eventId, payloadStart, sink);
+                        ReportMalformedPayload(eventId, timestampQpc, header, payloadStart, sink);
                     }
                     return;
                 }
@@ -356,7 +373,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
                     }
                     else
                     {
-                        ReportMalformedPayload(eventId, payloadStart, sink);
+                        ReportMalformedPayload(eventId, timestampQpc, header, payloadStart, sink);
                     }
                     return;
                 }
@@ -365,7 +382,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
                     if (!AsyncProfilerReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong qpcSync) ||
                         !AsyncProfilerReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong utcSync))
                     {
-                        ReportMalformedPayload(eventId, payloadStart, sink);
+                        ReportMalformedPayload(eventId, timestampQpc, header, payloadStart, sink);
                         return;
                     }
                     sink.OnSyncClock(new AsyncSyncClockEvent(timestampQpc, header, qpcSync, utcSync));
@@ -381,9 +398,11 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
             }
         }
 
-        private static void ReportMalformedPayload(AsyncEventID eventId, int payloadStart, IAsyncProfilerSubEventSink sink)
+        private static void ReportMalformedPayload(AsyncEventID eventId, long timestampQpc,
+            in AsyncProfilerBufferHeader header, int payloadStart, IAsyncProfilerSubEventSink sink)
         {
-            sink.OnParseError(new AsyncProfilerParseError("Invalid or truncated payload for " + eventId, payloadStart));
+            sink.OnParseError(new AsyncProfilerParseError("Invalid or truncated payload for " + eventId, payloadStart,
+                header, timestampQpc, eventId));
         }
 
         #endregion

@@ -39,19 +39,19 @@ namespace TraceEventBenchmarks
 
         [Benchmark(Baseline = true, OperationsPerInvoke = 6)]
         public int StructuralOnly() =>
-            GenerateCpuStacks(enableConservativeTransforms: false, enableSystemPrivateCoreLibCleanup: false);
+            GenerateCpuStacks(enableConservativeTransforms: false, enableAsyncInfrastructureCleanup: false);
 
         [Benchmark(OperationsPerInvoke = 6)]
         public int DefaultConservative() =>
-            GenerateCpuStacks(enableConservativeTransforms: true, enableSystemPrivateCoreLibCleanup: false);
+            GenerateCpuStacks(enableConservativeTransforms: true, enableAsyncInfrastructureCleanup: false);
 
         [Benchmark(OperationsPerInvoke = 6)]
-        public int ConservativeWithSystemPrivateCoreLibCleanup() =>
-            GenerateCpuStacks(enableConservativeTransforms: true, enableSystemPrivateCoreLibCleanup: true);
+        public int ConservativeWithAsyncInfrastructureCleanup() =>
+            GenerateCpuStacks(enableConservativeTransforms: true, enableAsyncInfrastructureCleanup: true);
 
         private int GenerateCpuStacks(
             bool enableConservativeTransforms,
-            bool enableSystemPrivateCoreLibCleanup)
+            bool enableAsyncInfrastructureCleanup)
         {
             int sampleCount = 0;
             for (int i = 0; i < 6; i++)
@@ -64,8 +64,8 @@ namespace TraceEventBenchmarks
                     GroupByStartStopActivity = false,
                 };
                 computer.AsyncStackTransforms.EnableConservativeTransforms = enableConservativeTransforms;
-                computer.AsyncStackTransforms.EnableSystemPrivateCoreLibCleanup =
-                    enableSystemPrivateCoreLibCleanup;
+                computer.AsyncStackTransforms.EnableAsyncInfrastructureCleanup =
+                    enableAsyncInfrastructureCleanup;
                 computer.GenerateThreadTimeStacks(stackSource);
                 stackSource.ForEach(_ => sampleCount++);
             }

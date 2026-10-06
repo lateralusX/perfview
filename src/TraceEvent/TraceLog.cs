@@ -514,7 +514,7 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
         /// <summary>
         /// True if the source trace contained async-profiler event batches. This is a cheap capability check backed
         /// by persisted event statistics; it does not load the deferred async-callstack index. A trace containing
-        /// only profiler metadata or reset events can return true without having stitchable async call stacks.
+        /// only profiler metadata, reset events, or malformed batches can return true without usable activation intervals.
         /// </summary>
         public bool HasAsyncProfilerEvents
         {
@@ -2179,6 +2179,18 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
             var asyncProfilerComputer = new AsyncProfilerComputer(
                 asyncProfilerParser,
                 data => Processes.GetOrCreateProcess(data.ProcessID, data.TimeStampQPC).ProcessIndex);
+            const int MaxAsyncProfilerErrorDetails = 10;
+            asyncProfilerComputer.ParseError += (processIndex, error) =>
+            {
+                if (asyncProfilerComputer.ParseErrorCount <= MaxAsyncProfilerErrorDetails)
+                {
+                    DebugWarn(false, string.Format(
+                        "AsyncProfiler PID {0}, process index {1}, thread {2}, QPC {3}: {4}",
+                        Processes[processIndex].ProcessID, processIndex,
+                        error.BufferHeader?.OsThreadId.ToString() ?? "unknown",
+                        error.TimestampQpc?.ToString() ?? "unknown", error), null);
+                }
+            };
             if (!options.KeepAsyncProfilerEvents)
             {
                 asyncProfilerParser.AsyncEvents += delegate { removeFromStream = true; };
@@ -2500,6 +2512,13 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
             // Commit any async call stacks still open (resumed but not yet suspended/completed) at end of the
             // event stream - they were live when the trace ended, so they remain queryable through end of trace.
             asyncProfilerComputer.Finish();
+            if (asyncProfilerComputer.ParseErrorCount != 0)
+            {
+                DebugWarn(false, string.Format(
+                    "AsyncProfiler reported {0} parse errors; uncertain activation state was invalidated. " +
+                    "At most {1} error details were logged.",
+                    asyncProfilerComputer.ParseErrorCount, MaxAsyncProfilerErrorDetails), null);
+            }
 
             // Capture the built async call stack index (null it out when empty so we don't persist nothing). Its
             // frames were symbolized incrementally during processing (see OnFrameObserved / OnFrameInterned above).
@@ -4299,8 +4318,8 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
 
         /// <summary>
         /// The per-thread active async call stack index (RuntimeAsync + StateMachineAsync) built from the
-        /// AsyncProfilerEventSource, or null if the trace contained no async-profiler data. Lazily deserialized
-        /// on first access.
+        /// AsyncProfilerEventSource, or null if no usable activation intervals were recorded. Lazily deserialized
+        /// on first access; event presence alone does not imply an index exists.
         /// </summary>
         internal AsyncCallStacksIndex AsyncCallStacks
         {
@@ -4315,10 +4334,14 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
         }
 
         /// <summary>
-        /// Releases the loaded async-callstack index when it can be restored from the ETLX deferred region.
-        /// Existing <see cref="AsyncCallStack"/> instances remain valid; a later query transparently loads a new
-        /// index instance.
+        /// Releases this TraceLog's reference to the loaded async-callstack index when it can be restored from
+        /// the ETLX deferred region. A later async query transparently loads a new index without replaying raw events.
         /// </summary>
+        /// <remarks>
+        /// Already-returned activation objects, frame lists, and query results remain valid; retaining them may
+        /// retain some index data in memory. Code-address indices still belong to this TraceLog, which must remain
+        /// open for symbol and source lookup. This method does not release the TraceLog's code-address or symbol tables.
+        /// </remarks>
         /// <returns>
         /// True if a loaded ETLX-backed index was released; false if no index was loaded or it has no reloadable
         /// deferred backing.
@@ -4357,8 +4380,13 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
         /// <paramref name="timeQPC"/> (a raw QPC timestamp, e.g. an event's <see cref="TraceEvent.TimeStampQPC"/>),
         /// ordered bottom-to-top (async call stacks nest, so several can be active at once). Uses QPC directly
         /// for full precision — no lossy relative-time conversion. Returns an empty list if the thread is
-        /// invalid, idle at that time, or the trace had no async-profiler data. See <see cref="AsyncCallStack"/>.
+        /// <see cref="ThreadIndex.Invalid"/>, has no recorded interval covering that time, or no usable index exists.
         /// </summary>
+        /// <remarks>
+        /// Intervals use <c>StartQpc &lt;= timeQPC &lt; EndQpc</c> in this trace's QPC domain. The index is loaded
+        /// lazily on the first async query; returned lists and activations remain valid across later queries and
+        /// <see cref="ReleaseAsyncCallStacks"/>. Thread and code-address indices must belong to this TraceLog.
+        /// </remarks>
         public IReadOnlyList<AsyncCallStack> GetAsyncCallStacks(ThreadIndex threadIndex, long timeQPC)
         {
             AsyncCallStacksIndex index = AsyncCallStacks;
@@ -4373,10 +4401,14 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
         }
 
         /// <summary>
-        /// Returns the async call stack for <paramref name="dispatcherId"/> active on
+        /// Returns the innermost async call stack for <paramref name="dispatcherId"/> active on
         /// <paramref name="threadIndex"/> at <paramref name="timeQPC"/>, or null when no matching resume interval
         /// was captured.
         /// </summary>
+        /// <remarks>
+        /// Uses the same QPC, lazy-loading, and result-lifetime contract as
+        /// <see cref="GetAsyncCallStacks(ThreadIndex, long)"/>.
+        /// </remarks>
         public AsyncCallStack GetAsyncCallStack(
             ThreadIndex threadIndex,
             ulong dispatcherId,
@@ -4398,12 +4430,14 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
         /// milliseconds (e.g. a <see cref="Microsoft.Diagnostics.Tracing.Stacks.StackSourceSample"/>'s
         /// <c>TimeRelativeMSec</c>, or any event's
         /// <see cref="TraceEvent.TimeStampRelativeMSec"/>) and converts it to QPC via
-        /// <see cref="TraceEventSource.RelativeMSecToQPC(double)"/>. Because a relative-millisecond value is a
-        /// <c>double</c> derived
-        /// from the original QPC (and <c>QPC - sessionStart</c> fits exactly in a <c>double</c> even for multi-hour
-        /// traces), this round-trip preserves the QPC to within a single QPC tick (~100 ns) — far finer than any
-        /// async call-stack interval — so callers that already hold a relative time need not deal with raw QPC.
+        /// <see cref="TraceEventSource.RelativeMSecToQPC(double)"/>.
         /// </summary>
+        /// <remarks>
+        /// The value must be relative to this trace's start. Conversion can round at QPC-tick precision;
+        /// tick duration depends on the trace's QPC frequency. For exact interval-boundary alignment, use
+        /// <see cref="GetAsyncCallStacks(ThreadIndex, long)"/> or <see cref="GetAsyncCallStacks(TraceEvent)"/>.
+        /// Lazy-loading and result lifetimes are the same as for the QPC overload.
+        /// </remarks>
         public IReadOnlyList<AsyncCallStack> GetAsyncCallStacks(ThreadIndex threadIndex, double timeRelativeMSec) =>
             GetAsyncCallStacks(threadIndex, RelativeMSecToQPC(timeRelativeMSec));
 
@@ -4412,13 +4446,18 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
         /// <paramref name="processId"/> at <paramref name="timeQPC"/> (a raw QPC timestamp), ordered
         /// bottom-to-top (async call stacks nest, so several can be active at once). Uses QPC directly for full
         /// precision — no lossy relative-time conversion. Returns an empty list if the thread has no async call
-        /// stack covering that instant or the trace had no async-profiler data. See <see cref="AsyncCallStack"/>.
+        /// stack covering that instant, the process instance cannot be found, or no usable index exists.
         /// <para>
         /// Unlike <see cref="GetAsyncCallStacks(ThreadIndex, long)"/>, this overload keys directly by OS thread id,
         /// so it also reaches threads that emitted async-profiler data but have no other events (and therefore no
         /// <see cref="TraceThread"/>/<see cref="ThreadIndex"/> in the trace).
         /// </para>
         /// </summary>
+        /// <remarks>
+        /// The process instance is resolved by OS process id at <paramref name="timeQPC"/>, so reused process ids
+        /// do not share activation state. Times, lazy-loading, and result lifetimes follow
+        /// <see cref="GetAsyncCallStacks(ThreadIndex, long)"/>.
+        /// </remarks>
         public IReadOnlyList<AsyncCallStack> GetAsyncCallStacks(int processId, ulong osThreadId, long timeQPC)
         {
             AsyncCallStacksIndex index = AsyncCallStacks;
@@ -4437,9 +4476,13 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
         }
 
         /// <summary>
-        /// Returns the async call stack for <paramref name="dispatcherId"/> active on the specified OS thread at
+        /// Returns the innermost async call stack for <paramref name="dispatcherId"/> active on the specified OS thread at
         /// <paramref name="timeQPC"/>, or null when the process, dispatcher, or resume interval was not captured.
         /// </summary>
+        /// <remarks>
+        /// Resolves the process instance at the query QPC and shares the lazy-loading and result-lifetime contract
+        /// of <see cref="GetAsyncCallStacks(int, ulong, long)"/>.
+        /// </remarks>
         public AsyncCallStack GetAsyncCallStack(
             int processId,
             ulong osThreadId,
@@ -4466,12 +4509,13 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
         /// milliseconds (e.g. a <see cref="Microsoft.Diagnostics.Tracing.Stacks.StackSourceSample"/>'s
         /// <c>TimeRelativeMSec</c>, or any event's
         /// <see cref="TraceEvent.TimeStampRelativeMSec"/>) and converts it to QPC via
-        /// <see cref="TraceEventSource.RelativeMSecToQPC(double)"/>. Because a relative-millisecond value is a
-        /// <c>double</c> derived
-        /// from the original QPC (and <c>QPC - sessionStart</c> fits exactly in a <c>double</c> even for multi-hour
-        /// traces), this round-trip preserves the QPC to within a single QPC tick (~100 ns) — far finer than any
-        /// async call-stack interval — so callers that already hold a relative time need not deal with raw QPC.
+        /// <see cref="TraceEventSource.RelativeMSecToQPC(double)"/>.
         /// </summary>
+        /// <remarks>
+        /// The value must be relative to this trace's start and can round during conversion to QPC.
+        /// Use <see cref="GetAsyncCallStacks(int, ulong, long)"/> or <see cref="GetAsyncCallStacks(TraceEvent)"/>
+        /// when exact interval-boundary alignment matters. Other query semantics are unchanged.
+        /// </remarks>
         public IReadOnlyList<AsyncCallStack> GetAsyncCallStacks(int processId, ulong osThreadId, double timeRelativeMSec) =>
             GetAsyncCallStacks(processId, osThreadId, RelativeMSecToQPC(timeRelativeMSec));
 
@@ -4481,8 +4525,14 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
         /// process id, OS thread id, and QPC timestamp are taken directly from the event, so callers can align an
         /// async call stack with any event they already have (e.g. a CPU sample from the sample profiler) without
         /// handling raw QPC timestamps themselves. Returns an empty list if that thread has no async call stack
-        /// covering the event's instant or the trace had no async-profiler data. See <see cref="AsyncCallStack"/>.
+        /// covering the event's instant or no usable index exists.
         /// </summary>
+        /// <remarks>
+        /// The event must come from this trace or its source capture. This method does not retain the event,
+        /// so it can be called during event enumeration without cloning. Result lifetimes follow
+        /// <see cref="GetAsyncCallStacks(ThreadIndex, long)"/>.
+        /// </remarks>
+        /// <exception cref="ArgumentNullException"><paramref name="anchorEvent"/> is null.</exception>
         public IReadOnlyList<AsyncCallStack> GetAsyncCallStacks(TraceEvent anchorEvent)
         {
             if (anchorEvent == null)
@@ -4554,8 +4604,8 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
         }
 
         /// <summary>
-        /// True when normal <c>CompleteMethod</c> events were enabled for the configuration epoch containing
-        /// <paramref name="callStack"/>.
+        /// True when a normal <c>CompleteMethod</c> event was observed for <paramref name="callStack"/>'s process,
+        /// instrumentation kind, and configuration epoch. An observation does not prove all completions were captured.
         /// </summary>
         public bool AsyncMethodCompletionObserved(AsyncCallStack callStack)
         {
@@ -11805,6 +11855,9 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
         /// async-callstack index has been built. The default is false because the opaque buffers are not
         /// needed for async-stack queries or stitching. Set true when raw-buffer inspection or future
         /// re-decoding from a standalone ETLX is required. <see cref="KeepAllEvents"/> also preserves them.
+        /// This does not change index construction or recovery. Decode warnings are written to
+        /// <see cref="ConversionLog"/> whether or not raw events are retained; logical sub-events are not
+        /// individually materialized as TraceEvents.
         /// </summary>
         public bool KeepAsyncProfilerEvents;
         /// <summary>

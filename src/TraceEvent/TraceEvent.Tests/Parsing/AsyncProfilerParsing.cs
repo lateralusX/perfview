@@ -28,7 +28,9 @@ namespace TraceEventTests
             var sink = new CollectingSink();
             AsyncProfilerTraceEventParser.ParseBuffer(new byte[8], sink);
 
-            Assert.Single(sink.Errors);
+            AsyncProfilerParseError error = Assert.Single(sink.Errors);
+            Assert.Null(error.BufferHeader);
+            Assert.Null(error.TimestampQpc);
             Assert.Empty(sink.Order);
         }
 
@@ -508,7 +510,10 @@ namespace TraceEventTests
             var sink = new CollectingSink();
             AsyncProfilerTraceEventParser.ParseBuffer(buffer, sink);
 
-            Assert.Single(sink.Errors);
+            AsyncProfilerParseError error = Assert.Single(sink.Errors);
+            Assert.Equal(OsThreadId, error.BufferHeader.Value.OsThreadId);
+            Assert.Equal(StartQpc, error.TimestampQpc);
+            Assert.Equal(AsyncEventID.ResumeRuntimeAsyncMethod, error.EventId);
             Assert.Empty(sink.Order);
         }
 

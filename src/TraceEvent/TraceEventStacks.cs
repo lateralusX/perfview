@@ -23,7 +23,11 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
             CodeAddressIndex codeAddress,
             ulong methodId,
             int state,
-            bool isHistoricalParent)
+            bool isHistoricalParent,
+            bool isDispatchTarget,
+            bool isCurrent,
+            bool isStateMachineBoxCarrier,
+            bool isCompleting)
         {
             Kind = kind;
             ProcessIndex = processIndex;
@@ -31,6 +35,10 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
             MethodId = methodId;
             State = state;
             IsHistoricalParent = isHistoricalParent;
+            IsDispatchTarget = isDispatchTarget;
+            IsCurrent = isCurrent;
+            IsStateMachineBoxCarrier = isStateMachineBoxCarrier;
+            IsCompleting = isCompleting;
         }
 
         /// <summary>The async-profiler call-stack kind.</summary>
@@ -39,20 +47,44 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
         /// <summary>The process containing the frame.</summary>
         public ProcessIndex ProcessIndex { get; }
 
-        /// <summary>The resolved code address, or <see cref="CodeAddressIndex.Invalid"/>.</summary>
+        /// <summary>The code address in the originating TraceLog, or <see cref="CodeAddressIndex.Invalid"/>.
+        /// A valid address does not guarantee a resolved method. Current and completing frames retain the sampled address.</summary>
         public CodeAddressIndex CodeAddress { get; }
 
-        /// <summary>The original method identifier emitted by the async profiler.</summary>
+        /// <summary>The native code IP emitted by the async profiler for either V1 or V2.
+        /// This is not a CLR MethodLoad identifier or MethodDesc handle, and can differ from the sampled code address.</summary>
         public ulong MethodId { get; }
 
         /// <summary>
-        /// The state-machine state for <see cref="AsyncCallstackKind.StateMachineAsync"/>. This value is not
-        /// meaningful for <see cref="AsyncCallstackKind.RuntimeAsync"/>.
+        /// The raw signed compiler state for <see cref="AsyncCallstackKind.StateMachineAsync"/>, not an IL/native offset. This value is not
+        /// meaningful for <see cref="AsyncCallstackKind.RuntimeAsync"/>. This is the captured value, even when
+        /// a current frame displays inferred running state -1 or a completing frame displays inferred state -2.
         /// </summary>
         public int State { get; }
 
         /// <summary>True when this frame was reconstructed from a historical creation-parent context.</summary>
         public bool IsHistoricalParent { get; }
+
+        /// <summary>
+        /// True when this is an indexed V1 dispatch target without a separately matched physical current-method
+        /// frame. This role does not change its displayed name and does not establish whether its body has
+        /// started, finished, or was inlined.
+        /// </summary>
+        public bool IsDispatchTarget { get; }
+
+        /// <summary>True when this frame represents the physically matched current async method.</summary>
+        public bool IsCurrent { get; }
+
+        /// <summary>True when completion records establish that this physically present V1 method has logically
+        /// completed but its invocation is still finishing. Its annotated presentation uses inferred state -2.</summary>
+        public bool IsCompleting { get; }
+
+        /// <summary>
+        /// True when the current V1 method was inferred from the generic state-machine type of a sampled leaf
+        /// CoreLib box execution frame. Its code address remains that of the runtime helper, not an application
+        /// MoveNext instruction proven to have executed.
+        /// </summary>
+        public bool IsStateMachineBoxCarrier { get; }
     }
 
     /// <summary>

@@ -32,6 +32,100 @@ namespace TraceEventTests
             Assert.NotNull(typeof(SampleProfilerThreadTimeComputer).GetConstructor(new[] { typeof(TraceLog), typeof(SymbolReader) }));
         }
 
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void ParseErrors_AreLoggedWithBoundedDetailsAndRecoveredCoverageIsPersisted(bool keepRawEvents)
+        {
+            const int ProcessId = 1234;
+            const int OsThreadId = 5000;
+            const long ThreadStreamIndex = 7;
+            const long StartQpc = 100_000;
+            var buffer = new AsyncProfilerBufferBuilder(OsThreadId, startQpc: StartQpc)
+                .Armed(StartQpc).ResumeStack(StartQpc + 10, 1, new ulong[] { 0xA });
+            for (int i = 0; i < 12; i++)
+            {
+                buffer.RawEvent((byte)AsyncEventID.UnwindStateMachineAsyncException,
+                    StartQpc + 20 + i, PayloadLengthFieldSize.Byte, Array.Empty<byte>());
+            }
+            byte[] raw = buffer.Reset(StartQpc + 40)
+                .ResumeStack(StartQpc + 41, 2, new ulong[] { 0xB }).Build();
+            var payload = new byte[sizeof(int) + raw.Length];
+            Array.Copy(BitConverter.GetBytes(raw.Length), payload, sizeof(int));
+            Array.Copy(raw, 0, payload, sizeof(int), raw.Length);
+            var writer = new EventPipeWriterV6();
+            writer.WriteHeaders();
+            writer.WriteMetadataBlock(
+                new EventMetadata(1, AsyncProfilerTraceEventParser.ProviderName, "AsyncEvents", AsyncProfilerTraceEventParser.AsyncEventsEventId),
+                new EventMetadata(2, "TestSampleProfiler", "Sample", 1));
+            writer.WriteThreadBlock(w => w.WriteThreadEntry(ThreadStreamIndex, threadId: OsThreadId, processId: ProcessId));
+            writer.WriteEventBlock(w =>
+            {
+                w.WriteEventBlob(new WriteEventOptions
+                {
+                    MetadataId = 2,
+                    ThreadIndexOrId = ThreadStreamIndex,
+                    CaptureThreadIndexOrId = ThreadStreamIndex,
+                    SequenceNumber = 1,
+                    Timestamp = StartQpc + 5,
+                    IsSorted = true,
+                }, p => { });
+                w.WriteEventBlob(new WriteEventOptions
+                {
+                    MetadataId = 1,
+                    ThreadIndexOrId = ThreadStreamIndex,
+                    CaptureThreadIndexOrId = ThreadStreamIndex,
+                    SequenceNumber = 2,
+                    Timestamp = StartQpc + 50,
+                    IsSorted = true,
+                }, p => p.Write(payload));
+            });
+            writer.WriteEndBlock();
+
+            string nettracePath = Path.Combine(Path.GetTempPath(), $"asyncprofiler_errors_{Guid.NewGuid():N}.nettrace");
+            string etlxPath = null;
+            try
+            {
+                File.WriteAllBytes(nettracePath, writer.ToArray());
+                using (var conversionLog = new StringWriter())
+                {
+                    etlxPath = TraceLog.CreateFromEventPipeDataFile(nettracePath, null,
+                        new TraceLogOptions { ConversionLog = conversionLog, KeepAsyncProfilerEvents = keepRawEvents });
+                    string diagnostics = conversionLog.ToString();
+                    Assert.Contains("AsyncProfiler reported 12 parse errors", diagnostics);
+                    Assert.Contains("AsyncProfiler PID 1234, process index", diagnostics);
+                    Assert.Contains("thread 5000, QPC 100020", diagnostics);
+                    Assert.Contains("Invalid or truncated payload for UnwindStateMachineAsyncException", diagnostics);
+                    Assert.Equal(10, diagnostics.Split(new[] { "AsyncProfiler PID" }, StringSplitOptions.None).Length - 1);
+                }
+                using (var traceLog = new TraceLog(etlxPath))
+                {
+                    Assert.True(traceLog.HasAsyncProfilerEvents);
+                    Assert.False(traceLog.IsAsyncCallStacksLoaded);
+                    Assert.Equal(StartQpc + 20,
+                        Assert.Single(traceLog.GetAsyncCallStacks(ProcessId, (ulong)OsThreadId, StartQpc + 15)).EndQpc);
+                    Assert.Empty(traceLog.GetAsyncCallStacks(ProcessId, (ulong)OsThreadId, StartQpc + 20));
+                    Assert.Empty(traceLog.GetAsyncCallStacks(ProcessId, (ulong)OsThreadId, StartQpc + 35));
+                    AsyncCallStack recovered = Assert.Single(traceLog.GetAsyncCallStacks(ProcessId, (ulong)OsThreadId, StartQpc + 45));
+                    Assert.Equal(0xBUL, recovered.Frames.MethodIdAt(0));
+                    Assert.Equal(long.MaxValue, recovered.EndQpc);
+                    Assert.True(traceLog.ReleaseAsyncCallStacks());
+                    Assert.Empty(traceLog.GetAsyncCallStacks(ProcessId, (ulong)OsThreadId, StartQpc + 35));
+                }
+            }
+            finally
+            {
+                if (File.Exists(nettracePath))
+                {
+                    File.Delete(nettracePath);
+                }
+                if (etlxPath != null && File.Exists(etlxPath))
+                {
+                    File.Delete(etlxPath);
+                }
+            }
+        }
+
         [Fact]
         public void EndToEnd_AsyncCallStacks_RoundTripThroughTraceLog()
         {

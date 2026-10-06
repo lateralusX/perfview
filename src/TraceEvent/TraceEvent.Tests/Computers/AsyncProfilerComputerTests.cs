@@ -98,6 +98,196 @@ namespace TraceEventTests
         private static void Process(AsyncProfilerComputer computer, ProcessIndex processIndex, AsyncProfilerBufferBuilder builder) =>
             computer.Process(builder.Build(), processIndex);
 
+        [Theory]
+        [InlineData(AsyncCallstackKind.RuntimeAsync, AsyncEventID.ResumeRuntimeAsyncCallstack)]
+        [InlineData(AsyncCallstackKind.RuntimeAsync, AsyncEventID.UnwindRuntimeAsyncException)]
+        [InlineData(AsyncCallstackKind.StateMachineAsync, AsyncEventID.ResumeStateMachineAsyncCallstack)]
+        [InlineData(AsyncCallstackKind.StateMachineAsync, AsyncEventID.AppendStateMachineAsyncCallstack)]
+        [InlineData(AsyncCallstackKind.StateMachineAsync, AsyncEventID.UnwindStateMachineAsyncException)]
+        public void MalformedPayload_PreservesNestedPrefixAndRecoversOnlyAtReset(
+            AsyncCallstackKind kind, AsyncEventID malformedEvent)
+        {
+            bool v1 = kind == AsyncCallstackKind.StateMachineAsync;
+            AsyncEventID resume = v1 ? AsyncEventID.ResumeStateMachineAsyncCallstack : AsyncEventID.ResumeRuntimeAsyncCallstack;
+            AsyncEventID suspend = v1 ? AsyncEventID.SuspendStateMachineAsyncContext : AsyncEventID.SuspendRuntimeAsyncContext;
+            AsyncEventID completeMethod = v1 ? AsyncEventID.CompleteStateMachineAsyncMethod : AsyncEventID.CompleteRuntimeAsyncMethod;
+            int[] states = v1 ? new[] { 1 } : null;
+            var computer = new AsyncProfilerComputer();
+            var errors = new List<AsyncProfilerParseError>();
+            computer.ParseError += (process, error) =>
+            {
+                Assert.Equal(ProcessA, process);
+                errors.Add(error);
+            };
+            Process(computer, ProcessA, new AsyncProfilerBufferBuilder(ThreadA)
+                .Armed(Start)
+                .Callstack(resume, Start + 10, 0, 0, 1, new ulong[] { 0x100 }, states)
+                .Callstack(resume, Start + 12, 0, 0, 2, new ulong[] { 0x200 }, states)
+                .RawEvent((byte)malformedEvent, Start + 15, AsyncEventInfo.GetPayloadLengthFieldSize(malformedEvent), Array.Empty<byte>())
+                .Method(completeMethod, Start + 16)
+                .Callstack(resume, Start + 17, 0, 0, 99, new ulong[] { 0xDEAD }, states)
+                .ContextNoPayload(suspend, Start + 18)
+                .Reset(Start + 20)
+                .Callstack(resume, Start + 22, 0, 0, 3, new ulong[] { 0xBEEF }, states)
+                .ContextNoPayload(suspend, Start + 25));
+            computer.Finish();
+
+            Assert.Equal(1, computer.ParseErrorCount);
+            AsyncProfilerParseError error = Assert.Single(errors);
+            Assert.Equal(ThreadA, error.BufferHeader.Value.OsThreadId);
+            Assert.Equal(Start + 15, error.TimestampQpc);
+            Assert.Equal(malformedEvent, error.EventId);
+            Assert.True(error.ByteOffset >= AsyncProfilerBufferHeader.Size);
+            IReadOnlyList<AsyncCallStack> prefix = computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 14);
+            Assert.Equal(2, prefix.Count);
+            Assert.All(prefix, stack => Assert.Equal(Start + 15, stack.EndQpc));
+            Assert.Empty(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 15));
+            Assert.Empty(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 19));
+            AsyncCallStack recovered = Assert.Single(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 23));
+            Assert.Equal(0, recovered.Depth);
+            Assert.Equal(0xBEEFUL, recovered.Frames.MethodIdAt(0));
+            Assert.Equal(kind, recovered.Frames.Kind);
+            Assert.Empty(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 26));
+        }
+
+        [Fact]
+        public void MalformedPayload_FinishDoesNotExtendDamagedStateOrInvalidateOtherThreads()
+        {
+            var computer = new AsyncProfilerComputer();
+            Process(computer, ProcessA, new AsyncProfilerBufferBuilder(ThreadA)
+                .Armed(Start).ResumeStack(Start + 10, 1, new ulong[] { 0xA }));
+            Process(computer, ProcessA, new AsyncProfilerBufferBuilder(ThreadB)
+                .Reset(Start).ResumeStack(Start + 10, 2, new ulong[] { 0xB }));
+            Process(computer, ProcessB, new AsyncProfilerBufferBuilder(ThreadA)
+                .Armed(Start).ResumeStack(Start + 10, 3, new ulong[] { 0xC }));
+            Process(computer, ProcessA, new AsyncProfilerBufferBuilder(ThreadA, startQpc: Start + 15)
+                .RawEvent((byte)AsyncEventID.UnwindStateMachineAsyncException, Start + 15, PayloadLengthFieldSize.Byte, Array.Empty<byte>())
+                .ResumeStack(Start + 20, 4, new ulong[] { 0xDEAD }));
+            computer.Finish();
+
+            Assert.Equal(Start + 15, Assert.Single(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 14)).EndQpc);
+            Assert.Empty(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 15));
+            Assert.Empty(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 100));
+            Assert.Equal(long.MaxValue, Assert.Single(computer.GetAsyncCallStacks(Key(ProcessA, ThreadB), Start + 100)).EndQpc);
+            Assert.Equal(long.MaxValue, Assert.Single(computer.GetAsyncCallStacks(Key(ProcessB, ThreadA), Start + 100)).EndQpc);
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void UnreadableHeader_DiscardsProcessOpenStateAndRequiresFreshMetadata(bool unsupportedVersion)
+        {
+            var computer = new AsyncProfilerComputer();
+            Process(computer, ProcessA, new AsyncProfilerBufferBuilder(ThreadA)
+                .Armed(Start)
+                .ResumeStack(Start + 10, 1, new ulong[] { 0xA }).Suspend(Start + 12)
+                .ResumeStack(Start + 14, 2, new ulong[] { 0xB }));
+            Process(computer, ProcessA, new AsyncProfilerBufferBuilder(ThreadB)
+                .Reset(Start).ResumeStack(Start + 10, 3, new ulong[] { 0xC }));
+            Process(computer, ProcessB, new AsyncProfilerBufferBuilder(ThreadA)
+                .Armed(Start).ResumeStack(Start + 10, 4, new ulong[] { 0xD }));
+            byte[] damaged = unsupportedVersion ? new AsyncProfilerBufferBuilder(ThreadA).Build() : new byte[8];
+            damaged[0] = 2;
+            AsyncProfilerParseError diagnostic = default;
+            computer.ParseError += (process, error) =>
+            {
+                Assert.Equal(ProcessA, process);
+                diagnostic = error;
+            };
+            computer.Process(damaged, ProcessA);
+            Process(computer, ProcessA, new AsyncProfilerBufferBuilder(ThreadA)
+                .Reset(Start + 20).ResumeStack(Start + 21, 5, new ulong[] { 0xDEAD }).Suspend(Start + 22));
+            Assert.False(computer.ClockKnownForProcess(ProcessA));
+            Assert.True(computer.ClockKnownForProcess(ProcessB));
+            Process(computer, ProcessA, new AsyncProfilerBufferBuilder(ThreadA)
+                .Armed(Start + 30).ResumeStack(Start + 31, 6, new ulong[] { 0xBEEF }).Suspend(Start + 35));
+            computer.Finish();
+
+            Assert.Equal(1, computer.ParseErrorCount);
+            Assert.Null(diagnostic.BufferHeader);
+            Assert.Null(diagnostic.TimestampQpc);
+            Assert.Equal(0xAUL, Assert.Single(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 11)).Frames.MethodIdAt(0));
+            Assert.Empty(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 15));
+            Assert.Empty(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 21));
+            Assert.Empty(computer.GetAsyncCallStacks(Key(ProcessA, ThreadB), Start + 100));
+            Assert.Equal(0xBEEFUL, Assert.Single(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 32)).Frames.MethodIdAt(0));
+            Assert.Equal(0xDUL, Assert.Single(computer.GetAsyncCallStacks(Key(ProcessB, ThreadA), Start + 100)).Frames.MethodIdAt(0));
+        }
+
+        [Fact]
+        public void MalformedMetadata_ClosesProcessPrefixesAndRequiresMetadataPlusPerThreadResets()
+        {
+            var computer = new AsyncProfilerComputer();
+            Process(computer, ProcessA, new AsyncProfilerBufferBuilder(ThreadA)
+                .Armed(Start).ResumeStack(Start + 10, 1, new ulong[] { 0xA }));
+            Process(computer, ProcessA, new AsyncProfilerBufferBuilder(ThreadB)
+                .Reset(Start).ResumeStack(Start + 40, 2, new ulong[] { 0xB }));
+            Process(computer, ProcessB, new AsyncProfilerBufferBuilder(ThreadA)
+                .Armed(Start).ResumeStack(Start + 10, 3, new ulong[] { 0xC }));
+            Process(computer, ProcessA, new AsyncProfilerBufferBuilder(ThreadA)
+                .RawEvent((byte)AsyncEventID.AsyncProfilerMetadata, Start + 20, PayloadLengthFieldSize.UShort, Array.Empty<byte>())
+                .Reset(Start + 21).ResumeStack(Start + 22, 4, new ulong[] { 0xDEAD }));
+            Assert.False(computer.ClockKnownForProcess(ProcessA));
+            Process(computer, ProcessA, new AsyncProfilerBufferBuilder(ThreadA)
+                .Armed(Start + 30).ResumeStack(Start + 31, 5, new ulong[] { 0xBEEF }).Suspend(Start + 35));
+            Process(computer, ProcessA, new AsyncProfilerBufferBuilder(ThreadB)
+                .ResumeStack(Start + 41, 6, new ulong[] { 0xDEAD })
+                .Reset(Start + 45).ResumeStack(Start + 46, 7, new ulong[] { 0xCAFE }).Suspend(Start + 50));
+            computer.Finish();
+
+            Assert.Equal(1, computer.ParseErrorCount);
+            Assert.Equal(Start + 20, Assert.Single(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 15)).EndQpc);
+            Assert.Empty(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 20));
+            Assert.Empty(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 22));
+            Assert.Empty(computer.GetAsyncCallStacks(Key(ProcessA, ThreadB), Start + 42));
+            Assert.Equal(0xBEEFUL, Assert.Single(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 32)).Frames.MethodIdAt(0));
+            Assert.Equal(0xCAFEUL, Assert.Single(computer.GetAsyncCallStacks(Key(ProcessA, ThreadB), Start + 47)).Frames.MethodIdAt(0));
+            Assert.Equal(0xCUL, Assert.Single(computer.GetAsyncCallStacks(Key(ProcessB, ThreadA), Start + 100)).Frames.MethodIdAt(0));
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void FramingFailure_ClosesAtBufferStartWhenNoEventTimestampIsAvailable(bool truncatedBuffer)
+        {
+            var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
+                .Armed(Start).ResumeStack(Start + 10, 1, new ulong[] { 0xA }));
+            byte[] damaged = new AsyncProfilerBufferBuilder(ThreadA, startQpc: Start + 15)
+                .Complete(Start + 20).Build();
+            if (truncatedBuffer)
+            {
+                Array.Resize(ref damaged, damaged.Length - 1);
+            }
+            else
+            {
+                damaged[AsyncProfilerBufferHeader.Size + 1] = 0x80;
+            }
+            computer.Process(damaged);
+            computer.Finish();
+
+            Assert.Equal(1, computer.ParseErrorCount);
+            Assert.Equal(Start + 15, Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 14)).EndQpc);
+            Assert.Empty(computer.GetAsyncCallStacks(Key(ThreadA), Start + 15));
+        }
+
+        [Theory]
+        [InlineData(4, 12)]
+        [InlineData(6, 15)]
+        public void EventCountMismatch_ClosesAtLastDecodedTimestamp(uint eventCount, int endOffset)
+        {
+            byte[] damaged = new AsyncProfilerBufferBuilder(ThreadA)
+                .Armed(Start).ResumeStack(Start + 10, 1, new ulong[] { 0xA })
+                .WrapperReset(Start + 12).CompleteMethod(Start + 15).Build();
+            Array.Copy(BitConverter.GetBytes(eventCount), 0, damaged, 17, sizeof(uint));
+            var computer = new AsyncProfilerComputer();
+            computer.Process(damaged);
+            computer.Finish();
+
+            Assert.Equal(1, computer.ParseErrorCount);
+            Assert.Equal(Start + endOffset, Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 11)).EndQpc);
+            Assert.Empty(computer.GetAsyncCallStacks(Key(ThreadA), Start + endOffset));
+        }
+
         [Fact]
         public void EventsBeforeReset_AreIgnored()
         {

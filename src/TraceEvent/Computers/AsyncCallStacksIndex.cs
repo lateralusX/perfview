@@ -52,6 +52,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// cache; the per-thread interval trees used for querying are rebuilt on demand and are not serialized.
     /// </para>
     /// </summary>
+    /// <remarks>
+    /// Activations returned by public queries are stable objects, not the reusable activation slots used by
+    /// internal stack-generation queries. Frame and code-address handles are scoped to this index and its
+    /// originating TraceLog. Retaining public results can keep their backing index data alive after
+    /// <see cref="TraceLog.ReleaseAsyncCallStacks"/> releases the TraceLog-owned reference.
+    /// </remarks>
     public sealed class AsyncCallStacksIndex : IFastSerializable
     {
         private const int SerializationVersion = 1;
@@ -86,17 +92,18 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         public IEnumerable<AsyncThreadKey> Threads => _threads.Keys;
 
         /// <summary>
-        /// True if the trace contained any <c>CompleteMethod</c> (normal completion) event for async call stacks of
-        /// the given <paramref name="kind"/> in any metadata/configuration epoch. Stitching uses an internal
-        /// timestamped lookup so an observation in one keyword configuration is not applied to activations from
-        /// another. When completion events were observed in an activation's epoch,
-        /// <see cref="AsyncCallStack.GetMethodCompletedFrameCount"/> is authoritative; otherwise the count is
-        /// derived from the continuation-wrapper slot for V2 or inline-resumed frames for V1. Exceptional
-        /// completions are tracked separately (see
-        /// <see cref="ExceptionCompletionObserved(ProcessIndex, AsyncCallstackKind)"/>) because unwound frames leave the sync stack.
+        /// True if a <c>CompleteMethod</c> event for <paramref name="kind"/> was observed in any configuration
+        /// epoch of the default process instance (index 0). Use <see cref="MethodCompletionObserved(AsyncCallStack)"/>
+        /// to determine the policy for a particular activation.
         /// </summary>
         public bool MethodCompletionObserved(AsyncCallstackKind kind) => MethodCompletionObserved(0, kind);
 
+        /// <summary>
+        /// True if a <c>CompleteMethod</c> event for <paramref name="kind"/> was observed in any configuration
+        /// epoch of <paramref name="processIndex"/>. This is an observation, not proof that a keyword was enabled
+        /// or that every completion was captured. The stitcher uses the activation's own epoch to choose between
+        /// recorded normal-completion counts and the V2 wrapper or V1 physical-frame fallback.
+        /// </summary>
         public bool MethodCompletionObserved(ProcessIndex processIndex, AsyncCallstackKind kind)
         {
             if (!_completionAvailability.TryGetValue(processIndex, out List<CompletionAvailabilityEpoch> epochs))
@@ -121,13 +128,16 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         /// <summary>
-        /// True if the trace contained any <c>Unwind</c> (exceptional completion) event for async call stacks of the
-        /// given <paramref name="kind"/>. Exceptional completions leave the sync stack, so they can only be observed
-        /// from these events; <see cref="AsyncCallStack.GetExceptionCompletedFrameCount"/> should be added to the
-        /// normal completed count regardless of how the latter was derived.
+        /// True if an <c>Unwind</c> event for <paramref name="kind"/> was observed in any configuration epoch
+        /// of the default process instance (index 0).
         /// </summary>
         public bool ExceptionCompletionObserved(AsyncCallstackKind kind) => ExceptionCompletionObserved(0, kind);
 
+        /// <summary>
+        /// True if an <c>Unwind</c> event for <paramref name="kind"/> was observed in any configuration epoch
+        /// of <paramref name="processIndex"/>. V1 needs these deltas because unwound frames leave the physical
+        /// stack. V2 wrapper-based counting already includes unwinds; do not add exception deltas to that fallback.
+        /// </summary>
         public bool ExceptionCompletionObserved(ProcessIndex processIndex, AsyncCallstackKind kind)
         {
             if (!_completionAvailability.TryGetValue(processIndex, out List<CompletionAvailabilityEpoch> epochs))
@@ -186,8 +196,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         /// <summary>
         /// Returns the nested async call stacks active on <paramref name="thread"/> at <paramref name="qpc"/>,
-        /// ordered bottom-to-top (ascending depth). Empty if the thread has no async call stack covering that instant.
+        /// ordered bottom-to-top (ascending depth). Intervals are half-open: <c>StartQpc &lt;= qpc &lt; EndQpc</c>.
+        /// Empty if the thread has no recorded async call stack covering that instant.
         /// </summary>
+        /// <remarks>The returned list and activation objects are not overwritten by subsequent queries.</remarks>
         public IReadOnlyList<AsyncCallStack> GetAsyncCallStacks(AsyncThreadKey thread, long qpc)
         {
             var result = new List<AsyncCallStack>();
@@ -200,7 +212,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         /// <summary>
-        /// Returns the async call stack for <paramref name="dispatcherId"/> that was running on
+        /// Returns the innermost async call stack for <paramref name="dispatcherId"/> that was running on
         /// <paramref name="thread"/> at <paramref name="qpc"/>, or null when no matching resume interval covers the
         /// timestamp.
         /// </summary>
@@ -221,9 +233,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         /// <summary>
-        /// True when normal <c>CompleteMethod</c> events were enabled for the configuration epoch containing
-        /// <paramref name="callStack"/>. When true, <see cref="AsyncCallStack.GetCompletedFrameCount(long)"/>
-        /// returns the exact leaf-frame count at a QPC within that call stack's resume interval.
+        /// True when a normal <c>CompleteMethod</c> event was observed for <paramref name="callStack"/>'s process,
+        /// instrumentation kind, and configuration epoch. This selects the stitcher's event-counting policy;
+        /// it does not prove every completion was captured.
         /// </summary>
         public bool MethodCompletionObserved(AsyncCallStack callStack)
         {
@@ -324,9 +336,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         /// <summary>
         /// Resolves the parent async call stack recorded by <paramref name="child"/>'s create event and returns the
-        /// creation QPC. The QPC can be passed to <see cref="AsyncCallStack.GetCompletedFrameCount(long)"/> to select
-        /// the parent's logical async frames at that instant. Intervening synchronous frames are not represented by
-        /// this relationship.
+        /// creation QPC. The parent is historical, not necessarily active at the child's sample time.
+        /// Recorded completion deltas can be queried at that QPC when the required events were captured.
+        /// Intervening synchronous frames are not represented by this relationship.
         /// </summary>
         public bool TryGetParentAsyncCallStack(
             AsyncCallStack child,
@@ -395,6 +407,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             return false;
         }
 
+        /// <summary>
+        /// Allocation-saving query for stack generation. The caller owns and reuses the result list; its activation
+        /// slots are overwritten by subsequent queries. Consumers must not retain those activation objects.
+        /// </summary>
         internal void GetAsyncCallStacks(AsyncThreadKey thread, long qpc, List<AsyncCallStack> result)
         {
             if (result == null)
@@ -413,15 +429,20 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
         }
 
-        /// <summary>All recorded async call stacks for a thread, in the order they closed.</summary>
+        /// <summary>All finalized async call stacks for a thread, in the order they were recorded.</summary>
+        /// <remarks>
+        /// For a recorded thread this is an index-backed view, not a snapshot of its count during construction;
+        /// unknown threads return an empty list. Individual activation objects are stable. Call <see cref="AsyncProfilerComputer.Finish"/> before
+        /// querying a computer-built index if open-at-stream-end activations must be included.
+        /// </remarks>
         public IReadOnlyList<AsyncCallStack> GetAsyncCallStacks(AsyncThreadKey thread) =>
             _threads.TryGetValue(thread, out ThreadCallStacks c)
                 ? (IReadOnlyList<AsyncCallStack>)new ThreadCallStackList(this, c)
                 : Array.Empty<AsyncCallStack>();
 
         /// <summary>
-        /// Records a finalized async call stack, interning its frames. Returns the created
-        /// <see cref="AsyncCallStack"/>. Called by <see cref="AsyncProfilerComputer"/> as async call stacks close.
+        /// Records a finalized async call stack, interning its frames.
+        /// Called by <see cref="AsyncProfilerComputer"/> as async call stacks close.
         /// </summary>
         internal void Add(AsyncThreadKey thread, AsyncCallstackKind kind, ulong[] methodIds, int[] frameStates,
             ulong dispatcherId, int depth, byte continuationIndexBase, byte wrapperCount, long startQpc, long endQpc,

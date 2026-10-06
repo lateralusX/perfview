@@ -4,6 +4,7 @@ using Microsoft.Diagnostics.Tracing.Stacks;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 
 namespace Microsoft.Diagnostics.Tracing.Computers
 {
@@ -136,6 +137,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             m_contextAncestryAugmenter?.Clear();
             m_contextAncestryAugmenter = null;
             m_syncFrameKinds = null;
+            m_boxedStateMachineMethods = null;
+            m_stateMachineMethodByTypeName = null;
             m_sampleDiagnostics = null;
             m_logicalSyncFrameByCodeAddress = null;
             m_frameByIdentity = null;
@@ -168,6 +171,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             m_syncFrames = new List<StitchSyncFrame>();
             m_stitchedFrames = new List<StitchedFrame>();
             m_syncFrameKinds = new Dictionary<CodeAddressIndex, StitchSyncFrameKind>();
+            m_boxedStateMachineMethods = new Dictionary<CodeAddressIndex, MethodIndex>();
             m_logicalSyncFrameByCodeAddress =
                 new Dictionary<CodeAddressIndex, StackSourceFrameIndex>();
             m_frameByIdentity =
@@ -199,11 +203,61 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                              codeAddress.ModuleName,
                              AsyncStitchBoundary.HostModuleName + ".dll",
                              StringComparison.OrdinalIgnoreCase));
-                    kind = AsyncStitchBoundary.ClassifyV1SynchronousFrame(frameName, isHostModule);
+                    kind = AsyncStitchBoundary.ClassifySynchronousFrame(frameName, isHostModule);
                     m_syncFrameKinds.Add(ca, kind);
                 }
-                m_syncFrames.Add(new StitchSyncFrame(ca, method, kind));
+                MethodIndex boxedMethod = m_syncFrames.Count == 0 && method != MethodIndex.Invalid
+                    ? GetBoxedStateMachineMethod(ca)
+                    : MethodIndex.Invalid;
+                m_syncFrames.Add(new StitchSyncFrame(ca, method, kind, boxedMethod));
             }
+        }
+
+        private MethodIndex GetBoxedStateMachineMethod(CodeAddressIndex codeAddressIndex)
+        {
+            if (m_boxedStateMachineMethods.TryGetValue(codeAddressIndex, out MethodIndex cached))
+            {
+                return cached;
+            }
+
+            TraceCodeAddress codeAddress = m_eventLog.CodeAddresses[codeAddressIndex];
+            bool isHostModule =
+                string.Equals(codeAddress.ModuleName, AsyncStitchBoundary.HostModuleName, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(codeAddress.ModuleName, AsyncStitchBoundary.HostModuleName + ".dll", StringComparison.OrdinalIgnoreCase);
+            MethodIndex method = MethodIndex.Invalid;
+            if (AsyncStitchBoundary.TryGetBoxedStateMachineTypeName(
+                codeAddress.FullMethodName, isHostModule, out string stateMachineType))
+            {
+                if (m_stateMachineMethodByTypeName == null)
+                {
+                    m_stateMachineMethodByTypeName = new Dictionary<string, MethodIndex>(StringComparer.Ordinal);
+                    TraceMethods methods = m_eventLog.CodeAddresses.Methods;
+                    for (int i = 0; i < methods.Count; i++)
+                    {
+                        string typeName = AsyncStitchBoundary.GetStateMachineTypeName(methods.FullMethodName((MethodIndex)i));
+                        if (typeName == null)
+                        {
+                            continue;
+                        }
+
+                        MethodIndex canonical = NormalizeMethod((MethodIndex)i);
+                        if (m_stateMachineMethodByTypeName.TryGetValue(typeName, out MethodIndex existing) &&
+                            existing != canonical)
+                        {
+                            // Type names alone cannot disambiguate identically named types in different modules.
+                            canonical = MethodIndex.Invalid;
+                        }
+                        m_stateMachineMethodByTypeName[typeName] = canonical;
+                    }
+                }
+                if (!m_stateMachineMethodByTypeName.TryGetValue(stateMachineType, out method))
+                {
+                    method = MethodIndex.Invalid;
+                }
+            }
+
+            m_boxedStateMachineMethods.Add(codeAddressIndex, method);
+            return method;
         }
 
         private MethodIndex NormalizeMethod(MethodIndex method)
@@ -314,6 +368,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 : 0;
             bool historicalParent =
                 frame.ContextKind == StitchedFrameContextKind.HistoricalParent;
+            bool dispatchTarget = frame.Origin == StitchedFrameOrigin.AsyncDispatchTarget;
+            bool current = frame.Origin == StitchedFrameOrigin.AsyncCurrent;
+            bool completing = frame.Origin == StitchedFrameOrigin.AsyncCompleting;
+            int presentationState = completing ? -2 : (current ? -1 : state);
             bool annotateActive =
                 m_transforms.EnableActiveAsyncFrameAnnotations &&
                 frame.ContextKind == StitchedFrameContextKind.Active;
@@ -324,23 +382,26 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 methodId,
                 state,
                 frame.ContextKind,
-                annotateActive);
+                annotateActive,
+                frame.Origin,
+                frame.IsStateMachineBoxCarrier);
             if (m_frameByIdentity.TryGetValue(identity, out StackSourceFrameIndex existingFrame))
             {
                 return existingFrame;
             }
 
             int identityTag = m_outputStackSource.NextAsyncFrameIdentityTag();
-            const string ParentPrefix = "[Async parent] ";
-            const string ActivePrefix = "[Async] ";
             string prefix = historicalParent
-                ? ParentPrefix
-                : (annotateActive ? ActivePrefix : string.Empty);
+                ? GetAnnotationPrefix(kind, historicalParent: true)
+                : (annotateActive
+                    ? GetAnnotationPrefix(kind, historicalParent: false)
+                    : string.Empty);
             StackSourceFrameIndex asyncFrame;
             if (frame.Presentation == StitchedFramePresentation.LogicalStateMachineMethod &&
                 frame.CodeAddress != CodeAddressIndex.Invalid)
             {
-                TraceCodeAddress codeAddress = m_eventLog.CodeAddresses[frame.CodeAddress];
+                TraceCodeAddress codeAddress = m_eventLog.CodeAddresses[
+                    frame.IsStateMachineBoxCarrier ? segment.CodeAddressAt(segmentFrameIndex) : frame.CodeAddress];
                 if (AsyncStitchBoundary.TryGetLogicalStateMachineMethodName(
                     codeAddress.FullMethodName,
                     out string logicalName,
@@ -350,7 +411,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                         m_outputStackSource.Interner.ModuleIntern(codeAddress.ModuleName);
                     asyncFrame =
                         m_outputStackSource.Interner.FrameIntern(
-                            FormatUnresolvedV1Method(logicalName, stateMachineSuffix),
+                            FormatUnresolvedV1Method(
+                                logicalName,
+                                stateMachineSuffix,
+                                historicalParent || annotateActive ? presentationState : (int?)null),
                             module,
                             identityTag,
                             prefix);
@@ -397,14 +461,38 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             m_outputStackSource.SetAsyncFrameInfo(
                 asyncFrame,
                 new AsyncStackSourceFrameInfo(
-                    kind, processIndex, frame.CodeAddress, methodId, state, historicalParent));
+                    kind, processIndex, frame.CodeAddress, methodId, state, historicalParent, dispatchTarget,
+                    current, frame.IsStateMachineBoxCarrier, completing));
             return asyncFrame;
         }
 
         private static string FormatUnresolvedV1Method(
             string logicalName,
-            string stateMachineSuffix) =>
-            logicalName + " [" + stateMachineSuffix + "]";
+            string stateMachineSuffix,
+            int? state = null)
+        {
+            string ordinal = stateMachineSuffix.StartsWith("d__", StringComparison.Ordinal)
+                ? stateMachineSuffix.Substring(3)
+                : (stateMachineSuffix.StartsWith("d_", StringComparison.Ordinal)
+                    ? stateMachineSuffix.Substring(2)
+                    : stateMachineSuffix);
+            return state.HasValue
+                ? logicalName + " [ordinal " + ordinal + ", state " +
+                    state.Value.ToString(CultureInfo.InvariantCulture) + "]"
+                : logicalName + " [ordinal " + ordinal + "]";
+        }
+
+        private static string GetAnnotationPrefix(
+            AsyncCallstackKind kind,
+            bool historicalParent)
+        {
+            string version = kind == AsyncCallstackKind.StateMachineAsync
+                ? "V1"
+                : "V2";
+            return historicalParent
+                ? "[Async parent " + version + "] "
+                : "[Async " + version + "] ";
+        }
 
         private StackSourceFrameIndex InternAsyncContextTransitionFrame()
         {
@@ -468,6 +556,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         private List<AsyncSegmentPlacement> m_segmentPlacements;
         private AsyncContextAncestryAugmenter m_contextAncestryAugmenter;
         private Dictionary<CodeAddressIndex, StitchSyncFrameKind> m_syncFrameKinds;
+        private Dictionary<CodeAddressIndex, MethodIndex> m_boxedStateMachineMethods;
+        private Dictionary<string, MethodIndex> m_stateMachineMethodByTypeName;
         private Dictionary<CodeAddressIndex, StackSourceFrameIndex> m_logicalSyncFrameByCodeAddress;
         private Dictionary<AsyncStackSourceFrameIdentity, StackSourceFrameIndex> m_frameByIdentity;
         private StackSourceFrameIndex m_asyncContextTransitionFrame = StackSourceFrameIndex.Invalid;
@@ -482,7 +572,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 ulong methodId,
                 int state,
                 StitchedFrameContextKind contextKind,
-                bool annotateActive)
+                bool annotateActive,
+                StitchedFrameOrigin origin,
+                bool stateMachineBoxCarrier)
             {
                 Kind = kind;
                 ProcessIndex = processIndex;
@@ -491,6 +583,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 State = state;
                 ContextKind = contextKind;
                 AnnotateActive = annotateActive;
+                Origin = origin;
+                StateMachineBoxCarrier = stateMachineBoxCarrier;
             }
 
             public bool Equals(AsyncStackSourceFrameIdentity other) =>
@@ -500,7 +594,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 MethodId == other.MethodId &&
                 State == other.State &&
                 ContextKind == other.ContextKind &&
-                AnnotateActive == other.AnnotateActive;
+                AnnotateActive == other.AnnotateActive &&
+                Origin == other.Origin &&
+                StateMachineBoxCarrier == other.StateMachineBoxCarrier;
 
             public override bool Equals(object obj) =>
                 obj is AsyncStackSourceFrameIdentity other && Equals(other);
@@ -515,7 +611,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     hash = (hash * 397) ^ MethodId.GetHashCode();
                     hash = (hash * 397) ^ State;
                     hash = (hash * 397) ^ (int)ContextKind;
-                    return (hash * 397) ^ AnnotateActive.GetHashCode();
+                    hash = (hash * 397) ^ AnnotateActive.GetHashCode();
+                    hash = (hash * 397) ^ (int)Origin;
+                    return (hash * 397) ^ StateMachineBoxCarrier.GetHashCode();
                 }
             }
 
@@ -526,6 +624,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             private readonly int State;
             private readonly StitchedFrameContextKind ContextKind;
             private readonly bool AnnotateActive;
+            private readonly StitchedFrameOrigin Origin;
+            private readonly bool StateMachineBoxCarrier;
         }
 
         private readonly struct AsyncManagedMethodIdentity : IEquatable<AsyncManagedMethodIdentity>

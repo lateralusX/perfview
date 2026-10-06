@@ -18,6 +18,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// </summary>
     public enum AsyncCallStackFramesIndex
     {
+        /// <summary>No interned frame list.</summary>
         Invalid = -1,
     }
 
@@ -27,9 +28,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// </summary>
     public readonly struct AsyncThreadKey : IEquatable<AsyncThreadKey>
     {
+        /// <summary>The unique process instance in the owning trace, not its reusable OS process id.</summary>
         public readonly ProcessIndex ProcessIndex;
+        /// <summary>The OS thread id recorded in the async-profiler buffer header.</summary>
         public readonly ulong OsThreadId;
 
+        /// <summary>Creates a key for a process instance and OS thread.</summary>
         public AsyncThreadKey(ProcessIndex processIndex, ulong osThreadId)
         {
             ProcessIndex = processIndex;
@@ -44,10 +48,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
     /// <summary>
     /// The frames of an async call stack, ordered leaf-first, interned (deduplicated) across the trace.
-    /// <see cref="MethodIdAt"/> is a native IP for <see cref="AsyncCallstackKind.RuntimeAsync"/> and a method
-    /// ID matching CLR MethodLoad/MethodDCStart events for <see cref="AsyncCallstackKind.StateMachineAsync"/>;
-    /// state-machine frames also carry a
-    /// per-frame state (0 for runtime frames).
+    /// <see cref="MethodIdAt"/> returns native code IPs for both instrumentation families: runtime-async
+    /// continuation IPs for V2 and state-machine <c>MoveNext</c> body IPs for V1. V1 frames also carry raw signed
+    /// compiler states. Method ids are not CLR MethodLoad identifiers or MethodDesc handles.
     /// </summary>
     public sealed class AsyncCallStackFrames
     {
@@ -63,19 +66,24 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             ProcessIndex = processIndex;
         }
 
+        /// <summary>The V1 or V2 instrumentation family that emitted these frames.</summary>
         public AsyncCallstackKind Kind { get; }
+        /// <summary>The number of frames, ordered leaf-to-root.</summary>
         public int FrameCount => _methodIds.Length;
+        /// <summary>The native code IP emitted for a frame, or 0 for a runtime-emitted sentinel.</summary>
         public ulong MethodIdAt(int index) => _methodIds[index];
+        /// <summary>The raw signed V1 compiler state for a frame, not an IL/native offset; 0 for V2.</summary>
         public int FrameStateAt(int index) => _frameStates != null ? _frameStates[index] : 0;
 
         /// <summary>The process these frames were captured in. Build-time only (used to resolve addresses); not serialized.</summary>
         internal ProcessIndex ProcessIndex { get; }
 
         /// <summary>
-        /// The resolved <see cref="CodeAddressIndex"/> for frame <paramref name="index"/> (a location in a
-        /// method/module in <see cref="TraceLog.CodeAddresses"/>), or <see cref="CodeAddressIndex.Invalid"/> if the
-        /// frames were never symbolized or the frame's method could not be resolved. Use it with
-        /// <see cref="TraceLog.CodeAddresses"/> to obtain the method name lazily.
+        /// The registered <see cref="CodeAddressIndex"/> for frame <paramref name="index"/> in the originating
+        /// <see cref="TraceLog.CodeAddresses"/> table, or <see cref="CodeAddressIndex.Invalid"/> if no address was
+        /// registered or the index is out of range. A valid code-address index does not guarantee a resolved
+        /// method or module; use <see cref="TraceCodeAddresses.MethodIndex"/> to check method resolution.
+        /// Names and source information remain owned by the originating TraceLog, not this frame list.
         /// </summary>
         public CodeAddressIndex CodeAddressAt(int index) =>
             _codeAddresses != null && (uint)index < (uint)_codeAddresses.Length ? _codeAddresses[index] : CodeAddressIndex.Invalid;
@@ -172,7 +180,15 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// reference to the interned <see cref="Frames"/>. Async call stacks nest on a thread, so several can be
     /// active at one instant; <see cref="AsyncCallStacksIndex.GetAsyncCallStacks(AsyncThreadKey, long)"/> returns those covering a
     /// time, ordered by depth (bottom-to-top).
+    /// A reset or decode failure can close the interval early; an activation still open at the end of the stream
+    /// is finalized by <see cref="AsyncProfilerComputer.Finish"/> with <see cref="EndQpc"/> equal to
+    /// <see cref="long.MaxValue"/>.
     /// </summary>
+    /// <remarks>
+    /// Public index and TraceLog queries return stable activation objects that can be retained across later queries
+    /// and <see cref="TraceLog.ReleaseAsyncCallStacks"/>. Internal allocation-saving queries used during stack
+    /// generation reuse activation objects; contexts supplied to presentation callbacks have that shorter lifetime.
+    /// </remarks>
     public sealed class AsyncCallStack
     {
         private CompletionDelta[] _methodCompletions;    // ascending by Qpc; CompleteMethod events (delta 1)
@@ -226,7 +242,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <summary>The nesting depth (0 = outermost) of this async call stack on its thread.</summary>
         public int Depth { get; private set; }
 
-        /// <summary>A compact handle to the interned frames (stable for serialization).</summary>
+        /// <summary>A compact handle to the interned frames, scoped to the originating async index.</summary>
         public AsyncCallStackFramesIndex FramesIndex { get; private set; }
 
         /// <summary>The interned frames of this async call stack.</summary>
@@ -239,14 +255,15 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// activation. Present as a per-run field; 0 if metadata was not seen. Each wrapper-index reset means this many methods completed.</summary>
         public byte WrapperCount { get; private set; }
 
+        /// <summary>The inclusive resume timestamp in the trace's QPC domain.</summary>
         public long StartQpc { get; private set; }
+        /// <summary>The exclusive end timestamp in the trace's QPC domain; <see cref="long.MaxValue"/> if open at stream end.</summary>
         public long EndQpc { get; private set; }
 
         /// <summary>
-        /// The exact number of leaf frames of <see cref="Frames"/> that have completed by <paramref name="qpc"/>,
-        /// derived from this async call stack's <c>CompleteMethod</c> and <c>Unwind</c> events (normal completions
-        /// plus exceptional unwinds). The still-live async stack is the frames with these leaf frames trimmed. This
-        /// is the precise "complete story" and is preferred when those events are present.
+        /// The recorded number of completed leaf frames at or before <paramref name="qpc"/>, summed from
+        /// <c>CompleteMethod</c> and <c>Unwind</c> events. Missing completion events are not inferred.
+        /// <see cref="AsyncCpuStackStitcher"/> selects the appropriate event or physical-stack fallback policy.
         /// </summary>
         public int GetCompletedFrameCount(long qpc) =>
             GetMethodCompletedFrameCount(qpc) + GetExceptionCompletedFrameCount(qpc);
@@ -261,8 +278,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         /// <summary>
         /// The number of leaf frames completed by <paramref name="qpc"/> via <c>Unwind</c> (exception) events (each
-        /// contributes its unwound frame count). Exceptional completions leave the sync stack, so this is the only
-        /// way to observe them; add it to the normal completed count regardless of how the latter was derived.
+        /// contributes its unwound frame count). For V1, add this to recorded normal completions, or reconcile it
+        /// with physical inline matches that may include still-finishing exceptional methods.
+        /// The V2 wrapper-index fallback already counts exceptional unwinds, so
+        /// adding these deltas to that fallback would double-count them.
         /// </summary>
         public int GetExceptionCompletedFrameCount(long qpc) => SumDeltasUpTo(_exceptionCompletions, qpc);
 
@@ -295,8 +314,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// the current slot, because the resets that advanced it before attach could not be observed. Subtracting
         /// it makes the count start from that value, so only completions observed since resume are counted.
         /// </para>
-        /// Use this overload when <c>CompleteMethod</c> events were not observed in this activation's
+        /// Use this overload for V2 when <c>CompleteMethod</c> events were not observed in this activation's
         /// metadata/configuration epoch; otherwise prefer <see cref="GetCompletedFrameCount(long)"/>.
+        /// Wrapper advancement includes exceptional unwinds, so do not add the recorded exception count again.
+        /// V1 completion counting instead uses normal-completion events or physical <c>MoveNext</c> matches,
+        /// plus recorded exception deltas.
         /// </summary>
         public int GetCompletedFrameCount(long qpc, int currentMethodIndex)
         {
@@ -423,9 +445,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// (StateMachineAsync) instrumentation. The recorded, queryable, serializable result is an
     /// <see cref="AsyncCallStacksIndex"/> (see <see cref="Index"/>).
     /// <para>
-    /// Model: a thread is <b>ignored until its first <c>ResetAsyncThreadContext</c></b> (live-attach safety);
-    /// a reset clears that thread's nesting stack. Async call stacks <b>nest</b> on a thread — a
-    /// <b>resume</b> callstack pushes an <see cref="AsyncCallStackBuilder"/>, an <b>append</b> callstack
+    /// Each process instance owns its manifest and clock state. A thread is ignored until usable metadata and a
+    /// <c>ResetAsyncThreadContext</c> at or after that metadata's first QPC have been received. An armed reset
+    /// commits open activations at the reset timestamp before clearing that thread's nesting stack.
+    /// Async call stacks nest on a thread: a resume callstack pushes an activation, an append callstack
     /// extends the top one, and a suspend/complete context pops it. In V1 the frames are assembled
     /// incrementally (resume + appends) and are only final at close, so frames are <b>finalized and
     /// interned at pop</b>.
@@ -453,12 +476,18 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         private ProcessIndex _currentProcessIndex;
 
         /// <summary>
-        /// Fired for each frame methodId as a resume/append callstack is processed (i.e. during the event stream,
+        /// Fired for each nonzero frame methodId in an accepted resume/append callstack (during the event stream,
         /// before end-of-trace rundown), letting the host pre-register the frame's code address so a covering
         /// method load/rundown binds it. This makes frames resolvable even for async call stacks that are only
-        /// committed later at <see cref="Finish"/> (still live at capture end). Args: processIndex, methodId, kind.
+        /// committed later at <see cref="Finish"/> (still live at capture end). Arguments: processIndex,
+        /// native code IP (for both V1 and V2), instrumentation kind.
         /// </summary>
         public Action<ProcessIndex, ulong, AsyncCallstackKind> OnFrameObserved;
+
+        /// <summary>
+        /// Reports each decode failure and its process instance after invalidating uncertain activation state.
+        /// </summary>
+        public event Action<ProcessIndex, AsyncProfilerParseError> ParseError;
 
         /// <summary>
         /// Binds the computer to a live parser: it resolves each carrying event to a process instance, decodes the
@@ -479,25 +508,46 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         {
         }
 
-        /// <summary>The built index (recorded async call stacks + interned frames). Serializable and queryable.</summary>
+        /// <summary>
+        /// The queryable, serializable index of finalized activations and interned frames. Call <see cref="Finish"/>
+        /// after processing the stream to include activations that have not yet suspended or completed.
+        /// </summary>
         public AsyncCallStacksIndex Index => _index;
 
-        /// <summary>True once an <c>AsyncProfilerMetadata</c> sub-event has established the QPC frequency.</summary>
+        /// <summary>True while usable metadata provides the QPC frequency for the default process instance (index 0).</summary>
         public bool ClockKnown => ClockKnownForProcess(0);
 
-        /// <summary>The continuation-wrapper pool size (<c>ContinuationWrapper.COUNT</c>) from metadata; 0 until seen.</summary>
+        /// <summary>The wrapper pool size for the default process instance (index 0), or 0 without usable metadata.</summary>
         public byte WrapperCount => GetWrapperCount(0);
 
         /// <summary>The number of distinct interned frame lists (useful for asserting dedup).</summary>
         public int DistinctFramesCount => _index.DistinctFramesCount;
 
-        /// <summary>Decodes an <c>AsyncEvents</c> buffer directly into the index (test / manual-drive path).</summary>
+        /// <summary>The number of decode failures reported by this computer.</summary>
+        public long ParseErrorCount { get; private set; }
+
+        /// <summary>
+        /// Decodes an async-profiler buffer for the default process instance (index 0). For multiple processes,
+        /// use <see cref="Process(byte[], ProcessIndex)"/> so their manifests and activation state remain separate.
+        /// </summary>
         public void Process(byte[] buffer)
         {
             Process(buffer, 0);
         }
 
         /// <summary>Decodes an async-profiler buffer for one process instance into the index.</summary>
+        /// <param name="buffer">The raw buffer from an <c>AsyncEvents</c> event.</param>
+        /// <param name="processIndex">The unique process instance in the trace, not its reusable OS process id.</param>
+        /// <remarks>
+        /// Processing is synchronous; reuse the same computer and process index for that process's buffers.
+        /// On a decode failure, open activations on the affected thread are closed at the failing event's QPC,
+        /// or the last decoded QPC if its timestamp is unavailable, and the thread remains unarmed until a valid
+        /// reset. An unreadable header discards open activations throughout the process; malformed metadata
+        /// closes all of that process's open prefixes where the error QPC is known.
+        /// Unreadable headers and malformed metadata require fresh metadata before
+        /// resets can re-arm that process. Previously finalized intervals and other processes are retained.
+        /// Failures are exposed by <see cref="ParseError"/> and <see cref="ParseErrorCount"/>.
+        /// </remarks>
         public void Process(byte[] buffer, ProcessIndex processIndex)
         {
             ProcessState process = GetOrCreateProcess(processIndex);
@@ -505,32 +555,33 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             AsyncProfilerTraceEventParser.ParseBuffer(buffer, process.Manifest, this);
         }
 
-        /// <summary>Resolves an interned frames handle to its frames.</summary>
+        /// <summary>Resolves an interned frames handle in this computer's index; null when out of range.</summary>
         public AsyncCallStackFrames GetFrames(AsyncCallStackFramesIndex index) => _index.GetFrames(index);
 
         /// <summary>
         /// Returns the nested async call stacks active on <paramref name="thread"/> at <paramref name="qpc"/>,
         /// ordered bottom-to-top (ascending depth). Empty if the thread was unarmed or idle at that instant.
         /// </summary>
+        /// <remarks>Returns finalized intervals only, with stable activation objects that later queries do not overwrite.</remarks>
         public IReadOnlyList<AsyncCallStack> GetAsyncCallStacks(AsyncThreadKey thread, long qpc) => _index.GetAsyncCallStacks(thread, qpc);
 
-        /// <summary>Converts an absolute QPC timestamp to UTC using the current clock sync; null until <see cref="ClockKnown"/>.</summary>
+        /// <summary>Converts QPC to UTC for the default process instance (index 0); null without usable metadata.</summary>
         public DateTime? QpcToDateTime(long qpc)
         {
             return QpcToDateTime(0, qpc);
         }
 
-        /// <summary>True once metadata has established the QPC frequency for <paramref name="processIndex"/>.</summary>
+        /// <summary>True while usable metadata provides the QPC frequency for <paramref name="processIndex"/>.</summary>
         public bool ClockKnownForProcess(ProcessIndex processIndex) =>
             _processes.TryGetValue(processIndex, out ProcessState process) && process.QpcFrequency != 0;
 
-        /// <summary>The continuation-wrapper pool size currently configured for <paramref name="processIndex"/>.</summary>
+        /// <summary>The wrapper pool size for <paramref name="processIndex"/>, or 0 without usable metadata.</summary>
         public byte GetWrapperCount(ProcessIndex processIndex) =>
             _processes.TryGetValue(processIndex, out ProcessState process) ? process.WrapperCount : (byte)0;
 
         /// <summary>
         /// Converts an absolute QPC timestamp to UTC using the current clock synchronization for
-        /// <paramref name="processIndex"/>; returns null until that process has emitted metadata.
+        /// <paramref name="processIndex"/>; returns null when that process has no usable metadata.
         /// </summary>
         public DateTime? QpcToDateTime(ProcessIndex processIndex, long qpc)
         {
@@ -729,7 +780,36 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         void IAsyncProfilerSubEventSink.OnUnknown(in AsyncUnknownEvent e) { }
 
-        void IAsyncProfilerSubEventSink.OnParseError(in AsyncProfilerParseError e) { }
+        void IAsyncProfilerSubEventSink.OnParseError(in AsyncProfilerParseError e)
+        {
+            ParseErrorCount++;
+            bool processWide = !e.BufferHeader.HasValue || e.EventId == AsyncEventID.AsyncProfilerMetadata;
+            if (processWide)
+            {
+                foreach (KeyValuePair<AsyncThreadKey, AsyncCallStacks> thread in _threads)
+                {
+                    if (thread.Key.ProcessIndex == _currentProcessIndex)
+                    {
+                        InvalidateThread(thread.Key, thread.Value, e.TimestampQpc);
+                    }
+                }
+                ProcessState process = CurrentProcess;
+                process.FirstMetadataQpc = long.MaxValue;
+                process.QpcFrequency = 0;
+                process.QpcSync = 0;
+                process.UtcSync = 0;
+                process.WrapperCount = 0;
+            }
+            else
+            {
+                AsyncThreadKey key = ThreadKeyOf(e.BufferHeader.Value.OsThreadId);
+                if (_threads.TryGetValue(key, out AsyncCallStacks state))
+                {
+                    InvalidateThread(key, state, e.TimestampQpc);
+                }
+            }
+            ParseError?.Invoke(_currentProcessIndex, e);
+        }
 
         #endregion
 
@@ -763,6 +843,24 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 _threads[key] = state;
             }
             return state;
+        }
+
+        private void InvalidateThread(AsyncThreadKey key, AsyncCallStacks state, long? endQpc)
+        {
+            state.Armed = false;
+            while (state.Top != null)
+            {
+                AsyncCallStackBuilder builder = state.Pop();
+                if (endQpc.HasValue && endQpc.Value > builder.StartQpc)
+                {
+                    Commit(key, builder, endQpc.Value);
+                }
+                else
+                {
+                    builder.Clear();
+                    _builderPool.Push(builder);
+                }
+            }
         }
 
         private void CloseTop(AsyncThreadKey key, long qpc)

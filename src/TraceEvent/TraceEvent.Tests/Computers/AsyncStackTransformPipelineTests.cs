@@ -111,7 +111,7 @@ namespace Microsoft.Diagnostics.Tracing.Tests.Computers
         }
 
         [Fact]
-        public void SystemPrivateCoreLibCleanup_IsOptIn()
+        public void AsyncInfrastructureCleanup_IsOptIn()
         {
             var diagnostics = new StitchDiagnostics();
             var frames = new List<StitchedFrame>
@@ -129,17 +129,41 @@ namespace Microsoft.Diagnostics.Tracing.Tests.Computers
                 diagnostics,
                 infrastructureCodeAddress: CA(31));
 
+            Assert.False(pipeline.EnableAsyncInfrastructureCleanup);
             pipeline.ApplyInPlace(context);
             Assert.Equal(new[] { CA(30), CA(31), CA(32) }, frames.Select(frame => frame.CodeAddress));
 
-            pipeline.EnableSystemPrivateCoreLibCleanup = true;
+            pipeline.EnableAsyncInfrastructureCleanup = true;
             pipeline.ApplyInPlace(context);
             Assert.Equal(new[] { CA(30), CA(32) }, frames.Select(frame => frame.CodeAddress));
-            Assert.Equal(1, diagnostics.SystemPrivateCoreLibFramesCollapsed);
+            Assert.Equal(1, diagnostics.AsyncInfrastructureFramesCollapsed);
         }
 
         [Fact]
-        public void SystemPrivateCoreLibCleanup_RemovesBuilderAwaitUnsafeOnCompletedOverloads()
+        public void AsyncInfrastructureCleanup_DispatcherCreation_IsOptInAndPreservesTheApplicationFrame()
+        {
+            var diagnostics = new StitchDiagnostics();
+            var frames = new List<StitchedFrame>
+            {
+                Sync(34, StitchSyncFrameKind.V1DispatcherCreationInfrastructure),
+                Sync(35),
+                Sync(36, StitchSyncFrameKind.SystemPrivateCoreLibThreadPoolDispatch),
+            };
+            var pipeline = new AsyncStackTransformPipeline();
+            AsyncStackTransformContext context = Context(frames, diagnostics);
+
+            pipeline.ApplyInPlace(context);
+            Assert.Equal(new[] { CA(34), CA(35), CA(36) }, frames.Select(frame => frame.CodeAddress));
+            Assert.Equal(0, diagnostics.AsyncInfrastructureFramesCollapsed);
+
+            pipeline.EnableAsyncInfrastructureCleanup = true;
+            pipeline.ApplyInPlace(context);
+            Assert.Equal(new[] { CA(35), CA(36) }, frames.Select(frame => frame.CodeAddress));
+            Assert.Equal(1, diagnostics.AsyncInfrastructureFramesCollapsed);
+        }
+
+        [Fact]
+        public void AsyncInfrastructureCleanup_RemovesBuilderAwaitUnsafeOnCompletedOverloads()
         {
             var diagnostics = new StitchDiagnostics();
             var frames = new List<StitchedFrame>
@@ -154,18 +178,127 @@ namespace Microsoft.Diagnostics.Tracing.Tests.Computers
                 Sync(47, StitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure),
                 Sync(48, StitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure),
                 Sync(49), // User/custom awaiter, builder, or bridge method remains ordinary.
-                Sync(50),
+                Sync(50, StitchSyncFrameKind.SystemPrivateCoreLibThreadPoolDispatch),
             };
             var pipeline = new AsyncStackTransformPipeline
             {
                 EnableConservativeTransforms = false,
-                EnableSystemPrivateCoreLibCleanup = true,
+                EnableAsyncInfrastructureCleanup = true,
             };
 
             pipeline.ApplyInPlace(Context(frames, diagnostics));
 
             Assert.Equal(new[] { CA(40), CA(49), CA(50) }, frames.Select(frame => frame.CodeAddress));
-            Assert.Equal(8, diagnostics.SystemPrivateCoreLibFramesCollapsed);
+            Assert.Equal(8, diagnostics.AsyncInfrastructureFramesCollapsed);
+        }
+
+        [Fact]
+        public void AsyncInfrastructureCleanup_RemovesCompleteTaskCompletionChain()
+        {
+            var diagnostics = new StitchDiagnostics();
+            var frames = new List<StitchedFrame>
+            {
+                Sync(60),
+                Sync(61, StitchSyncFrameKind.SystemPrivateCoreLibTaskRunContinuations),
+                Sync(62, StitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult),
+                Sync(63, StitchSyncFrameKind.SystemPrivateCoreLibTaskCompletionSourceSetResult),
+                Sync(64),
+            };
+            var pipeline = new AsyncStackTransformPipeline
+            {
+                EnableConservativeTransforms = false,
+                EnableAsyncInfrastructureCleanup = true,
+            };
+
+            pipeline.ApplyInPlace(Context(frames, diagnostics));
+
+            Assert.Equal(new[] { CA(60), CA(64) }, frames.Select(frame => frame.CodeAddress));
+            Assert.Equal(3, diagnostics.AsyncInfrastructureFramesCollapsed);
+        }
+
+        [Fact]
+        public void AsyncInfrastructureCleanup_PreservesIsolatedTaskCompletionSourceSetResult()
+        {
+            var diagnostics = new StitchDiagnostics();
+            var frames = new List<StitchedFrame>
+            {
+                Sync(70),
+                Sync(71, StitchSyncFrameKind.SystemPrivateCoreLibTaskCompletionSourceSetResult),
+                Sync(72),
+            };
+            var pipeline = new AsyncStackTransformPipeline
+            {
+                EnableConservativeTransforms = false,
+                EnableAsyncInfrastructureCleanup = true,
+            };
+
+            pipeline.ApplyInPlace(Context(frames, diagnostics));
+
+            Assert.Equal(new[] { CA(70), CA(71), CA(72) }, frames.Select(frame => frame.CodeAddress));
+            Assert.Equal(0, diagnostics.AsyncInfrastructureFramesCollapsed);
+        }
+
+        [Theory]
+        [InlineData(1)]
+        [InlineData(2)]
+        [InlineData(3)]
+        public void AsyncInfrastructureCleanup_TruncatedPrefixBeforeCompleteChains_IsBoundsSafe(int chainCount)
+        {
+            var diagnostics = new StitchDiagnostics();
+            var frames = new List<StitchedFrame>
+            {
+                Sync(80, StitchSyncFrameKind.SystemPrivateCoreLibTaskRunContinuations),
+                Sync(81, StitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult),
+            };
+            for (int i = 0; i < chainCount; i++)
+            {
+                frames.Add(Sync(82, StitchSyncFrameKind.SystemPrivateCoreLibTaskRunContinuations));
+                frames.Add(Sync(83, StitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult));
+                frames.Add(Sync(84, StitchSyncFrameKind.SystemPrivateCoreLibTaskCompletionSourceSetResult));
+            }
+            var pipeline = new AsyncStackTransformPipeline
+            {
+                EnableConservativeTransforms = false,
+                EnableAsyncInfrastructureCleanup = true,
+            };
+
+            pipeline.ApplyInPlace(Context(frames, diagnostics));
+
+            Assert.Empty(frames);
+            Assert.Equal(2 + 3 * chainCount, diagnostics.AsyncInfrastructureFramesCollapsed);
+        }
+
+        [Theory]
+        [InlineData("", 0, "")]
+        [InlineData("R", 1, "")]
+        [InlineData("RT", 2, "")]
+        [InlineData("RS", 1, "S")]
+        [InlineData("TRS", 2, "S")]
+        [InlineData("RATS", 2, "AS")]
+        [InlineData("RSTR", 3, "S")]
+        [InlineData("RTRTSS", 5, "S")]
+        public void AsyncInfrastructureCleanup_IncompleteChains_PreserveSetResult(string pattern, int collapsed, string expected)
+        {
+            var diagnostics = new StitchDiagnostics();
+            var frames = new List<StitchedFrame>();
+            foreach (char frame in pattern)
+            {
+                StitchSyncFrameKind kind = frame == 'R' ? StitchSyncFrameKind.SystemPrivateCoreLibTaskRunContinuations
+                    : frame == 'T' ? StitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult
+                    : frame == 'S' ? StitchSyncFrameKind.SystemPrivateCoreLibTaskCompletionSourceSetResult
+                    : StitchSyncFrameKind.None;
+                frames.Add(Sync(frame, kind));
+            }
+            var pipeline = new AsyncStackTransformPipeline
+            {
+                EnableConservativeTransforms = false,
+                EnableAsyncInfrastructureCleanup = true,
+            };
+
+            pipeline.ApplyInPlace(Context(frames, diagnostics));
+
+            Assert.Equal(expected, new string(frames.ConvertAll(frame => (char)frame.CodeAddress).ToArray()));
+            Assert.Equal(collapsed, diagnostics.AsyncInfrastructureFramesCollapsed);
         }
 
         [Fact]
