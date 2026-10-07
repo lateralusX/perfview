@@ -96,7 +96,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// between exactly matched adjacent RuntimeAsync activations with verified dispatcher boundaries,
         /// and an exact classified completion bridge
         /// from a remaining V2 dispatcher to a matched V1 activation. Unresolved, non-CoreLib, or incomplete
-        /// handoffs preserve the complete span. Disabling this does not disable structural boundary replacement.
+        /// handoffs preserve the complete span. Disabling this does not disable structural boundary replacement
+        /// or verified incomplete-root normalization to <c>BROKEN</c>.
         /// </summary>
         public bool EnableConservativeTransforms { get; set; }
 
@@ -148,20 +149,23 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// unresolved, or non-CoreLib candidates are retained intact, including their recognized helpers.
         /// Outside rejected candidates, it removes the exact adjacent
         /// <c>Task.RunContinuations -&gt; Task.TrySetResult -&gt; TaskCompletionSource.SetResult</c> chain.
-        /// Complete leaf-side state-machine profiler capture/emission/resume envelopes, including known diagnostics
-        /// and class-initialization helpers, are atomically attributed to the nearest active logical async frame.
+        /// A resolved CoreLib profiler <c>Resume</c> immediately above a verified V1 dispatcher or physically
+        /// matched current/completing async method or V1 box carrier establishes ownership of the synchronous
+        /// leaf-side prefix.
+        /// That entire prefix, including unresolved frames, initialization, GC, and callbacks invoked by the
+        /// profiler, is atomically attributed to the nearest active logical async frame. Capture and emission
+        /// helpers need not be visible because they may inline. All prefix frames must belong to the same active
+        /// activation; cleanup never crosses another async boundary or a physically matched application anchor.
         /// A registered V1 target without a physical current-method match keeps its dispatch-target metadata,
         /// even when its retained physical dispatcher is removed by cleanup.
         /// This is overhead attribution, not evidence that a suspended caller was physically executing.
-        /// Unresolved, unrecognized, interrupted, or context-inconsistent profiler envelopes are protected from
-        /// general helper cleanup. A separately verified, resolved capture/emission/resume helper tail directly
-        /// entering a retained V1 dispatcher may still be attributed to its explicit dispatch target. It requires
-        /// an adjacent <c>Resume</c>, matching active-context provenance, and a resolved CoreLib dispatcher;
-        /// surrounding diagnostics, unknown callees, and interrupted tails remain protected.
+        /// Missing, unresolved, foreign, interrupted, or context-inconsistent ownership evidence leaves the
+        /// candidate prefix protected from general helper cleanup; no partial profiler tail is removed.
         /// Outside rejected candidates, the exact CoreLib <c>AsyncStateMachineDispatcherInfo.CreateDispatcher</c>
         /// helper is removed individually, preserving the application kickoff frame.
-        /// Application frames, thread roots, isolated <c>TaskCompletionSource.SetResult</c> frames, and other profiler
-        /// work outside a verified envelope are retained. This option is independent of structural stitching and
+        /// Application frames outside profiler-owned prefixes, thread roots, isolated
+        /// <c>TaskCompletionSource.SetResult</c> frames, and other profiler work outside a verified prefix are retained.
+        /// This option is independent of structural stitching and
         /// <see cref="EnableConservativeTransforms"/>.
         /// </summary>
         public bool EnableAsyncInfrastructureCleanup { get; set; }
@@ -266,11 +270,14 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             for (int i = 0; i < frames.Count; i++)
             {
                 StitchedFrame frame = frames[i];
-                if (frame.Origin == StitchedFrameOrigin.AsyncCurrent)
+                if (frame.Origin == StitchedFrameOrigin.AsyncCurrent || frame.IsStateMachineBoxCarrier)
                 {
                     if (frame.Segment != null && frame.Segment.Kind == AsyncCallstackKind.StateMachineAsync)
                     {
-                        CollapseV2CompletionHandoff(context, i);
+                        if (frame.Origin == StitchedFrameOrigin.AsyncCurrent)
+                        {
+                            CollapseV2CompletionHandoff(context, i);
+                        }
                         TryApplyReentrantV1Deduplication(context, i);
                     }
                     continue;
@@ -595,8 +602,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         {
             List<StitchedFrame> frames = context.Frames;
             int cleanupEnd = CollapseRuntimeResumptionBridge(context);
-            int cleanupStart = CollapseAsyncProfilerEnvelope(context, ref cleanupEnd);
-            CollapseAsyncProfilerHelperTails(context, ref cleanupStart, ref cleanupEnd);
+            int cleanupStart = CollapseAsyncProfilerOwnedPrefix(context, ref cleanupEnd);
 
             // Remove the public SetResult trigger only as part of the exact inline-completion chain. Removing the
             // two implementation frames independently would otherwise leave SetResult as an orphan between the
@@ -648,7 +654,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
         }
 
-        private static int CollapseAsyncProfilerEnvelope(AsyncStackTransformContext context, ref int cleanupEnd)
+        private static int CollapseAsyncProfilerOwnedPrefix(AsyncStackTransformContext context, ref int cleanupEnd)
         {
             if (context.TraceLog == null || context.Segments.Count == 0)
             {
@@ -679,65 +685,56 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 return 0;
             }
 
-            // Keep rejected envelopes, including box helpers, out of subsequent individual-frame cleanup.
+            // Keep rejected prefixes, including box helpers, out of subsequent individual-frame cleanup.
             if (targetIndex == frames.Count ||
                 context.Diagnostics.SegmentsProcessed != context.Segments.Count ||
                 context.Diagnostics.BoundariesNotFound != 0 ||
-                context.Diagnostics.AdjacencyMismatches != 0 ||
-                !IsSystemPrivateCoreLibSpan(context.TraceLog, frames, 0, targetIndex))
+                context.Diagnostics.AdjacencyMismatches != 0)
             {
                 return targetIndex;
             }
 
-            AsyncCallStack owner = frames[targetIndex].Context;
-            int stage = 0;
+            StitchedFrame target = frames[targetIndex];
+            int entryIndex = targetIndex - 1;
+            int dispatcherIndex = -1;
+            if (target.Origin == StitchedFrameOrigin.AsyncDispatchTarget && !target.IsStateMachineBoxCarrier)
+            {
+                dispatcherIndex = entryIndex;
+                if (target.Segment.Kind != AsyncCallstackKind.StateMachineAsync ||
+                    dispatcherIndex < 0 ||
+                    context.ClassifyBoundary(frames[dispatcherIndex].CodeAddress).Kind !=
+                        AsyncStitchBoundaryKind.V1Dispatcher)
+                {
+                    return targetIndex;
+                }
+                entryIndex--;
+            }
+            else if (target.Origin != StitchedFrameOrigin.AsyncCurrent &&
+                     target.Origin != StitchedFrameOrigin.AsyncCompleting &&
+                     !target.IsStateMachineBoxCarrier)
+            {
+                return targetIndex;
+            }
+            if (entryIndex < 0 ||
+                !IsSyncFrameKind(frames[entryIndex], StitchSyncFrameKind.AsyncProfilerContextResume) ||
+                !IsSystemPrivateCoreLibSpan(context.TraceLog, frames, entryIndex, targetIndex - entryIndex))
+            {
+                return targetIndex;
+            }
+
+            // Only the entry spine needs symbols. Everything leafward is callee work owned by that invocation.
+            // A physical current/completing anchor remains intact even when stitching already removed its dispatcher.
             for (int i = 0; i < targetIndex; i++)
             {
                 StitchedFrame frame = frames[i];
                 if (frame.Origin != StitchedFrameOrigin.Sync ||
                     frame.ContextKind != StitchedFrameContextKind.Active ||
-                    !ReferenceEquals(frame.Context, owner))
+                    !ReferenceEquals(frame.Context, target.Context) ||
+                    (i != dispatcherIndex &&
+                     context.ClassifyBoundary(frame.CodeAddress).IsBoundary))
                 {
                     return targetIndex;
                 }
-                switch (frame.SyncFrameKind)
-                {
-                    case StitchSyncFrameKind.AsyncProfilerCallstackCapture:
-                        if (stage != 0)
-                        {
-                            return targetIndex;
-                        }
-                        stage = 1;
-                        break;
-                    case StitchSyncFrameKind.AsyncProfilerCallstackEmission:
-                        if (stage != 1 && stage != 2)
-                        {
-                            return targetIndex;
-                        }
-                        stage = 2;
-                        break;
-                    case StitchSyncFrameKind.AsyncProfilerContextResume:
-                        if (stage != 2 && stage != 3)
-                        {
-                            return targetIndex;
-                        }
-                        stage = 3;
-                        break;
-                    case StitchSyncFrameKind.AsyncProfilerInfrastructure:
-                        break;
-                    default:
-                        if (i == targetIndex - 1 &&
-                            frames[targetIndex].Origin == StitchedFrameOrigin.AsyncDispatchTarget &&
-                            context.ClassifyBoundary(frame.CodeAddress).Kind == AsyncStitchBoundaryKind.V1Dispatcher)
-                        {
-                            break;
-                        }
-                        return targetIndex;
-                }
-            }
-            if (stage != 3)
-            {
-                return targetIndex;
             }
 
             frames.RemoveRange(0, targetIndex);
@@ -745,70 +742,6 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             context.Diagnostics.AsyncInfrastructureFramesCollapsed += targetIndex;
             context.Diagnostics.AsyncProfilerEnvelopeFramesCollapsed += targetIndex;
             return 0;
-        }
-
-        private static void CollapseAsyncProfilerHelperTails(
-            AsyncStackTransformContext context, ref int cleanupStart, ref int cleanupEnd)
-        {
-            if (context.TraceLog == null || context.Segments.Count == 0 ||
-                context.Diagnostics.SegmentsProcessed != context.Segments.Count ||
-                context.Diagnostics.BoundariesNotFound != 0 || context.Diagnostics.AdjacencyMismatches != 0)
-            {
-                return;
-            }
-
-            List<StitchedFrame> frames = context.Frames;
-            for (int targetIndex = 2; targetIndex < cleanupEnd; targetIndex++)
-            {
-                StitchedFrame target = frames[targetIndex];
-                int dispatcherIndex = targetIndex - 1;
-                if (target.Origin != StitchedFrameOrigin.AsyncDispatchTarget ||
-                    target.ContextKind != StitchedFrameContextKind.Active ||
-                    target.Segment.Kind != AsyncCallstackKind.StateMachineAsync ||
-                    context.ClassifyBoundary(frames[dispatcherIndex].CodeAddress).Kind !=
-                        AsyncStitchBoundaryKind.V1Dispatcher ||
-                    !IsSyncFrameKind(frames[dispatcherIndex - 1], StitchSyncFrameKind.AsyncProfilerContextResume))
-                {
-                    continue;
-                }
-
-                int start = dispatcherIndex;
-                while (start > 0 && frames[start - 1].Origin == StitchedFrameOrigin.Sync &&
-                       (frames[start - 1].SyncFrameKind == StitchSyncFrameKind.AsyncProfilerContextResume ||
-                        frames[start - 1].SyncFrameKind == StitchSyncFrameKind.AsyncProfilerCallstackEmission ||
-                        frames[start - 1].SyncFrameKind == StitchSyncFrameKind.AsyncProfilerCallstackCapture))
-                {
-                    start--;
-                }
-
-                int count = targetIndex - start;
-                if (!IsSystemPrivateCoreLibSpan(context.TraceLog, frames, start, count))
-                {
-                    continue;
-                }
-                bool sameContext = true;
-                for (int i = start; i < targetIndex; i++)
-                {
-                    if (frames[i].Origin != StitchedFrameOrigin.Sync ||
-                        frames[i].ContextKind != StitchedFrameContextKind.Active ||
-                        !ReferenceEquals(frames[i].Context, target.Context))
-                    {
-                        sameContext = false;
-                        break;
-                    }
-                }
-                if (!sameContext)
-                {
-                    continue;
-                }
-
-                // Only this independently verified tail crosses the rejected-envelope protection boundary.
-                frames.RemoveRange(start, count);
-                cleanupStart -= Math.Min(count, Math.Max(0, cleanupStart - start));
-                cleanupEnd -= count;
-                targetIndex = start;
-                context.Diagnostics.AsyncInfrastructureFramesCollapsed += count;
-            }
         }
 
         private static int CollapseRuntimeResumptionBridge(AsyncStackTransformContext context)

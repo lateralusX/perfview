@@ -206,7 +206,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     kind = AsyncStitchBoundary.ClassifySynchronousFrame(frameName, isHostModule);
                     m_syncFrameKinds.Add(ca, kind);
                 }
-                MethodIndex boxedMethod = m_syncFrames.Count == 0 && method != MethodIndex.Invalid
+                MethodIndex boxedMethod = method != MethodIndex.Invalid &&
+                    m_classify(ca).Kind == AsyncStitchBoundaryKind.V1DispatcherInfrastructure
                     ? GetBoxedStateMachineMethod(ca)
                     : MethodIndex.Invalid;
                 m_syncFrames.Add(new StitchSyncFrame(ca, method, kind, boxedMethod));
@@ -317,6 +318,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         private StackSourceFrameIndex InternStitchedFrame(StitchedFrame frame, ProcessIndex processIndex)
         {
+            if (frame.Origin == StitchedFrameOrigin.IncompleteRoot)
+            {
+                // Match synchronous roots; exporters omit the reserved Broken frame index.
+                return m_outputStackSource.Interner.FrameIntern(
+                    "BROKEN", m_outputStackSource.Interner.ModuleIntern(string.Empty));
+            }
+
             if (frame.Origin != StitchedFrameOrigin.Sync && frame.Segment != null)
             {
                 return InternAsyncFrame(frame, processIndex);

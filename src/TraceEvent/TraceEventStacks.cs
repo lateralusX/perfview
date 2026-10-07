@@ -48,7 +48,8 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
         public ProcessIndex ProcessIndex { get; }
 
         /// <summary>The code address in the originating TraceLog, or <see cref="CodeAddressIndex.Invalid"/>.
-        /// A valid address does not guarantee a resolved method. Current and completing frames retain the sampled address.</summary>
+        /// A valid address does not guarantee a resolved method. Current, completing, and box-carrier frames retain
+        /// the sampled address.</summary>
         public CodeAddressIndex CodeAddress { get; }
 
         /// <summary>The native code IP emitted by the async profiler for either V1 or V2.
@@ -66,9 +67,9 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
         public bool IsHistoricalParent { get; }
 
         /// <summary>
-        /// True when this is an indexed V1 dispatch target without a separately matched physical current-method
-        /// frame. This role does not change its displayed name and does not establish whether its body has
-        /// started, finished, or was inlined.
+        /// True when this is an indexed V1 dispatch/resumption target without a separately matched physical
+        /// application body. It may retain a sampled box carrier. Its displayed compiler state remains captured;
+        /// this role does not establish whether its body has started, finished, or was inlined.
         /// </summary>
         public bool IsDispatchTarget { get; }
 
@@ -80,9 +81,9 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
         public bool IsCompleting { get; }
 
         /// <summary>
-        /// True when the current V1 method was inferred from the generic state-machine type of a sampled leaf
+        /// True when a V1 resumption target was identified from the generic state-machine type of a physical
         /// CoreLib box execution frame. Its code address remains that of the runtime helper, not an application
-        /// MoveNext instruction proven to have executed.
+        /// MoveNext instruction proven to have executed. Box-only targets retain their captured compiler state.
         /// </summary>
         public bool IsStateMachineBoxCarrier { get; }
     }
