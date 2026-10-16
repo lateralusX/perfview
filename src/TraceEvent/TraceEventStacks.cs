@@ -67,8 +67,8 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
         public bool IsHistoricalParent { get; }
 
         /// <summary>
-        /// True when this is an indexed V1 dispatch/resumption target without a separately matched physical
-        /// application body. It may retain a sampled box carrier. Its displayed compiler state remains captured;
+        /// True when this is an indexed V1 or V2 dispatch/resumption target without a separately matched physical
+        /// application body. V1 targets may retain a sampled box carrier. Any displayed compiler state remains captured;
         /// this role does not establish whether its body has started, finished, or was inlined.
         /// </summary>
         public bool IsDispatchTarget { get; }

@@ -27,9 +27,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         AsyncContextParent,
 
         /// <summary>
-        /// The indexed target of a verified V1 dispatcher or box resumption carrier when no separate physical
+        /// The indexed target of a verified dispatcher, V1 box carrier, or sampled V2 wrapper when no separate physical
         /// application body was matched. This identifies resumption context, not whether the body has started
-        /// or finished; its compiler-state presentation remains captured.
+        /// or finished; any V1 compiler-state presentation remains captured.
         /// </summary>
         AsyncDispatchTarget,
 
@@ -360,7 +360,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 context.Frames,
                 segmentFrameIndex,
                 StitchSyncFrameKind.None,
-                StitchedFramePresentation.LogicalStateMachineMethod,
+                context.Frames.Kind == AsyncCallstackKind.StateMachineAsync
+                    ? StitchedFramePresentation.LogicalStateMachineMethod
+                    : StitchedFramePresentation.Native,
                 context);
 
         /// <summary>Creates a physically present V1 box resumption target, retaining its captured compiler state
@@ -448,16 +450,16 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// including repeated occurrences or records beyond the matched prefix. Their physical slices are retained.</summary>
         public int V1CompletionAlignmentAmbiguous;
 
-        /// <summary>V2 samples whose structural result used the sync layout (not stitched) because no continuation-wrapper
+        /// <summary>V2 samples whose inner activation retained its sync layout because no continuation-wrapper
         /// sat root-ward of the sampled leaf (at a higher leaf-&gt;root index): either the wrapper was the leaf itself,
         /// or there was no wrapper but the sample sat in dispatch-continuation plumbing. These frames are dispatch
-        /// machinery, not a resumed continuation body, so there is no suspended ancestry to splice.
+        /// machinery with no identifiable indexed dispatch target, so no inner ancestry is spliced.
+        /// Independently verified enclosing activations may still be stitched.
         /// Enabled presentation transforms may subsequently normalize that layout.</summary>
         public int V2SyncLayoutUsed;
 
-        /// <summary>V2 samples (a subset of <see cref="V2SyncLayoutUsed"/>) where the conservative presentation
-        /// transform dropped a sampled-leaf continuation wrapper, leaving the dispatch-continuation frame
-        /// root-ward of it as the leaf.</summary>
+        /// <summary>V2 samples where the conservative presentation transform dropped a sampled-leaf continuation
+        /// wrapper, leaving its indexed target or the retained dispatch plumbing as the leaf.</summary>
         public int V2LeafWrapperDropped;
 
         /// <summary>V2 dispatch-continuation plumbing frames (<c>InstrumentedDispatchContinuations</c> /
@@ -499,8 +501,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// A subset of <see cref="AsyncInfrastructureFramesCollapsed"/>.</summary>
         public int AsyncProfilerEnvelopeFramesCollapsed;
 
-        /// <summary>System.Private.CoreLib-only synchronous handoff frames collapsed between adjacent, exactly
-        /// matched nested RuntimeAsync activations.</summary>
+        /// <summary>Resolved System.Private.CoreLib-only synchronous handoff frames collapsed between verified
+        /// adjacent V1/V2 activations. Dispatch targets retain their role and captured V1 state.</summary>
+        public int AsyncReentrantHandoffFramesCollapsed;
+
+        /// <summary>The RuntimeAsync-to-RuntimeAsync subset of
+        /// <see cref="AsyncReentrantHandoffFramesCollapsed"/>.</summary>
         public int V2ReentrantHandoffFramesCollapsed;
 
         /// <summary>Resolved CoreLib completion-bridge and V2 dispatch frames removed by conservative
@@ -560,6 +566,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             AsyncInfrastructureFramesCollapsed = 0;
             RuntimeResumptionBridgeFramesCollapsed = 0;
             AsyncProfilerEnvelopeFramesCollapsed = 0;
+            AsyncReentrantHandoffFramesCollapsed = 0;
             V2ReentrantHandoffFramesCollapsed = 0;
             V2CompletionHandoffFramesCollapsed = 0;
             MessagesDropped = 0;
@@ -588,6 +595,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             target.AsyncInfrastructureFramesCollapsed += AsyncInfrastructureFramesCollapsed;
             target.RuntimeResumptionBridgeFramesCollapsed += RuntimeResumptionBridgeFramesCollapsed;
             target.AsyncProfilerEnvelopeFramesCollapsed += AsyncProfilerEnvelopeFramesCollapsed;
+            target.AsyncReentrantHandoffFramesCollapsed += AsyncReentrantHandoffFramesCollapsed;
             target.V2ReentrantHandoffFramesCollapsed += V2ReentrantHandoffFramesCollapsed;
             target.V2CompletionHandoffFramesCollapsed += V2CompletionHandoffFramesCollapsed;
             target.MessagesDropped += MessagesDropped;
@@ -653,6 +661,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// A missing inner V1 boundary does not consume a verified enclosing V2 current frame. Unique inner
     /// alignment replaces only its completed transition tail, retaining the inter-context physical span
     /// for the enclosing activation.
+    /// A sampled V2 wrapper identifies an indexed dispatch target through completion records or its
+    /// activation-relative wrapper position, without claiming a physically executing application body.
+    /// When that target is unavailable, its physical entry slice is retained; independently verified
+    /// enclosing activations can still be stitched.
     /// A missing outermost dispatcher can instead be recovered from a unique ordered physical-method match.
     /// If its completion position agrees and the root-ward span is resolved and contains no other dispatcher,
     /// that incomplete span is replaced by <see cref="StitchedFrameOrigin.IncompleteRoot"/>. This does not
@@ -833,12 +845,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 return;
             }
 
-            // V2 gate: a V2 (RuntimeAsync) segment is only stitched when the CPU is physically inside a resumed
-            // continuation body, which is true exactly when a continuation-wrapper frame sits root-ward of the
-            // sampled leaf (at a higher leaf->root index). Two shapes are dispatch machinery rather than a resumed
-            // body, so they are not stitched and the sync layout is used:
-            //   * Case 2 - the wrapper is the sampled leaf: it has not yet entered the resumed async body. The
-            //     structural result preserves the wrapper; the default conservative presentation transform removes it.
+            int pSync = 0;
+            int firstSegmentIndex = segmentsRootToLeaf.Count - 1;
+
+            // A sampled V2 wrapper can identify its dispatch target without a physical body match.
+            // Unavailable target identity or position retains the sync-layout fallback:
+            //   * Case 2 - the wrapper is the sampled leaf, but its indexed target cannot be identified.
+            //     Retain only the inner entry slice when an enclosing activation is independently verified.
             //   * Case 3 - no wrapper anywhere, but the sample sits in dispatch-continuation plumbing
             //     (InstrumentedDispatchContinuations / DispatchContinuations): emit the sync layout unchanged.
             // A V2 segment whose sync stack carries no async-boundary frame at all is a different anomaly (e.g. a
@@ -848,19 +861,55 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 int wrapperPos = FirstWrapperIndex(syncLeafToRoot, classify, out bool hasDispatchContinuation);
                 bool wrapperFound = wrapperPos < syncLeafToRoot.Count;
 
-                if (wrapperFound && wrapperPos == 0) // Case 2: preserve the sync layout for presentation transforms.
+                if (wrapperFound && wrapperPos == 0 &&
+                    !HasV2DispatchTarget(segmentsRootToLeaf[firstSegmentIndex], qpc,
+                        classify(syncLeafToRoot[0].CodeAddress).WrapperIndex,
+                        methodCompletionObserved, methodCompletionObservedByProcess, processIndex))
                 {
+                    int physicalEnd = syncLeafToRoot.Count;
+                    if (firstSegmentIndex > 0)
+                    {
+                        int entryEnd = 1;
+                        while (entryEnd < syncLeafToRoot.Count &&
+                               classify(syncLeafToRoot[entryEnd].CodeAddress).Kind ==
+                                   AsyncStitchBoundaryKind.V2DispatchContinuation)
+                        {
+                            entryEnd++;
+                        }
+
+                        AsyncCallStack outer = segmentsRootToLeaf[firstSegmentIndex - 1];
+                        bool outerVerified = outer.Frames.Kind == AsyncCallstackKind.RuntimeAsync
+                            ? FindEnclosingV2CurrentSyncFrame(
+                                outer, syncLeafToRoot, entryEnd, qpc, classify,
+                                methodCompletionObserved, methodCompletionObservedByProcess, processIndex, methodOf) >= 0
+                            : FindBoundary(syncLeafToRoot, entryEnd, outer.Frames.Kind, classify, out _) <
+                                syncLeafToRoot.Count;
+                        if (outerVerified)
+                        {
+                            physicalEnd = entryEnd;
+                        }
+                    }
                     diagnostics.V2SyncLayoutUsed++;
-                    for (int i = 0; i < syncLeafToRoot.Count; i++)
+                    for (int i = 0; i < physicalEnd; i++)
                     {
                         output.Add(StitchedFrame.CreateSync(
                             syncLeafToRoot[i], null));
                     }
                     if (trace)
                     {
-                        diagnostics.Note("V2 not stitched: continuation-wrapper is the sampled leaf; used the sync layout.");
+                        diagnostics.Note(physicalEnd == syncLeafToRoot.Count
+                            ? "V2 not stitched: continuation-wrapper is the sampled leaf; used the sync layout."
+                            : "Inner V2 not stitched: continuation-wrapper is the sampled leaf; retained its entry slice and continued with the enclosing activation.");
                     }
-                    return;
+                    if (physicalEnd == syncLeafToRoot.Count)
+                    {
+                        return;
+                    }
+
+                    // No logical inner anchor or ancestry placement: entry work does not prove body execution.
+                    diagnostics.SegmentsProcessed++;
+                    pSync = physicalEnd;
+                    firstSegmentIndex--;
                 }
 
                 if (!wrapperFound && hasDispatchContinuation) // Case 3: sync layout unchanged.
@@ -879,8 +928,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 }
             }
 
-            int pSync = 0;
-            for (int segmentIndex = segmentsRootToLeaf.Count - 1; segmentIndex >= 0; segmentIndex--)
+            for (int segmentIndex = firstSegmentIndex; segmentIndex >= 0; segmentIndex--)
             {
                 AsyncCallStack segment = segmentsRootToLeaf[segmentIndex];
                 int segmentLeafIndex = output.Count;
@@ -1018,10 +1066,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                                 syncLeafToRoot[i], segment));
                 }
 
-                // A V1 dispatcher can be sampled without a separate physical MoveNext, including entry/exit or
-                // an inlined body. Without an anchor keep that dispatcher and the indexed target. A completing
-                // anchor replaces the boundary, but the next target is still not claimed to be running.
-                if (boundaryFound && kind == AsyncCallstackKind.StateMachineAsync &&
+                // Retain sampled dispatch machinery separately from its known logical target. Neither a V1
+                // dispatcher nor a sampled V2 wrapper proves that the application body is physically executing.
+                // A V1 completing anchor replaces the boundary, but its next target is still not running.
+                if (boundaryFound && (kind == AsyncCallstackKind.StateMachineAsync || boundaryPos == 0) &&
                     !fullyCompleted && currentSyncPos < 0 && completed < frames.FrameCount &&
                     (frames.CodeAddressAt(completed) != CodeAddressIndex.Invalid || frames.MethodIdAt(completed) != 0))
                 {
@@ -1099,6 +1147,31 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 output.Add(StitchedFrame.CreateSync(
                     syncLeafToRoot[i], null));
             }
+        }
+
+        private static bool HasV2DispatchTarget(
+            AsyncCallStack segment, long qpc, int wrapperIndex,
+            Func<AsyncCallstackKind, bool> methodCompletionObserved,
+            Func<ProcessIndex, AsyncCallstackKind, long, bool> methodCompletionObservedByProcess,
+            ProcessIndex processIndex)
+        {
+            bool completionObserved = methodCompletionObserved != null
+                ? methodCompletionObserved(segment.Frames.Kind)
+                : methodCompletionObservedByProcess(processIndex, segment.Frames.Kind, segment.StartQpc);
+            if (!completionObserved &&
+                (segment.WrapperCount == 0 || wrapperIndex < 0 || wrapperIndex >= segment.WrapperCount))
+            {
+                return false;
+            }
+
+            // Do not clamp an out-of-range position into a plausible target at either end of the call stack.
+            long completed = completionObserved
+                ? segment.GetCompletedFrameCount(qpc)
+                : (long)segment.GetWrapperResetCount(qpc) * segment.WrapperCount +
+                    wrapperIndex - segment.ContinuationIndexBase;
+            return completed >= 0 && completed < segment.Frames.FrameCount &&
+                (segment.Frames.CodeAddressAt((int)completed) != CodeAddressIndex.Invalid ||
+                 segment.Frames.MethodIdAt((int)completed) != 0);
         }
 
         private static int FindEnclosingV2CurrentSyncFrame(
@@ -1275,8 +1348,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             switch (segmentKind)
             {
                 case AsyncCallstackKind.RuntimeAsync: // V2
-                    // Only a continuation-wrapper is a valid V2 splice boundary: its presence proves the CPU is
-                    // physically inside a resumed continuation body. A bare dispatch-continuation frame (no wrapper)
+                    // Only a continuation-wrapper identifies the V2 resumption position. It may be the sampled
+                    // leaf, identifying a dispatch target rather than a physical body. A bare dispatch-continuation frame
                     // is dispatch plumbing, handled by the sync-layout gate in Stitch, not a splice boundary.
                     return boundaryKind == AsyncStitchBoundaryKind.V2ContinuationWrapper;
                 case AsyncCallstackKind.StateMachineAsync: // V1
