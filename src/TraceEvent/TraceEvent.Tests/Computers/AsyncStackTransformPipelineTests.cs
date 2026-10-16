@@ -322,6 +322,154 @@ namespace Microsoft.Diagnostics.Tracing.Tests.Computers
         }
 
         [Fact]
+        public void Pipeline_RecomposesWhenFlagsChange()
+        {
+            var pipeline = new AsyncStackTransformPipeline();
+            var observed = new List<int>();
+            pipeline.Add(context => observed.Add(context.Frames.Count));
+            bool[,] configurations =
+            {
+                { true, false },
+                { false, false },
+                { false, true },
+                { true, true },
+                { true, false },
+                { false, false },
+                { true, false },
+            };
+
+            for (int configuration = 0; configuration < configurations.GetLength(0); configuration++)
+            {
+                bool conservative = configurations[configuration, 0];
+                bool cleanup = configurations[configuration, 1];
+                pipeline.EnableConservativeTransforms = conservative;
+                pipeline.EnableAsyncInfrastructureCleanup = cleanup;
+                int[] expected = !conservative && !cleanup
+                    ? new[] { 20, 10, 11, 12, 13, 14, 15, 16, 17 }
+                    : cleanup
+                        ? new[] { 10, 11, 14, 16, 17 }
+                        : new[] { 10, 11, 14, 15, 16, 17 };
+
+                for (int sample = 0; sample < 2; sample++)
+                {
+                    observed.Clear();
+                    var diagnostics = new StitchDiagnostics { V2SyncLayoutUsed = 1 };
+                    List<StitchedFrame> frames = CompositionFrames();
+
+                    pipeline.ApplyInPlace(Context(frames, diagnostics, wrapperCodeAddress: CA(20)));
+
+                    Assert.Equal(expected.Select(CA), frames.Select(frame => frame.CodeAddress));
+                    Assert.Equal(new[] { expected.Length }, observed);
+                    Assert.Equal(conservative ? 1 : 0, diagnostics.V2LeafWrapperDropped);
+                    Assert.Equal(conservative ? 1 : 0, diagnostics.V1SynchronousMoveNextFramesNormalized);
+                    Assert.Equal(conservative ? 2 : 0, diagnostics.V1SynchronousStartupFramesCollapsed);
+                    Assert.Equal(cleanup ? (conservative ? 1 : 4) : 0,
+                        diagnostics.AsyncInfrastructureFramesCollapsed);
+                    Assert.Equal(
+                        conservative ? StitchedFramePresentation.LogicalStateMachineMethod
+                            : StitchedFramePresentation.Native,
+                        frames.Single(frame => frame.CodeAddress == CA(11)).Presentation);
+                }
+            }
+        }
+
+        [Fact]
+        public void CustomTransforms_AddedAfterFirstSample_RunInRegistrationOrder()
+        {
+            var pipeline = new AsyncStackTransformPipeline { EnableConservativeTransforms = false };
+            var observed = new List<int>();
+            pipeline.ApplyInPlace(Context(StartupFrames(), new StitchDiagnostics()));
+
+            pipeline.Add(context =>
+            {
+                observed.Add(context.Frames.Count);
+                context.Frames.RemoveAt(0);
+            });
+            pipeline.ApplyInPlace(Context(StartupFrames(), new StitchDiagnostics()));
+            Assert.Equal(new[] { 5 }, observed);
+
+            pipeline.Add(context => observed.Add(context.Frames.Count));
+            observed.Clear();
+            pipeline.ApplyInPlace(Context(StartupFrames(), new StitchDiagnostics()));
+            Assert.Equal(new[] { 5, 4 }, observed);
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void ClearCustomTransforms_PreservesEnabledBuiltIns(bool cleanup)
+        {
+            var pipeline = new AsyncStackTransformPipeline { EnableAsyncInfrastructureCleanup = cleanup };
+            pipeline.Add(context => context.Frames.Clear());
+            List<StitchedFrame> frames = CompositionFrames();
+            pipeline.ApplyInPlace(Context(frames, new StitchDiagnostics(), wrapperCodeAddress: CA(20)));
+            Assert.Empty(frames);
+
+            pipeline.ClearCustomTransforms();
+            var diagnostics = new StitchDiagnostics { V2SyncLayoutUsed = 1 };
+            frames = CompositionFrames();
+            pipeline.ApplyInPlace(Context(frames, diagnostics, wrapperCodeAddress: CA(20)));
+
+            int[] expected = cleanup ? new[] { 10, 11, 14, 16, 17 } : new[] { 10, 11, 14, 15, 16, 17 };
+            Assert.Equal(expected.Select(CA), frames.Select(frame => frame.CodeAddress));
+            Assert.True(pipeline.EnableConservativeTransforms);
+            Assert.Equal(cleanup, pipeline.EnableAsyncInfrastructureCleanup);
+            Assert.Equal(1, diagnostics.V2LeafWrapperDropped);
+            Assert.Equal(1, diagnostics.V1SynchronousMoveNextFramesNormalized);
+            Assert.Equal(2, diagnostics.V1SynchronousStartupFramesCollapsed);
+            Assert.Equal(cleanup ? 1 : 0, diagnostics.AsyncInfrastructureFramesCollapsed);
+        }
+
+        [Fact]
+        public void BuiltInComponents_CanBeRegisteredThroughExistingDelegateAPI()
+        {
+            var pipeline = new AsyncStackTransformPipeline { EnableConservativeTransforms = false };
+            pipeline.Add(new AsyncSampledV2WrapperTransform().Apply);
+            pipeline.Add(new AsyncReentrantHandoffTransform().Apply);
+            pipeline.Add(new AsyncV1PresentationTransform().Apply);
+            pipeline.Add(new AsyncInfrastructureCleanupTransform().Apply);
+
+            for (int sample = 0; sample < 2; sample++)
+            {
+                var diagnostics = new StitchDiagnostics { V2SyncLayoutUsed = 1 };
+                List<StitchedFrame> frames = CompositionFrames();
+
+                pipeline.ApplyInPlace(Context(frames, diagnostics, wrapperCodeAddress: CA(20)));
+
+                Assert.Equal(new[] { CA(10), CA(11), CA(14), CA(16), CA(17) },
+                    frames.Select(frame => frame.CodeAddress));
+                Assert.Equal(1, diagnostics.V2LeafWrapperDropped);
+                Assert.Equal(1, diagnostics.V1SynchronousMoveNextFramesNormalized);
+                Assert.Equal(2, diagnostics.V1SynchronousStartupFramesCollapsed);
+                Assert.Equal(1, diagnostics.AsyncInfrastructureFramesCollapsed);
+            }
+        }
+
+        [Fact]
+        public void Add_RejectsNullTransform()
+        {
+            var pipeline = new AsyncStackTransformPipeline();
+
+            Assert.Throws<ArgumentNullException>(() => pipeline.Add(null));
+        }
+
+        [Fact]
+        public void CustomTransformFailure_PropagatesAndStopsThePipeline()
+        {
+            var pipeline = new AsyncStackTransformPipeline();
+            var failure = new InvalidOperationException("Custom transform failed.");
+            bool laterTransformRan = false;
+            pipeline.Add(_ => throw failure);
+            pipeline.Add(_ => laterTransformRan = true);
+
+            InvalidOperationException actual = Assert.Throws<InvalidOperationException>(
+                () => pipeline.ApplyInPlace(Context(StartupFrames(), new StitchDiagnostics())));
+
+            Assert.Same(failure, actual);
+            Assert.False(laterTransformRan);
+        }
+
+        [Fact]
         public void Transform_AppliesPipelineWithoutComputerAndPreservesStructuralFrames()
         {
             var diagnostics = new StitchDiagnostics();
@@ -345,6 +493,16 @@ namespace Microsoft.Diagnostics.Tracing.Tests.Computers
                 StitchedFramePresentation.LogicalStateMachineMethod,
                 transformed.Frames[1].Presentation);
             Assert.Same(structuralResult.Diagnostics, transformed.Diagnostics);
+        }
+
+        private static List<StitchedFrame> CompositionFrames()
+        {
+            List<StitchedFrame> frames = StartupFrames();
+            frames.Insert(0, Sync(20));
+            frames.Add(Sync(15, StitchSyncFrameKind.V1AwaiterRegistrationInfrastructure));
+            frames.Add(Sync(16, StitchSyncFrameKind.SystemPrivateCoreLibTaskCompletionSourceSetResult));
+            frames.Add(Sync(17, StitchSyncFrameKind.SystemPrivateCoreLibThreadPoolDispatch));
+            return frames;
         }
 
         private static List<StitchedFrame> StartupFrames() =>

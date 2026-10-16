@@ -5,7 +5,6 @@ using System;
 using System.Collections.Generic;
 
 using Microsoft.Diagnostics.Tracing.Etlx;
-using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
 
 namespace Microsoft.Diagnostics.Tracing.Computers
 {
@@ -85,7 +84,6 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <summary>Creates the default pipeline with conservative presentation normalization enabled.</summary>
         public AsyncStackTransformPipeline()
         {
-            EnableConservativeTransforms = true;
             m_customTransforms = new List<AsyncStackTransform>();
         }
 
@@ -101,7 +99,18 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// handoffs preserve the complete span. Disabling this does not disable structural boundary replacement
         /// or verified incomplete-root normalization to <c>BROKEN</c>.
         /// </summary>
-        public bool EnableConservativeTransforms { get; set; }
+        public bool EnableConservativeTransforms
+        {
+            get => m_enableConservativeTransforms;
+            set
+            {
+                if (m_enableConservativeTransforms != value)
+                {
+                    m_enableConservativeTransforms = value;
+                    m_transforms = null;
+                }
+            }
+        }
 
         /// <summary>
         /// Enables the host computer's insertion of missing historical creation-parent contexts before presentation.
@@ -172,7 +181,18 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// This option is independent of structural stitching and
         /// <see cref="EnableConservativeTransforms"/>.
         /// </summary>
-        public bool EnableAsyncInfrastructureCleanup { get; set; }
+        public bool EnableAsyncInfrastructureCleanup
+        {
+            get => m_enableAsyncInfrastructureCleanup;
+            set
+            {
+                if (m_enableAsyncInfrastructureCleanup != value)
+                {
+                    m_enableAsyncInfrastructureCleanup = value;
+                    m_transforms = null;
+                }
+            }
+        }
 
         /// <summary>Adds a custom transform that runs after all enabled built-in transforms.</summary>
         public void Add(AsyncStackTransform transform)
@@ -183,10 +203,15 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             m_customTransforms.Add(transform);
+            m_transforms = null;
         }
 
         /// <summary>Removes all custom transforms. Built-in enablement is unchanged.</summary>
-        public void ClearCustomTransforms() => m_customTransforms.Clear();
+        public void ClearCustomTransforms()
+        {
+            m_customTransforms.Clear();
+            m_transforms = null;
+        }
 
         /// <summary>
         /// Applies this pipeline to a structural stitch result without requiring a
@@ -237,683 +262,38 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         internal void ApplyInPlace(AsyncStackTransformContext context)
         {
-            if (EnableConservativeTransforms)
+            AsyncStackTransform[] transforms = m_transforms ?? (m_transforms = CreateTransforms());
+            for (int i = 0; i < transforms.Length; i++)
             {
-                ApplyConservativeTransforms(context);
-            }
-
-            if (EnableAsyncInfrastructureCleanup)
-            {
-                ApplyAsyncInfrastructureCleanup(context);
-            }
-
-            for (int i = 0; i < m_customTransforms.Count; i++)
-            {
-                m_customTransforms[i](context);
+                transforms[i](context);
             }
         }
-
-        private static void ApplyConservativeTransforms(AsyncStackTransformContext context)
-        {
-            List<StitchedFrame> frames = context.Frames;
-
-            // Keep sampled wrapper provenance structurally, including when a logical dispatch target is known.
-            // Removing that one transition frame is presentation-only and intentionally opt-out-able.
-            if (frames.Count != 0 &&
-                frames[0].Origin == StitchedFrameOrigin.Sync &&
-                context.ClassifyBoundary(frames[0].CodeAddress).Kind ==
-                    AsyncStitchBoundaryKind.V2ContinuationWrapper &&
-                (context.Diagnostics.V2SyncLayoutUsed != 0 ||
-                 (frames.Count > 1 &&
-                  frames[1].Origin == StitchedFrameOrigin.AsyncDispatchTarget &&
-                  frames[0].Context != null &&
-                  ReferenceEquals(frames[0].Context, frames[1].Context))))
-            {
-                frames.RemoveAt(0);
-                context.Diagnostics.V2LeafWrapperDropped++;
-            }
-
-            CollapseReentrantHandoffs(context);
-
-            for (int i = 0; i < frames.Count; i++)
-            {
-                StitchedFrame frame = frames[i];
-                if (frame.Origin == StitchedFrameOrigin.AsyncCurrent || frame.IsStateMachineBoxCarrier)
-                {
-                    if (frame.Segment != null && frame.Segment.Kind == AsyncCallstackKind.StateMachineAsync)
-                    {
-                        if (frame.Origin == StitchedFrameOrigin.AsyncCurrent)
-                        {
-                            CollapseV2CompletionHandoff(context, i);
-                        }
-                        TryApplyReentrantV1Deduplication(context, i);
-                    }
-                    continue;
-                }
-
-                if (frame.Origin != StitchedFrameOrigin.Sync ||
-                    frame.SyncFrameKind != StitchSyncFrameKind.V1StateMachineMoveNext)
-                {
-                    continue;
-                }
-
-                int end = i + 1;
-                while (end < frames.Count &&
-                       frames[end].Origin == StitchedFrameOrigin.Sync &&
-                       frames[end].SyncFrameKind == StitchSyncFrameKind.V1MethodBuilderStart)
-                {
-                    end++;
-                }
-
-                int builderCount = end - i - 1;
-                if (builderCount != 0 &&
-                    end < frames.Count &&
-                    context.TraceLog != null &&
-                    IsMatchingV1Kickoff(context.TraceLog, frame, frames[end]))
-                {
-                    int generatedFrameCount = builderCount + 1;
-                    frames.RemoveRange(i, generatedFrameCount);
-                    context.Diagnostics.V1SynchronousStartupFramesCollapsed += generatedFrameCount;
-                    continue;
-                }
-
-                frames[i] = frame.WithPresentation(StitchedFramePresentation.LogicalStateMachineMethod);
-                context.Diagnostics.V1SynchronousMoveNextFramesNormalized++;
-
-                if (end == i + 1)
-                {
-                    continue;
-                }
-
-                frames.RemoveRange(i + 1, builderCount);
-                context.Diagnostics.V1SynchronousStartupFramesCollapsed += builderCount;
-            }
-        }
-
-        private static void CollapseReentrantHandoffs(AsyncStackTransformContext context)
-        {
-            if (context.TraceLog == null ||
-                context.Diagnostics.BoundariesNotFound != 0 ||
-                context.Diagnostics.AdjacencyMismatches != 0 ||
-                context.Diagnostics.V1CompletionAlignmentAmbiguous != 0)
-            {
-                return;
-            }
-
-            List<StitchedFrame> frames = context.Frames;
-            for (int currentIndex = 0; currentIndex < frames.Count; currentIndex++)
-            {
-                StitchedFrame outerCurrent = frames[currentIndex];
-                if (outerCurrent.Origin != StitchedFrameOrigin.AsyncCurrent ||
-                    outerCurrent.Context == null ||
-                    outerCurrent.Method == MethodIndex.Invalid ||
-                    outerCurrent.CodeAddress == CodeAddressIndex.Invalid)
-                {
-                    continue;
-                }
-
-                int handoffStart = currentIndex;
-                while (handoffStart > 0 &&
-                       frames[handoffStart - 1].Origin == StitchedFrameOrigin.Sync &&
-                       ReferenceEquals(frames[handoffStart - 1].Context, outerCurrent.Context))
-                {
-                    handoffStart--;
-                }
-
-                int handoffCount = currentIndex - handoffStart;
-                if (handoffCount == 0 || handoffStart == 0)
-                {
-                    continue;
-                }
-
-                AsyncCallStack innerContext = frames[handoffStart - 1].Context;
-                if (innerContext == null ||
-                    innerContext.Depth != outerCurrent.Context.Depth + 1 ||
-                    !HasVerifiedAsyncAnchor(context, handoffStart - 1, innerContext) ||
-                    !IsSystemPrivateCoreLibSpan(context.TraceLog, frames, handoffStart, handoffCount))
-                {
-                    continue;
-                }
-
-                frames.RemoveRange(handoffStart, handoffCount);
-                context.Diagnostics.AsyncReentrantHandoffFramesCollapsed += handoffCount;
-                if (innerContext.Frames.Kind == AsyncCallstackKind.RuntimeAsync &&
-                    outerCurrent.Context.Frames.Kind == AsyncCallstackKind.RuntimeAsync)
-                {
-                    context.Diagnostics.V2ReentrantHandoffFramesCollapsed += handoffCount;
-                }
-                currentIndex = handoffStart;
-            }
-        }
-
-        private static bool HasVerifiedAsyncAnchor(
-            AsyncStackTransformContext context,
-            int contextEnd,
-            AsyncCallStack activation)
-        {
-            List<StitchedFrame> frames = context.Frames;
-            bool verified = false;
-            for (int i = contextEnd; i >= 0 && ReferenceEquals(frames[i].Context, activation); i--)
-            {
-                StitchedFrame frame = frames[i];
-                if (frame.Origin == StitchedFrameOrigin.AsyncCompleting)
-                {
-                    return false;
-                }
-                verified |= frame.Origin == StitchedFrameOrigin.AsyncCurrent &&
-                    frame.Method != MethodIndex.Invalid && frame.CodeAddress != CodeAddressIndex.Invalid;
-                if (frame.Origin != StitchedFrameOrigin.AsyncDispatchTarget)
-                {
-                    continue;
-                }
-
-                CodeAddressIndex targetAddress = frame.Segment.CodeAddressAt(frame.SegmentFrameIndex);
-                if (targetAddress == CodeAddressIndex.Invalid ||
-                    context.TraceLog.CodeAddresses.MethodIndex(targetAddress) == MethodIndex.Invalid)
-                {
-                    continue;
-                }
-                if (activation.Frames.Kind == AsyncCallstackKind.RuntimeAsync)
-                {
-                    verified = true;
-                }
-                else if (frame.IsStateMachineBoxCarrier)
-                {
-                    verified |= IsSystemPrivateCoreLibSpan(context.TraceLog, frames, i, 1);
-                }
-                else if (context.TraceLog.AsyncMethodCompletionObserved(activation) &&
-                    activation.GetCompletedFrameCount(context.TimestampQpc) == frame.SegmentFrameIndex &&
-                    i > 0 &&
-                    frames[i - 1].Origin == StitchedFrameOrigin.Sync &&
-                    ReferenceEquals(frames[i - 1].Context, activation) &&
-                    context.ClassifyBoundary(frames[i - 1].CodeAddress).Kind == AsyncStitchBoundaryKind.V1Dispatcher)
-                {
-                    verified |= IsSystemPrivateCoreLibSpan(context.TraceLog, frames, i - 1, 1);
-                }
-            }
-
-            return verified;
-        }
-
-        private static void CollapseV2CompletionHandoff(AsyncStackTransformContext context, int currentIndex)
-        {
-            if (context.TraceLog == null ||
-                context.Diagnostics.BoundariesNotFound != 0 ||
-                context.Diagnostics.AdjacencyMismatches != 0)
-            {
-                return;
-            }
-
-            List<StitchedFrame> frames = context.Frames;
-            const int handoffCount = 5;
-            StitchedFrame current = frames[currentIndex];
-            if (current.Context == null ||
-                current.Context.Frames.Kind != AsyncCallstackKind.StateMachineAsync ||
-                current.Method == MethodIndex.Invalid ||
-                current.CodeAddress == CodeAddressIndex.Invalid)
-            {
-                return;
-            }
-
-            int handoffStart = currentIndex + 1;
-            while (handoffStart < frames.Count &&
-                   frames[handoffStart].Origin == StitchedFrameOrigin.AsyncRemaining &&
-                   ReferenceEquals(frames[handoffStart].Context, current.Context))
-            {
-                handoffStart++;
-            }
-
-            if (handoffStart + handoffCount >= frames.Count ||
-                !IsSyncFrameKind(frames[handoffStart],
-                    StitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure) ||
-                !IsSyncFrameKind(frames[handoffStart + 1],
-                    StitchSyncFrameKind.SystemPrivateCoreLibTaskRunContinuations) ||
-                !IsSyncFrameKind(frames[handoffStart + 2],
-                    StitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult))
-            {
-                return;
-            }
-
-            bool unassignedSyncTail = true;
-            for (int i = handoffStart; i <= handoffStart + handoffCount; i++)
-            {
-                if (frames[i].Origin != StitchedFrameOrigin.Sync || frames[i].Context != null)
-                {
-                    unassignedSyncTail = false;
-                    break;
-                }
-            }
-            if (!unassignedSyncTail ||
-                !IsSystemPrivateCoreLibSpan(context.TraceLog, frames, handoffStart, handoffCount) ||
-                context.ClassifyBoundary(frames[handoffStart + 3].CodeAddress).Kind !=
-                    AsyncStitchBoundaryKind.V2DispatchContinuation ||
-                context.ClassifyBoundary(frames[handoffStart + 4].CodeAddress).Kind !=
-                    AsyncStitchBoundaryKind.V2DispatchContinuation ||
-                frames[handoffStart + 3].Method == frames[handoffStart + 4].Method)
-            {
-                return;
-            }
-
-            StitchedFrame caller = frames[handoffStart + handoffCount];
-            if (caller.Method == MethodIndex.Invalid ||
-                caller.CodeAddress == CodeAddressIndex.Invalid ||
-                context.ClassifyBoundary(caller.CodeAddress).Kind != AsyncStitchBoundaryKind.None)
-            {
-                return;
-            }
-
-            // The completed V2 dispatcher is physical only; never consume a bridge belonging to a live segment.
-            frames.RemoveRange(handoffStart, handoffCount);
-            context.Diagnostics.V2CompletionHandoffFramesCollapsed += handoffCount;
-        }
-
-        private static bool IsSystemPrivateCoreLibSpan(
-            TraceLog traceLog,
-            List<StitchedFrame> frames,
-            int start,
-            int count)
-        {
-            int end = start + count;
-            for (int i = start; i < end; i++)
-            {
-                CodeAddressIndex codeAddressIndex = frames[i].CodeAddress;
-                if (frames[i].Method == MethodIndex.Invalid ||
-                    codeAddressIndex == CodeAddressIndex.Invalid ||
-                    !string.Equals(
-                        traceLog.CodeAddresses[codeAddressIndex].ModuleName,
-                        AsyncStitchBoundary.HostModuleName,
-                        StringComparison.OrdinalIgnoreCase))
-                {
-                    return false;
-                }
-            }
-
-            return true;
-        }
-
-        private static bool TryApplyReentrantV1Deduplication(
-            AsyncStackTransformContext context,
-            int currentIndex)
-        {
-            if (context.TraceLog == null)
-            {
-                return false;
-            }
-
-            List<StitchedFrame> frames = context.Frames;
-            StitchedFrame current = frames[currentIndex];
-            if (current.Segment == null ||
-                current.Segment.Kind != AsyncCallstackKind.StateMachineAsync ||
-                current.Method == MethodIndex.Invalid)
-            {
-                return false;
-            }
-
-            int registrationStart = currentIndex + 1;
-            int startupMoveNextIndex = registrationStart;
-            while (startupMoveNextIndex < frames.Count &&
-                   IsV1AwaitRegistrationFrame(frames[startupMoveNextIndex]))
-            {
-                startupMoveNextIndex++;
-            }
-
-            if (startupMoveNextIndex == registrationStart || startupMoveNextIndex >= frames.Count)
-            {
-                return false;
-            }
-
-            StitchedFrame startupMoveNext = frames[startupMoveNextIndex];
-            MethodIndex currentMethod = current.IsStateMachineBoxCarrier
-                ? current.BoxedStateMachineMethod
-                : current.Method;
-            if (startupMoveNext.Origin != StitchedFrameOrigin.Sync ||
-                startupMoveNext.SyncFrameKind != StitchSyncFrameKind.V1StateMachineMoveNext ||
-                startupMoveNext.Method != currentMethod)
-            {
-                return false;
-            }
-
-            int builderStart = startupMoveNextIndex + 1;
-            int kickoffIndex = builderStart;
-            while (kickoffIndex < frames.Count &&
-                   frames[kickoffIndex].Origin == StitchedFrameOrigin.Sync &&
-                   frames[kickoffIndex].SyncFrameKind == StitchSyncFrameKind.V1MethodBuilderStart)
-            {
-                kickoffIndex++;
-            }
-
-            if (kickoffIndex == builderStart ||
-                kickoffIndex >= frames.Count ||
-                !IsMatchingV1Kickoff(context.TraceLog, startupMoveNext, frames[kickoffIndex]))
-            {
-                return false;
-            }
-
-            // Keep the resumed AsyncCurrent representation. The exact match proves that the intervening CoreLib
-            // await-registration frames, duplicate startup MoveNext, builder Start frames, and kickoff all belong
-            // to the same reentrant activation, so collapse that complete generated span.
-            int duplicateFrameCount = kickoffIndex - registrationStart + 1;
-            frames.RemoveRange(registrationStart, duplicateFrameCount);
-            context.Diagnostics.V1ReentrantFramesCollapsed += duplicateFrameCount;
-            return true;
-        }
-
-        private static bool IsV1AwaitRegistrationFrame(StitchedFrame frame) =>
-            frame.Origin == StitchedFrameOrigin.Sync &&
-            (frame.SyncFrameKind == StitchSyncFrameKind.V1MethodBuilderAwaitUnsafeOnCompleted ||
-             frame.SyncFrameKind == StitchSyncFrameKind.V1AwaiterRegistrationInfrastructure);
-
-        private static bool IsMatchingV1Kickoff(
-            TraceLog traceLog,
-            StitchedFrame stateMachineMoveNext,
-            StitchedFrame kickoff)
-        {
-            if (kickoff.Origin != StitchedFrameOrigin.Sync ||
-                stateMachineMoveNext.CodeAddress == CodeAddressIndex.Invalid ||
-                kickoff.CodeAddress == CodeAddressIndex.Invalid)
-            {
-                return false;
-            }
-
-            TraceCodeAddress moveNextCodeAddress = traceLog.CodeAddresses[stateMachineMoveNext.CodeAddress];
-            TraceCodeAddress kickoffCodeAddress = traceLog.CodeAddresses[kickoff.CodeAddress];
-            if (!string.Equals(
-                    moveNextCodeAddress.ModuleName,
-                    kickoffCodeAddress.ModuleName,
-                    StringComparison.OrdinalIgnoreCase) ||
-                !AsyncStitchBoundary.TryGetLogicalStateMachineMethodName(
-                    moveNextCodeAddress.FullMethodName, out string logicalMethod))
-            {
-                return false;
-            }
-
-            string kickoffMethod = kickoffCodeAddress.FullMethodName;
-            if (string.IsNullOrEmpty(kickoffMethod))
-            {
-                return false;
-            }
-
-            int parameters = kickoffMethod.IndexOf('(');
-            if (parameters >= 0)
-            {
-                kickoffMethod = kickoffMethod.Substring(0, parameters);
-            }
-
-            return string.Equals(
-                logicalMethod,
-                kickoffMethod.Replace('+', '.'),
-                StringComparison.Ordinal);
-        }
-
-        private static void ApplyAsyncInfrastructureCleanup(AsyncStackTransformContext context)
-        {
-            List<StitchedFrame> frames = context.Frames;
-            int cleanupEnd = CollapseRuntimeResumptionBridge(context);
-            int cleanupStart = CollapseAsyncProfilerOwnedPrefix(context, ref cleanupEnd);
-
-            // Remove the public SetResult trigger only as part of the exact inline-completion chain. Removing the
-            // two implementation frames independently would otherwise leave SetResult as an orphan between the
-            // resumed async method and its synchronous caller.
-            for (int i = cleanupStart; i + 2 < cleanupEnd;)
-            {
-                if (IsInlineCompletionChain(frames, i))
-                {
-                    frames.RemoveRange(i, 3);
-                    cleanupEnd -= 3;
-                    context.Diagnostics.AsyncInfrastructureFramesCollapsed += 3;
-                }
-                else
-                {
-                    i++;
-                }
-            }
-
-            for (int i = cleanupEnd - 1; i >= cleanupStart; i--)
-            {
-                StitchedFrame frame = frames[i];
-                if (frame.Origin != StitchedFrameOrigin.Sync)
-                {
-                    continue;
-                }
-
-                AsyncStitchBoundaryKind boundaryKind = context.ClassifyBoundary(frame.CodeAddress).Kind;
-                if (boundaryKind == AsyncStitchBoundaryKind.V1Dispatcher ||
-                    boundaryKind == AsyncStitchBoundaryKind.V1DispatcherInfrastructure ||
-                    boundaryKind == AsyncStitchBoundaryKind.V2ContinuationWrapper ||
-                    boundaryKind == AsyncStitchBoundaryKind.V2DispatchContinuation ||
-                    frame.SyncFrameKind == StitchSyncFrameKind.V1MethodBuilderStart ||
-                    frame.SyncFrameKind == StitchSyncFrameKind.V1MethodBuilderAwaitUnsafeOnCompleted ||
-                    frame.SyncFrameKind == StitchSyncFrameKind.V1MethodBuilderInfrastructure ||
-                    frame.SyncFrameKind == StitchSyncFrameKind.V1MethodBuilderCompletion ||
-                    frame.SyncFrameKind == StitchSyncFrameKind.V1AwaiterRegistrationInfrastructure ||
-                    frame.SyncFrameKind == StitchSyncFrameKind.V1DispatcherCreationInfrastructure ||
-                    frame.SyncFrameKind == StitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure ||
-                    frame.SyncFrameKind == StitchSyncFrameKind.SystemPrivateCoreLibTaskRunContinuations ||
-                    frame.SyncFrameKind == StitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult)
-                {
-                    frames.RemoveAt(i);
-                    context.Diagnostics.AsyncInfrastructureFramesCollapsed++;
-                }
-            }
-        }
-
-        private static int CollapseAsyncProfilerOwnedPrefix(AsyncStackTransformContext context, ref int cleanupEnd)
-        {
-            if (context.TraceLog == null || context.Segments.Count == 0)
-            {
-                return 0;
-            }
-
-            List<StitchedFrame> frames = context.Frames;
-            int targetIndex = frames.Count;
-            bool candidate = false;
-            for (int i = 0; i < frames.Count; i++)
-            {
-                StitchedFrame frame = frames[i];
-                if (frame.ContextKind == StitchedFrameContextKind.Active &&
-                    (frame.Origin == StitchedFrameOrigin.AsyncCurrent ||
-                     frame.Origin == StitchedFrameOrigin.AsyncCompleting ||
-                     frame.Origin == StitchedFrameOrigin.AsyncRemaining ||
-                     frame.Origin == StitchedFrameOrigin.AsyncDispatchTarget))
-                {
-                    targetIndex = i;
-                    break;
-                }
-                candidate |= frame.SyncFrameKind == StitchSyncFrameKind.AsyncProfilerCallstackCapture ||
-                             frame.SyncFrameKind == StitchSyncFrameKind.AsyncProfilerCallstackEmission ||
-                             frame.SyncFrameKind == StitchSyncFrameKind.AsyncProfilerContextResume;
-            }
-            if (!candidate)
-            {
-                return 0;
-            }
-
-            // Keep rejected prefixes, including box helpers, out of subsequent individual-frame cleanup.
-            if (targetIndex == frames.Count ||
-                context.Diagnostics.SegmentsProcessed != context.Segments.Count ||
-                context.Diagnostics.BoundariesNotFound != 0 ||
-                context.Diagnostics.AdjacencyMismatches != 0)
-            {
-                return targetIndex;
-            }
-
-            StitchedFrame target = frames[targetIndex];
-            int entryIndex = targetIndex - 1;
-            int dispatcherIndex = -1;
-            if (target.Origin == StitchedFrameOrigin.AsyncDispatchTarget && !target.IsStateMachineBoxCarrier)
-            {
-                dispatcherIndex = entryIndex;
-                if (target.Segment.Kind != AsyncCallstackKind.StateMachineAsync ||
-                    dispatcherIndex < 0 ||
-                    context.ClassifyBoundary(frames[dispatcherIndex].CodeAddress).Kind !=
-                        AsyncStitchBoundaryKind.V1Dispatcher)
-                {
-                    return targetIndex;
-                }
-                entryIndex--;
-            }
-            else if (target.Origin != StitchedFrameOrigin.AsyncCurrent &&
-                     target.Origin != StitchedFrameOrigin.AsyncCompleting &&
-                     !target.IsStateMachineBoxCarrier)
-            {
-                return targetIndex;
-            }
-            if (entryIndex < 0 ||
-                !IsSyncFrameKind(frames[entryIndex], StitchSyncFrameKind.AsyncProfilerContextResume) ||
-                !IsSystemPrivateCoreLibSpan(context.TraceLog, frames, entryIndex, targetIndex - entryIndex))
-            {
-                return targetIndex;
-            }
-
-            // Only the entry spine needs symbols. Everything leafward is callee work owned by that invocation.
-            // A physical current/completing anchor remains intact even when stitching already removed its dispatcher.
-            for (int i = 0; i < targetIndex; i++)
-            {
-                StitchedFrame frame = frames[i];
-                if (frame.Origin != StitchedFrameOrigin.Sync ||
-                    frame.ContextKind != StitchedFrameContextKind.Active ||
-                    !ReferenceEquals(frame.Context, target.Context) ||
-                    (i != dispatcherIndex &&
-                     context.ClassifyBoundary(frame.CodeAddress).IsBoundary))
-                {
-                    return targetIndex;
-                }
-            }
-
-            frames.RemoveRange(0, targetIndex);
-            cleanupEnd -= targetIndex;
-            context.Diagnostics.AsyncInfrastructureFramesCollapsed += targetIndex;
-            context.Diagnostics.AsyncProfilerEnvelopeFramesCollapsed += targetIndex;
-            return 0;
-        }
-
-        private static int CollapseRuntimeResumptionBridge(AsyncStackTransformContext context)
-        {
-            List<StitchedFrame> frames = context.Frames;
-            if (context.TraceLog == null ||
-                context.Segments.Count == 0 ||
-                context.Diagnostics.SegmentsProcessed != context.Segments.Count ||
-                context.Diagnostics.BoundariesNotFound != 0 ||
-                context.Diagnostics.AdjacencyMismatches != 0)
-            {
-                return frames.Count;
-            }
-
-            AsyncCallStack rootContext = context.Segments[0];
-            int rootIndex = -1;
-            bool currentMatched = false;
-            for (int i = frames.Count - 1; i >= 0; i--)
-            {
-                if (ReferenceEquals(frames[i].Context, rootContext) &&
-                    frames[i].ContextKind == StitchedFrameContextKind.Active)
-                {
-                    if (rootIndex < 0)
-                    {
-                        rootIndex = i;
-                    }
-                    currentMatched |= frames[i].Origin == StitchedFrameOrigin.AsyncCurrent &&
-                                      frames[i].Method != MethodIndex.Invalid;
-                }
-            }
-            if (rootIndex < 0 ||
-                (rootContext.Frames.Kind == AsyncCallstackKind.RuntimeAsync && !currentMatched))
-            {
-                return frames.Count;
-            }
-
-            int bridgeStart = rootIndex + 1;
-            while (bridgeStart < frames.Count &&
-                   frames[bridgeStart].Origin == StitchedFrameOrigin.AsyncContextParent)
-            {
-                bridgeStart++;
-            }
-
-            int dispatchIndex = frames.Count;
-            bool candidate = false;
-            bool completionPair = false;
-            for (int i = bridgeStart; i < frames.Count; i++)
-            {
-                if (frames[i].SyncFrameKind == StitchSyncFrameKind.SystemPrivateCoreLibThreadPoolDispatch)
-                {
-                    dispatchIndex = i;
-                    break;
-                }
-                if (frames[i].SyncFrameKind == StitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure ||
-                    frames[i].SyncFrameKind == StitchSyncFrameKind.SystemPrivateCoreLibTaskRunContinuations ||
-                    frames[i].SyncFrameKind == StitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult)
-                {
-                    candidate = true;
-                }
-                if (i + 1 < frames.Count &&
-                    IsSyncFrameKind(frames[i], StitchSyncFrameKind.SystemPrivateCoreLibTaskRunContinuations) &&
-                    IsSyncFrameKind(frames[i + 1], StitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult))
-                {
-                    completionPair = true;
-                }
-            }
-            if (!candidate)
-            {
-                return frames.Count;
-            }
-
-            // Rejected bridges remain intact; individual-helper cleanup only visits their leaf-ward prefix.
-            if (!completionPair ||
-                dispatchIndex == frames.Count ||
-                !IsSystemPrivateCoreLibSpan(
-                    context.TraceLog, frames, bridgeStart, dispatchIndex - bridgeStart + 1))
-            {
-                // The root-adjacent completion chain has independent ownership evidence. Do not consume the
-                // application callback or relax protection of the remaining resumption bridge.
-                if (dispatchIndex < frames.Count &&
-                    bridgeStart + 2 < dispatchIndex &&
-                    context.Diagnostics.V1CompletionAlignmentAmbiguous == 0 &&
-                    HasVerifiedAsyncAnchor(context, rootIndex, rootContext) &&
-                    IsInlineCompletionChain(frames, bridgeStart) &&
-                    IsSystemPrivateCoreLibSpan(context.TraceLog, frames, bridgeStart, 3) &&
-                    frames[bridgeStart].Context == null &&
-                    frames[bridgeStart + 1].Context == null &&
-                    frames[bridgeStart + 2].Context == null)
-                {
-                    frames.RemoveRange(bridgeStart, 3);
-                    context.Diagnostics.AsyncInfrastructureFramesCollapsed += 3;
-                }
-                return bridgeStart;
-            }
-            for (int i = bridgeStart; i <= dispatchIndex; i++)
-            {
-                if (frames[i].Origin != StitchedFrameOrigin.Sync ||
-                    frames[i].Context != null)
-                {
-                    return bridgeStart;
-                }
-                AsyncStitchBoundaryKind boundary = context.ClassifyBoundary(frames[i].CodeAddress).Kind;
-                if (boundary == AsyncStitchBoundaryKind.V1Dispatcher ||
-                    boundary == AsyncStitchBoundaryKind.V2ContinuationWrapper)
-                {
-                    return bridgeStart;
-                }
-            }
-
-            int count = dispatchIndex - bridgeStart;
-            frames.RemoveRange(bridgeStart, count);
-            context.Diagnostics.AsyncInfrastructureFramesCollapsed += count;
-            context.Diagnostics.RuntimeResumptionBridgeFramesCollapsed += count;
-            return frames.Count;
-        }
-
-        private static bool IsInlineCompletionChain(List<StitchedFrame> frames, int start) =>
-            IsSyncFrameKind(frames[start], StitchSyncFrameKind.SystemPrivateCoreLibTaskRunContinuations) &&
-            IsSyncFrameKind(frames[start + 1], StitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult) &&
-            IsSyncFrameKind(frames[start + 2], StitchSyncFrameKind.SystemPrivateCoreLibTaskCompletionSourceSetResult);
-
-        private static bool IsSyncFrameKind(StitchedFrame frame, StitchSyncFrameKind kind) =>
-            frame.Origin == StitchedFrameOrigin.Sync &&
-            frame.SyncFrameKind == kind;
 
         #region private
 
+        private AsyncStackTransform[] CreateTransforms()
+        {
+            var transforms = new List<AsyncStackTransform>(4 + m_customTransforms.Count);
+            if (EnableConservativeTransforms)
+            {
+                transforms.Add(new AsyncSampledV2WrapperTransform().Apply);
+                transforms.Add(new AsyncReentrantHandoffTransform().Apply);
+                transforms.Add(new AsyncV1PresentationTransform().Apply);
+            }
+            if (EnableAsyncInfrastructureCleanup)
+            {
+                transforms.Add(new AsyncInfrastructureCleanupTransform().Apply);
+            }
+            transforms.AddRange(m_customTransforms);
+            return transforms.ToArray();
+        }
+
         private int m_maximumContextAncestryDepth = AsyncContextAncestryAugmenter.DefaultMaximumDepth;
+        private bool m_enableConservativeTransforms = true;
+        private bool m_enableAsyncInfrastructureCleanup;
         private readonly List<AsyncStackTransform> m_customTransforms;
+        // Null until first use or after pass configuration changes; otherwise reused across samples.
+        private AsyncStackTransform[] m_transforms;
 
         #endregion
     }
