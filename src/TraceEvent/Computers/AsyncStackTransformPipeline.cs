@@ -6,6 +6,8 @@ using System.Collections.Generic;
 
 using Microsoft.Diagnostics.Tracing.Etlx;
 
+using static Microsoft.Diagnostics.Tracing.Computers.AsyncStackTransformHelpers;
+
 namespace Microsoft.Diagnostics.Tracing.Computers
 {
     /// <summary>
@@ -20,7 +22,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             long timestampQpc,
             Func<CodeAddressIndex, AsyncStitchBoundaryInfo> classifyBoundary,
             StitchDiagnostics diagnostics,
-            List<StitchedFrame> frames)
+            List<StitchedFrame> frames,
+            Func<CodeAddressIndex, AsyncRuntimeRuleProfile> runtimeProfileResolver = null,
+            AsyncRuntimeRuleProfile runtimeProfile = null)
         {
             TraceLog = traceLog;
             Segments = segments;
@@ -28,6 +32,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             m_classifyBoundary = classifyBoundary;
             Diagnostics = diagnostics;
             Frames = frames;
+            AsyncRuntimeRuleProfileCache profiles = null;
+            m_runtimeProfileResolver = runtimeProfileResolver ?? CreateRuntimeProfileResolver(traceLog, out profiles);
+            RuntimeProfile = runtimeProfile ?? ResolveRuntimeProfile(traceLog, segments, frames, m_runtimeProfileResolver, profiles);
         }
 
         /// <summary>
@@ -54,9 +61,136 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         public AsyncStitchBoundaryInfo ClassifyBoundary(CodeAddressIndex codeAddress) =>
             m_classifyBoundary(codeAddress);
 
+        /// <summary>
+        /// Unambiguous captured runtime for whole-stage replacement and application-led layouts. Fixed before
+        /// any pass removes runtime evidence; mixed profiles use Common, never another sample's selection.
+        /// </summary>
+        internal AsyncRuntimeRuleProfile RuntimeProfile { get; }
+
+        internal AsyncRuntimeRuleProfile GetRuntimeProfile(CodeAddressIndex codeAddress) =>
+            m_runtimeProfileResolver(codeAddress) ??
+            throw new InvalidOperationException("The runtime profile resolver returned null.");
+
+        /// <summary>
+        /// Matches using captured candidate ownership. Application-led startup layouts use the owning sample's
+        /// runtime rather than treating the application's module version as a CoreLib version.
+        /// </summary>
+        internal AsyncRuntimeSequenceMatch MatchRuntimeSequence(AsyncRuntimeSequenceKind kind, int start, int end)
+        {
+            if (start < 0 || end < start || end > Frames.Count)
+            {
+                throw new ArgumentOutOfRangeException(nameof(start));
+            }
+            if (start == end)
+            {
+                return default;
+            }
+            bool startup = kind == AsyncRuntimeSequenceKind.V1Startup;
+            AsyncRuntimeRuleProfile profile = startup ? RuntimeProfile : GetRuntimeProfile(Frames[start].CodeAddress);
+            AsyncRuntimeSequenceMatch match = profile.MatchSequence(kind, this, start, end);
+            if (match.Length > end - start)
+            {
+                throw new InvalidOperationException("A runtime sequence matcher returned a span outside its candidate range.");
+            }
+            if (match.IsMatch &&
+                (startup
+                    ? !IsSyncFrameKind(Frames[start], StitchSyncFrameKind.V1StateMachineMoveNext) ||
+                      !IsSameRuntimeSpan(profile, start + 1, match.Length - 1)
+                    : !IsSameRuntimeSpan(profile, start, match.Length)))
+            {
+                return AsyncRuntimeSequenceMatch.Reject(match.Length);
+            }
+            return match;
+        }
+
         #region private
 
+        private static AsyncRuntimeRuleProfile ResolveRuntimeProfile(
+            TraceLog traceLog, IReadOnlyList<AsyncCallStack> segments, List<StitchedFrame> frames,
+            Func<CodeAddressIndex, AsyncRuntimeRuleProfile> runtimeProfileResolver, AsyncRuntimeRuleProfileCache profiles)
+        {
+            if (profiles != null && segments.Count != 0 && segments[0].Thread.ProcessIndex != ProcessIndex.Invalid)
+            {
+                ProcessIndex process = segments[0].Thread.ProcessIndex;
+                for (int i = 1; i < segments.Count; i++)
+                {
+                    if (segments[i].Thread.ProcessIndex != process)
+                    {
+                        return AsyncRuntimeRuleProfile.Common;
+                    }
+                }
+                return profiles.GetProcessProfile(process);
+            }
+            AsyncRuntimeRuleProfile result = null;
+            foreach (StitchedFrame frame in frames)
+            {
+                if (traceLog != null &&
+                    (frame.CodeAddress == CodeAddressIndex.Invalid ||
+                     !AsyncRuntimeRuleProfileCache.IsHostModule(traceLog.CodeAddresses.ModuleFile(frame.CodeAddress))))
+                {
+                    continue;
+                }
+                AsyncRuntimeRuleProfile profile = runtimeProfileResolver(frame.CodeAddress) ??
+                    throw new InvalidOperationException("The runtime profile resolver returned null.");
+                if (result != null && !ReferenceEquals(result, profile))
+                {
+                    return AsyncRuntimeRuleProfile.Common;
+                }
+                result = profile;
+            }
+            return result ?? AsyncRuntimeRuleProfile.Common;
+        }
+
+        private bool IsSameRuntimeSpan(AsyncRuntimeRuleProfile profile, int start, int length)
+        {
+            ModuleFileIndex moduleIndex = ModuleFileIndex.Invalid;
+            for (int i = start; i < start + length; i++)
+            {
+                StitchedFrame frame = Frames[i];
+                if (frame.Origin != StitchedFrameOrigin.Sync ||
+                    !ReferenceEquals(profile, GetRuntimeProfile(frame.CodeAddress)))
+                {
+                    return false;
+                }
+                if (TraceLog != null)
+                {
+                    if (frame.CodeAddress == CodeAddressIndex.Invalid || frame.Method == MethodIndex.Invalid)
+                    {
+                        return false;
+                    }
+                    TraceModuleFile module = TraceLog.CodeAddresses.ModuleFile(frame.CodeAddress);
+                    if (!AsyncRuntimeRuleProfileCache.IsHostModule(module))
+                    {
+                        return false;
+                    }
+                    ModuleFileIndex current = (module.ManagedModule ?? module).ModuleFileIndex;
+                    if (i != start && current != moduleIndex)
+                    {
+                        return false;
+                    }
+                    moduleIndex = current;
+                }
+            }
+            return true;
+        }
+
+        private static Func<CodeAddressIndex, AsyncRuntimeRuleProfile> CreateRuntimeProfileResolver(
+            TraceLog traceLog, out AsyncRuntimeRuleProfileCache profiles)
+        {
+            profiles = null;
+            if (traceLog == null)
+            {
+                return _ => AsyncRuntimeRuleProfile.Common;
+            }
+            var capturedProfiles = new AsyncRuntimeRuleProfileCache(traceLog.ModuleFiles);
+            profiles = capturedProfiles;
+            return codeAddress => codeAddress == CodeAddressIndex.Invalid
+                ? AsyncRuntimeRuleProfile.Common
+                : capturedProfiles.GetProfile(traceLog.CodeAddresses.ModuleFileIndex(codeAddress));
+        }
+
         private readonly Func<CodeAddressIndex, AsyncStitchBoundaryInfo> m_classifyBoundary;
+        private readonly Func<CodeAddressIndex, AsyncRuntimeRuleProfile> m_runtimeProfileResolver;
 
         #endregion
     }
@@ -78,6 +212,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// Configure the host computer's pipeline before stack generation. <see cref="Transform"/> applies only
     /// conservative normalization, async-infrastructure cleanup, and custom callbacks to an existing structural result.
     /// Context ancestry and frame annotations are separate host-builder/emitter options.
+    /// Built-in stages are selected from captured runtime profiles without changing their enablement or order.
+    /// A profile can replace one complete stage while inheriting the others; missing or ambiguous runtime
+    /// ownership retains common implementations. Custom callbacks still run after all enabled built-in stages.
     /// </remarks>
     public sealed class AsyncStackTransformPipeline
     {
@@ -156,10 +293,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// Before individual-helper cleanup, it atomically folds fully resolved CoreLib resumption bridges from
         /// a matched async activation to <c>ThreadPoolWorkQueue.Dispatch</c>, retaining that dispatch anchor.
         /// V1 requires a verified dispatcher boundary; V2 also requires a physically matched current async method.
-        /// Bridges require adjacent <c>Task.RunContinuations -&gt; Task.TrySetResult</c> evidence. Interrupted,
+        /// Bridges require a runtime-profile completion pair (adjacent
+        /// <c>Task.RunContinuations -&gt; Task.TrySetResult</c> under the common rules). Interrupted,
         /// unresolved, or non-CoreLib candidates remain protected from individual-helper cleanup. An exact,
         /// resolved <c>Task.RunContinuations -&gt; Task.TrySetResult -&gt; TaskCompletionSource.SetResult</c>
-        /// chain directly below a verified root activation can still be removed independently, preserving
+        /// chain under the common rules, or its selected profile's corresponding layout,
+        /// directly below a verified root activation can still be removed independently, preserving
         /// application callbacks and the rest of the rejected bridge. The same chain is also removed outside
         /// protected candidates.
         /// A resolved CoreLib profiler <c>Resume</c> immediately above a verified V1 dispatcher or physically
@@ -276,16 +415,23 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             var transforms = new List<AsyncStackTransform>(4 + m_customTransforms.Count);
             if (EnableConservativeTransforms)
             {
-                transforms.Add(new AsyncSampledV2WrapperTransform().Apply);
-                transforms.Add(new AsyncReentrantHandoffTransform().Apply);
-                transforms.Add(new AsyncV1PresentationTransform().Apply);
+                transforms.Add(context => ApplyRuntimeTransform(context, AsyncRuntimeTransformKind.SampledV2Wrapper));
+                transforms.Add(context => ApplyRuntimeTransform(context, AsyncRuntimeTransformKind.ReentrantHandoff));
+                transforms.Add(context => ApplyRuntimeTransform(context, AsyncRuntimeTransformKind.V1Presentation));
             }
             if (EnableAsyncInfrastructureCleanup)
             {
-                transforms.Add(new AsyncInfrastructureCleanupTransform().Apply);
+                transforms.Add(context => ApplyRuntimeTransform(context, AsyncRuntimeTransformKind.InfrastructureCleanup));
             }
             transforms.AddRange(m_customTransforms);
             return transforms.ToArray();
+        }
+
+        private static void ApplyRuntimeTransform(AsyncStackTransformContext context, AsyncRuntimeTransformKind kind)
+        {
+            AsyncStackTransform transform = context.RuntimeProfile.GetTransform(kind) ??
+                throw new InvalidOperationException("A runtime profile returned a null presentation transform.");
+            transform(context);
         }
 
         private int m_maximumContextAncestryDepth = AsyncContextAncestryAugmenter.DefaultMaximumDepth;

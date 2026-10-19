@@ -104,6 +104,114 @@ namespace TraceEventTests
 
             public StitchResult Run(IReadOnlyList<StitchSyncFrame> sync, IReadOnlyList<AsyncCallStack> segmentsRootToLeaf, bool trace) =>
                 AsyncCpuStackStitcher.Stitch(sync, segmentsRootToLeaf, Qpc, Classify, MethodCompletionObserved, MethodOf, trace);
+
+            public StitchResult Run(IReadOnlyList<StitchSyncFrame> sync, IReadOnlyList<AsyncCallStack> segments,
+                AsyncRuntimeRuleProfile profile, Func<CodeAddressIndex, AsyncRuntimeRuleProfile> runtimeProfileResolver = null)
+            {
+                var output = new List<StitchedFrame>();
+                var diagnostics = new StitchDiagnostics();
+                AsyncCpuStackStitcher.StitchInto(sync, segments, Qpc, Classify,
+                    (process, kind, qpc) => MethodCompletionObserved(kind), ProcessIndex.Invalid, MethodOf,
+                    false, output, diagnostics, null, runtimeProfileResolver ?? (_ => profile), profile);
+                return new StitchResult(output, diagnostics);
+            }
+        }
+
+        [Theory]
+        [InlineData(AsyncCallstackKind.StateMachineAsync, false, false)]
+        [InlineData(AsyncCallstackKind.RuntimeAsync, false, false)]
+        [InlineData(AsyncCallstackKind.StateMachineAsync, true, false)]
+        [InlineData(AsyncCallstackKind.RuntimeAsync, true, false)]
+        [InlineData(AsyncCallstackKind.StateMachineAsync, false, true)]
+        [InlineData(AsyncCallstackKind.RuntimeAsync, false, true)]
+        public void ProfiledStructuralPlumbing_RecognizesInsertedHelpersButPreservesForeignSpansAndBoundaries(
+            AsyncCallstackKind kind, bool foreignProfile, bool crossesBoundary)
+        {
+            var s = new Scenario();
+            var profile = new StructuralRulesProfile(2);
+            AsyncCallStack segment = s.Segment(kind, new[] { 800, 801 }, new[] { 10, 11 });
+            var sync = new[]
+            {
+                s.Sync(50, 10),
+                s.Boundary(51, kind == AsyncCallstackKind.StateMachineAsync ? V1Dispatcher : Wrapper(0)),
+                s.Sync(52, 90, StitchSyncFrameKind.V1MethodBuilderInfrastructure),
+                s.Boundary(53, crossesBoundary ? V1Dispatcher :
+                    kind == AsyncCallstackKind.StateMachineAsync ? V1Infrastructure : DispatchContinuation),
+                s.Sync(54, 99),
+            };
+            StitchResult common = s.Run(sync, new[] { segment });
+            Assert.Contains(common.Frames, frame => frame.CodeAddress == Scenario.CA(52));
+            StitchResult changed = s.Run(sync, new[] { segment }, profile,
+                ca => foreignProfile && ca == Scenario.CA(52) ? AsyncRuntimeRuleProfile.Common : profile);
+            Assert.Equal(foreignProfile || crossesBoundary,
+                changed.Frames.Any(frame => frame.CodeAddress == Scenario.CA(52)));
+            Assert.Contains(changed.Frames, frame => frame.CodeAddress == Scenario.CA(54));
+            Assert.Contains(changed.Frames, frame => frame.CodeAddress == Scenario.CA(801));
+        }
+
+        [Fact]
+        public void ProfiledStructuralPlumbing_InvalidBoundsThrow()
+        {
+            var s = new Scenario();
+            AsyncCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync, new[] { 800 }, new[] { 10 });
+            var sync = new[]
+            {
+                s.Sync(50, 10), s.Boundary(51, V1Dispatcher),
+                s.Sync(52, 90, StitchSyncFrameKind.V1MethodBuilderInfrastructure),
+            };
+            Assert.Throws<InvalidOperationException>(() =>
+                s.Run(sync, new[] { segment }, new StructuralRulesProfile(10)));
+        }
+
+        [Theory]
+        [InlineData(false, false)]
+        [InlineData(true, false)]
+        [InlineData(false, true)]
+        [InlineData(true, true)]
+        public void ProfiledCarrierEvidence_CannotOverridePhysicalBodyPrecedence(bool allowCarrier, bool physicalBody)
+        {
+            var s = new Scenario();
+            AsyncCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
+                new[] { 800, 801 }, new[] { 10, 11 });
+            var sync = new[]
+            {
+                s.Sync(50, physicalBody ? 10 : 90), s.BoxCarrier(51, 10),
+                s.Boundary(52, V1Dispatcher), s.Sync(53, 99),
+            };
+            StitchResult result = s.Run(sync, new[] { segment },
+                new StructuralRulesProfile(0, allowCarrier: allowCarrier));
+            Assert.Equal(allowCarrier && !physicalBody, result.Frames.Any(frame => frame.IsStateMachineBoxCarrier));
+            Assert.Contains(result.Frames, frame => frame.CodeAddress == Scenario.CA(50));
+        }
+
+        private sealed class StructuralRulesProfile : AsyncRuntimeRuleProfile
+        {
+            public StructuralRulesProfile(int plumbingLength, bool allowCarrier = true, bool allowCompletion = true)
+                : base("Test-only structural rules")
+            {
+                m_plumbingLength = plumbingLength;
+                m_allowCarrier = allowCarrier;
+                m_allowCompletion = allowCompletion;
+            }
+
+            public override AsyncRuntimeSequenceMatch MatchDispatchPlumbing(
+                AsyncCallstackKind kind, IReadOnlyList<StitchSyncFrame> frames, int start, int end,
+                Func<CodeAddressIndex, AsyncStitchBoundaryInfo> classify) =>
+                m_plumbingLength != 0 && start < end &&
+                frames[start].Kind == StitchSyncFrameKind.V1MethodBuilderInfrastructure
+                    ? AsyncRuntimeSequenceMatch.Match(m_plumbingLength)
+                    : base.MatchDispatchPlumbing(kind, frames, start, end, classify);
+
+            public override bool IsV1BoxCarrierCandidate(
+                IReadOnlyList<StitchSyncFrame> frames, int start, int end, int index) =>
+                m_allowCarrier && base.IsV1BoxCarrierCandidate(frames, start, end, index);
+
+            public override bool HasV1CompletionEvidence(IReadOnlyList<StitchSyncFrame> frames, int start, int end) =>
+                m_allowCompletion && base.HasV1CompletionEvidence(frames, start, end);
+
+            private readonly int m_plumbingLength;
+            private readonly bool m_allowCarrier;
+            private readonly bool m_allowCompletion;
         }
 
         private static AsyncStitchBoundaryInfo Wrapper(int index) => new AsyncStitchBoundaryInfo(AsyncStitchBoundaryKind.V2ContinuationWrapper, index);
@@ -2570,6 +2678,11 @@ namespace TraceEventTests
                 result.Frames.Select(frame => frame.CodeAddress));
             Assert.Equal(1, result.Diagnostics.V1InlineFallbackUsed);
             Assert.Equal(0, result.Diagnostics.BoundariesNotFound);
+
+            StitchResult withoutCompletionProof = s.Run(sync, new[] { outer, inner },
+                new StructuralRulesProfile(0, allowCompletion: false));
+            Assert.Contains(withoutCompletionProof.Frames, frame =>
+                frame.CodeAddress == Scenario.CA(56) && frame.Origin == StitchedFrameOrigin.AsyncCurrent);
         }
 
         [Fact]

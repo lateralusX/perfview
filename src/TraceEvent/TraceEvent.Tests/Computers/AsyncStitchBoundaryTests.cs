@@ -61,43 +61,11 @@ namespace TraceEventTests
         }
 
         [Theory]
-        [InlineData("AsyncStateMachineBox`1[App+<Run>d__1].MoveNext()", "App+<Run>d__1")]
-        [InlineData("AsyncProfilerAsyncStateMachineBox`1[System.Int64,App+<Run>d__1].InstrumentedMoveNext(class System.Threading.Thread)", "App+<Run>d__1")]
-        [InlineData("ProfilerAsyncStateMachineBox`1[System.Collections.Generic.List`1[System.Int64],App`1+<Run>d__1`1[System.Int32,System.String]].MoveNext()", "App`1+<Run>d__1`1[System.Int32,System.String]")]
-        [InlineData("DebugFinalizableAsyncStateMachineBox`1[System.Int64, App+<Run>d__1].MoveNext()", "App+<Run>d__1")]
-        public void BoxCarrier_ExtractsTheFinalConstructedTypeArgument(string boxMethod, string expected)
-        {
-            string name = "System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1+" + boxMethod;
-            Assert.True(AsyncStitchBoundary.TryGetBoxedStateMachineTypeName(name, true, out string type));
-            Assert.Equal(expected, type);
-        }
-
-        [Theory]
-        [InlineData(null, true)]
-        [InlineData("", true)]
-        [InlineData("System.Runtime.CompilerServices.AsyncStateMachineBox`1[App].MoveNext()", false)]
-        [InlineData("Other.Namespace.AsyncStateMachineBox`1[App].MoveNext()", true)]
-        [InlineData("System.Runtime.CompilerServices.AsyncStateMachineBox`1[App].MoveNextAsDispatcher()", true)]
-        [InlineData("System.Runtime.CompilerServices.AsyncStateMachineBox`1[App].UnknownMoveNext()", true)]
-        [InlineData("System.Runtime.CompilerServices.AsyncStateMachineDispatcher.MoveNext()", true)]
-        [InlineData("System.Runtime.CompilerServices.AsyncStateMachineBox`1.MoveNext()", true)]
-        [InlineData("System.Runtime.CompilerServices.AsyncStateMachineBox`10[App].MoveNext()", true)]
-        [InlineData("System.Runtime.CompilerServices.AsyncStateMachineBox`1[].MoveNext()", true)]
-        [InlineData("System.Runtime.CompilerServices.AsyncStateMachineBox`1[App,].MoveNext()", true)]
-        [InlineData("System.Runtime.CompilerServices.AsyncStateMachineBox`1[,App].MoveNext()", true)]
-        [InlineData("System.Runtime.CompilerServices.AsyncStateMachineBox`1[App`1[System.Int32].MoveNext()", true)]
-        [InlineData("System.Runtime.CompilerServices.AsyncStateMachineBox`1[App]].MoveNext()", true)]
-        public void BoxCarrier_RejectsUnknownUnconstructedAndMalformedNames(string name, bool isHostModule)
-        {
-            Assert.False(AsyncStitchBoundary.TryGetBoxedStateMachineTypeName(name, isHostModule, out _));
-        }
-
-        [Theory]
         [InlineData("TestApp!Namespace.App+<Run>d__1.MoveNext()", "Namespace.App+<Run>d__1")]
         [InlineData("Namespace.App`1+<Run>d__1`1[System.Int32,System.String].MoveNext()", "Namespace.App`1+<Run>d__1`1[System.Int32,System.String]")]
         [InlineData("Namespace.App.Run()", null)]
         [InlineData(null, null)]
-        public void BoxCarrier_ExtractsQualifiedStateMachineMethodTypes(string name, string expected)
+        public void GetStateMachineTypeName_ExtractsQualifiedStateMachineMethodTypes(string name, string expected)
         {
             Assert.Equal(expected, AsyncStitchBoundary.GetStateMachineTypeName(name));
         }
@@ -439,7 +407,6 @@ namespace TraceEventTests
             Assert.Equal("InstrumentedDispatchContinuations", AsyncStitchBoundary.InstrumentedDispatchContinuationsName);
             Assert.Equal("MoveNextAsDispatcher", AsyncStitchBoundary.MoveNextAsDispatcherName);
             Assert.Equal("AsyncStateMachineDispatcher", AsyncStitchBoundary.AsyncStateMachineDispatcherTypeName);
-            Assert.Equal("AsyncStateMachineBox", AsyncStitchBoundary.AsyncStateMachineBoxTypeSuffix);
             Assert.Equal("MoveNext", AsyncStitchBoundary.AsyncStateMachineDispatcherMethodName);
             Assert.Equal("System.Private.CoreLib", AsyncStitchBoundary.HostModuleName);
         }

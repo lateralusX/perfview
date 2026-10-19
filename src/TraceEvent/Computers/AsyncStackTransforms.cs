@@ -68,13 +68,15 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// known builder Start frames are removed. If a same-module kickoff name matches, the startup MoveNext and
     /// Start frames are removed instead, retaining the kickoff. Reentrant deduplication retains the resumed
     /// current/box representation and removes contiguous await-registration helpers, the identical startup
-    /// MoveNext, builder Start frames, and matching kickoff. Kickoff matching compares logical names with
+    /// MoveNext, builder Start frames, and matching kickoff. Profiles supply the startup and registration spans;
+    /// the common layouts are described here. Kickoff matching compares logical names with
     /// parameter lists stripped; it is not metadata/token-based or exact-signature resolution.
     /// </para>
     /// <para>
-    /// The completed V2 tail must be the leaf-to-root sequence: one classified Task-continuation or execution-context
+    /// Under the common profile, the completed V2 tail is the leaf-to-root sequence: one classified Task-continuation or execution-context
     /// bridge, Task.RunContinuations, Task.TrySetResult, and two distinct V2 dispatch-continuation methods.
-    /// The five removed frames must be resolved, CoreLib-owned, and outside live async contexts, with a resolved
+    /// The selected profile supplies the actual matched span, including any verified layout changes.
+    /// All removed frames must resolve to the same captured CoreLib module and be outside live async contexts, with a resolved
     /// ordinary synchronous caller retained beneath them. Missing boundaries or adjacency mismatches block this fold.
     /// </para>
     /// <para>
@@ -85,7 +87,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// known awaiter-registration methods,
     /// Task completion helpers, and ExecutionContext/AwaitTaskContinuation bridge shapes are compiler/runtime
     /// conventions, not async-profiler guarantees. Their recognition is centralized in
-    /// <see cref="AsyncStitchBoundary.ClassifySynchronousFrame(string, bool)"/>.
+    /// <see cref="AsyncRuntimeRuleProfile"/>, selected from captured CoreLib metadata before stitching.
     /// </para>
     /// <para>
     /// <b>Ordering and fallback:</b> runs after verified inter-activation handoff folding and before optional
@@ -123,14 +125,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     continue;
                 }
 
-                int end = i + 1;
-                while (end < frames.Count &&
-                       frames[end].Origin == StitchedFrameOrigin.Sync &&
-                       frames[end].SyncFrameKind == StitchSyncFrameKind.V1MethodBuilderStart)
+                AsyncRuntimeSequenceMatch startup = context.MatchRuntimeSequence(
+                    AsyncRuntimeSequenceKind.V1Startup, i, frames.Count);
+                if (!startup.IsMatch)
                 {
-                    end++;
+                    continue;
                 }
-
+                int end = i + startup.Length;
                 int builderCount = end - i - 1;
                 if (builderCount != 0 &&
                     end < frames.Count &&
@@ -168,7 +169,6 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             List<StitchedFrame> frames = context.Frames;
-            const int handoffCount = 5;
             StitchedFrame current = frames[currentIndex];
             if (current.Context == null ||
                 current.Context.Frames.Kind != AsyncCallstackKind.StateMachineAsync ||
@@ -186,13 +186,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 handoffStart++;
             }
 
-            if (handoffStart + handoffCount >= frames.Count ||
-                !IsSyncFrameKind(frames[handoffStart],
-                    StitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure) ||
-                !IsSyncFrameKind(frames[handoffStart + 1],
-                    StitchSyncFrameKind.SystemPrivateCoreLibTaskRunContinuations) ||
-                !IsSyncFrameKind(frames[handoffStart + 2],
-                    StitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult))
+            AsyncRuntimeSequenceMatch handoff = context.MatchRuntimeSequence(
+                AsyncRuntimeSequenceKind.V2CompletionHandoff, handoffStart, frames.Count);
+            int handoffCount = handoff.Length;
+            if (!handoff.IsMatch || handoffCount >= frames.Count - handoffStart)
             {
                 return;
             }
@@ -206,13 +203,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     break;
                 }
             }
-            if (!unassignedSyncTail ||
-                !IsSystemPrivateCoreLibSpan(context.TraceLog, frames, handoffStart, handoffCount) ||
-                context.ClassifyBoundary(frames[handoffStart + 3].CodeAddress).Kind !=
-                    AsyncStitchBoundaryKind.V2DispatchContinuation ||
-                context.ClassifyBoundary(frames[handoffStart + 4].CodeAddress).Kind !=
-                    AsyncStitchBoundaryKind.V2DispatchContinuation ||
-                frames[handoffStart + 3].Method == frames[handoffStart + 4].Method)
+            if (!unassignedSyncTail)
             {
                 return;
             }
@@ -249,14 +240,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             int registrationStart = currentIndex + 1;
-            int startupMoveNextIndex = registrationStart;
-            while (startupMoveNextIndex < frames.Count &&
-                   IsV1AwaitRegistrationFrame(frames[startupMoveNextIndex]))
-            {
-                startupMoveNextIndex++;
-            }
-
-            if (startupMoveNextIndex == registrationStart || startupMoveNextIndex >= frames.Count)
+            AsyncRuntimeSequenceMatch registration = context.MatchRuntimeSequence(
+                AsyncRuntimeSequenceKind.V1AwaitRegistration, registrationStart, frames.Count);
+            int startupMoveNextIndex = registrationStart + registration.Length;
+            if (!registration.IsMatch || startupMoveNextIndex >= frames.Count)
             {
                 return false;
             }
@@ -272,16 +259,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 return false;
             }
 
-            int builderStart = startupMoveNextIndex + 1;
-            int kickoffIndex = builderStart;
-            while (kickoffIndex < frames.Count &&
-                   frames[kickoffIndex].Origin == StitchedFrameOrigin.Sync &&
-                   frames[kickoffIndex].SyncFrameKind == StitchSyncFrameKind.V1MethodBuilderStart)
-            {
-                kickoffIndex++;
-            }
-
-            if (kickoffIndex == builderStart ||
+            AsyncRuntimeSequenceMatch startup = context.MatchRuntimeSequence(
+                AsyncRuntimeSequenceKind.V1Startup, startupMoveNextIndex, frames.Count);
+            int kickoffIndex = startupMoveNextIndex + startup.Length;
+            if (!startup.IsMatch || startup.Length <= 1 ||
                 kickoffIndex >= frames.Count ||
                 !IsMatchingV1Kickoff(context.TraceLog, startupMoveNext, frames[kickoffIndex]))
             {
@@ -296,11 +277,6 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             context.Diagnostics.V1ReentrantFramesCollapsed += duplicateFrameCount;
             return true;
         }
-
-        private static bool IsV1AwaitRegistrationFrame(StitchedFrame frame) =>
-            frame.Origin == StitchedFrameOrigin.Sync &&
-            (frame.SyncFrameKind == StitchSyncFrameKind.V1MethodBuilderAwaitUnsafeOnCompleted ||
-             frame.SyncFrameKind == StitchSyncFrameKind.V1AwaiterRegistrationInfrastructure);
 
         private static bool IsMatchingV1Kickoff(
             TraceLog traceLog,
@@ -354,12 +330,14 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// <remarks>
     /// <para>
     /// <b>Edits and protection:</b> first attempts to fold the synchronous resumption bridge between the root
-    /// active context and ThreadPoolWorkQueue.Dispatch, retaining that dispatch anchor and historical ancestry.
-    /// The complete candidate, including the anchor, must resolve to CoreLib, contain an adjacent
-    /// Task.RunContinuations/TrySetResult pair, and have no live-context ownership or V1-dispatcher/V2-wrapper
+    /// active context and a profile-selected scheduler anchor (ThreadPoolWorkQueue.Dispatch in the common
+    /// profile), retaining that anchor and historical ancestry.
+    /// The complete candidate, including the anchor, must resolve to one captured CoreLib module, contain a profile-recognized
+    /// bridge layout (containing adjacent Task.RunContinuations/TrySetResult under the common rules), and have no live-context ownership or V1-dispatcher/V2-wrapper
     /// boundary. V2 additionally requires a physically matched current method. Rejected candidates stay protected.
     /// An independently verified root-adjacent RunContinuations/TrySetResult/TaskCompletionSource.SetResult
-    /// triple may still be removed without consuming an application callback or exposing the rest of that bridge.
+    /// chain, or its profile-specific counterpart, may still be removed without consuming an application callback
+    /// or exposing the rest of that bridge.
     /// </para>
     /// <para>
     /// Next, a resolved CoreLib AsyncProfiler.ResumeAsyncContext.Resume entry spine must establish ownership
@@ -368,9 +346,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// context, with no intervening async boundary. The entire owned prefix, including initialization, GC,
     /// unresolved callees, and callbacks, is attributed to the logical anchor; this is overhead attribution, not
     /// proof that an application's suspended body was executing. Rejected profiler prefixes remain protected too.
+    /// Profiles recognize the entry spine; activation ownership and required dispatcher evidence remain shared.
     /// </para>
     /// <para>
-    /// Within the remaining unprotected range, removes exact completion triples before individual known builder,
+    /// Within the remaining unprotected range, removes profile-matched completion chains before individual known builder,
     /// awaiter, box, dispatcher, dispatcher-creation, Task, and execution-context helpers. Isolated
     /// TaskCompletionSource.SetResult frames and application/thread roots outside an owned prefix are retained.
     /// This is not a general CoreLib include/exclude filter.
@@ -389,6 +368,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// consistent structural evidence; unrecognized layouts are not guessed. Classified helper cleanup can still
     /// run without a TraceLog. All cleanup rules must share the adjusted protected bounds in this component;
     /// separating their execution without carrying that protection would permit unsafe partial removal.
+    /// Profile matchers can explicitly reject a candidate span; those spans also stay protected during individual cleanup.
     /// </para>
     /// </remarks>
     internal sealed class AsyncInfrastructureCleanupTransform
@@ -398,26 +378,66 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             List<StitchedFrame> frames = context.Frames;
             int cleanupEnd = CollapseRuntimeResumptionBridge(context);
             int cleanupStart = CollapseAsyncProfilerOwnedPrefix(context, ref cleanupEnd);
+            List<(int Start, int End)> rejectedSpans = null;
 
             // Remove the public SetResult trigger only as part of the exact inline-completion chain. Removing the
             // two implementation frames independently would otherwise leave SetResult as an orphan between the
             // resumed async method and its synchronous caller.
-            for (int i = cleanupStart; i + 2 < cleanupEnd;)
+            for (int i = cleanupStart; i < cleanupEnd;)
             {
-                if (IsInlineCompletionChain(frames, i))
+                if (frames[i].Origin != StitchedFrameOrigin.Sync)
                 {
-                    frames.RemoveRange(i, 3);
-                    cleanupEnd -= 3;
-                    context.Diagnostics.AsyncInfrastructureFramesCollapsed += 3;
+                    i++;
+                    continue;
+                }
+                AsyncRuntimeSequenceMatch chain = context.MatchRuntimeSequence(
+                    AsyncRuntimeSequenceKind.TaskCompletionChain, i, cleanupEnd);
+                if (chain.IsMatch)
+                {
+                    frames.RemoveRange(i, chain.Length);
+                    cleanupEnd -= chain.Length;
+                    context.Diagnostics.AsyncInfrastructureFramesCollapsed += chain.Length;
                 }
                 else
                 {
-                    i++;
+                    // A default pass may have rejected this tail. Recheck its layout before individual cleanup;
+                    // do not turn a rejected version-specific candidate into a partially erased helper sequence.
+                    AsyncRuntimeSequenceMatch handoff = context.MatchRuntimeSequence(
+                        AsyncRuntimeSequenceKind.V2CompletionHandoff, i, cleanupEnd);
+                    int protectedLength = Math.Max(
+                        chain.IsRejected ? chain.Length : 0,
+                        handoff.IsRejected ? handoff.Length : 0);
+                    AsyncRuntimeSequenceMatch startup = context.MatchRuntimeSequence(
+                        AsyncRuntimeSequenceKind.V1Startup, i, cleanupEnd);
+                    AsyncRuntimeSequenceMatch registration = context.MatchRuntimeSequence(
+                        AsyncRuntimeSequenceKind.V1AwaitRegistration, i, cleanupEnd);
+                    protectedLength = Math.Max(protectedLength,
+                        Math.Max(startup.IsRejected ? startup.Length : 0,
+                            registration.IsRejected ? registration.Length : 0));
+                    if (protectedLength != 0)
+                    {
+                        if (rejectedSpans == null)
+                        {
+                            rejectedSpans = new List<(int Start, int End)>();
+                        }
+                        rejectedSpans.Add((i, i + protectedLength));
+                        i += protectedLength;
+                    }
+                    else
+                    {
+                        i++;
+                    }
                 }
             }
 
+            int rejectedIndex = (rejectedSpans?.Count ?? 0) - 1;
             for (int i = cleanupEnd - 1; i >= cleanupStart; i--)
             {
+                if (rejectedIndex >= 0 && i < rejectedSpans[rejectedIndex].End)
+                {
+                    i = rejectedSpans[rejectedIndex--].Start;
+                    continue;
+                }
                 StitchedFrame frame = frames[i];
                 if (frame.Origin != StitchedFrameOrigin.Sync)
                 {
@@ -425,19 +445,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 }
 
                 AsyncStitchBoundaryKind boundaryKind = context.ClassifyBoundary(frame.CodeAddress).Kind;
-                if (boundaryKind == AsyncStitchBoundaryKind.V1Dispatcher ||
-                    boundaryKind == AsyncStitchBoundaryKind.V1DispatcherInfrastructure ||
-                    boundaryKind == AsyncStitchBoundaryKind.V2ContinuationWrapper ||
-                    boundaryKind == AsyncStitchBoundaryKind.V2DispatchContinuation ||
-                    frame.SyncFrameKind == StitchSyncFrameKind.V1MethodBuilderStart ||
-                    frame.SyncFrameKind == StitchSyncFrameKind.V1MethodBuilderAwaitUnsafeOnCompleted ||
-                    frame.SyncFrameKind == StitchSyncFrameKind.V1MethodBuilderInfrastructure ||
-                    frame.SyncFrameKind == StitchSyncFrameKind.V1MethodBuilderCompletion ||
-                    frame.SyncFrameKind == StitchSyncFrameKind.V1AwaiterRegistrationInfrastructure ||
-                    frame.SyncFrameKind == StitchSyncFrameKind.V1DispatcherCreationInfrastructure ||
-                    frame.SyncFrameKind == StitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure ||
-                    frame.SyncFrameKind == StitchSyncFrameKind.SystemPrivateCoreLibTaskRunContinuations ||
-                    frame.SyncFrameKind == StitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult)
+                if (context.GetRuntimeProfile(frame.CodeAddress).IsOptionalInfrastructureFrame(frame, boundaryKind))
                 {
                     frames.RemoveAt(i);
                     context.Diagnostics.AsyncInfrastructureFramesCollapsed++;
@@ -488,19 +496,14 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             StitchedFrame target = frames[targetIndex];
-            int entryIndex = targetIndex - 1;
-            int dispatcherIndex = -1;
-            if (target.Origin == StitchedFrameOrigin.AsyncDispatchTarget && !target.IsStateMachineBoxCarrier)
+            bool needsDispatcher = target.Origin == StitchedFrameOrigin.AsyncDispatchTarget &&
+                !target.IsStateMachineBoxCarrier;
+            if (needsDispatcher)
             {
-                dispatcherIndex = entryIndex;
-                if (target.Segment.Kind != AsyncCallstackKind.StateMachineAsync ||
-                    dispatcherIndex < 0 ||
-                    context.ClassifyBoundary(frames[dispatcherIndex].CodeAddress).Kind !=
-                        AsyncStitchBoundaryKind.V1Dispatcher)
+                if (target.Segment.Kind != AsyncCallstackKind.StateMachineAsync)
                 {
                     return targetIndex;
                 }
-                entryIndex--;
             }
             else if (target.Origin != StitchedFrameOrigin.AsyncCurrent &&
                      target.Origin != StitchedFrameOrigin.AsyncCompleting &&
@@ -508,26 +511,47 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             {
                 return targetIndex;
             }
-            if (entryIndex < 0 ||
-                !IsSyncFrameKind(frames[entryIndex], StitchSyncFrameKind.AsyncProfilerContextResume) ||
-                !IsSystemPrivateCoreLibSpan(context.TraceLog, frames, entryIndex, targetIndex - entryIndex))
+            int entryIndex = -1;
+            for (int i = targetIndex - 1; i >= 0; i--)
+            {
+                AsyncRuntimeSequenceMatch entry = context.MatchRuntimeSequence(
+                    AsyncRuntimeSequenceKind.AsyncProfilerEntry, i, targetIndex);
+                if (entry.IsMatch && entry.Length == targetIndex - i)
+                {
+                    entryIndex = i;
+                    break;
+                }
+            }
+            if (entryIndex < 0)
             {
                 return targetIndex;
             }
 
             // Only the entry spine needs symbols. Everything leafward is callee work owned by that invocation.
             // A physical current/completing anchor remains intact even when stitching already removed its dispatcher.
+            int dispatcherCount = 0;
             for (int i = 0; i < targetIndex; i++)
             {
                 StitchedFrame frame = frames[i];
                 if (frame.Origin != StitchedFrameOrigin.Sync ||
                     frame.ContextKind != StitchedFrameContextKind.Active ||
-                    !ReferenceEquals(frame.Context, target.Context) ||
-                    (i != dispatcherIndex &&
-                     context.ClassifyBoundary(frame.CodeAddress).IsBoundary))
+                    !ReferenceEquals(frame.Context, target.Context))
                 {
                     return targetIndex;
                 }
+                AsyncStitchBoundaryInfo boundary = context.ClassifyBoundary(frame.CodeAddress);
+                if (boundary.IsBoundary)
+                {
+                    if (!needsDispatcher || i < entryIndex ||
+                        boundary.Kind != AsyncStitchBoundaryKind.V1Dispatcher || ++dispatcherCount != 1)
+                    {
+                        return targetIndex;
+                    }
+                }
+            }
+            if (needsDispatcher && dispatcherCount != 1)
+            {
+                return targetIndex;
             }
 
             frames.RemoveRange(0, targetIndex);
@@ -579,53 +603,36 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             int dispatchIndex = frames.Count;
-            bool candidate = false;
-            bool completionPair = false;
             for (int i = bridgeStart; i < frames.Count; i++)
             {
-                if (frames[i].SyncFrameKind == StitchSyncFrameKind.SystemPrivateCoreLibThreadPoolDispatch)
+                if (context.GetRuntimeProfile(frames[i].CodeAddress).IsRuntimeResumptionAnchor(frames[i]))
                 {
                     dispatchIndex = i;
                     break;
                 }
-                if (frames[i].SyncFrameKind == StitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure ||
-                    frames[i].SyncFrameKind == StitchSyncFrameKind.SystemPrivateCoreLibTaskRunContinuations ||
-                    frames[i].SyncFrameKind == StitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult)
-                {
-                    candidate = true;
-                }
-                if (i + 1 < frames.Count &&
-                    IsSyncFrameKind(frames[i], StitchSyncFrameKind.SystemPrivateCoreLibTaskRunContinuations) &&
-                    IsSyncFrameKind(frames[i + 1], StitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult))
-                {
-                    completionPair = true;
-                }
             }
-            if (!candidate)
+            int bridgeEnd = dispatchIndex < frames.Count ? dispatchIndex + 1 : frames.Count;
+            AsyncRuntimeSequenceMatch bridge = context.MatchRuntimeSequence(
+                AsyncRuntimeSequenceKind.RuntimeResumptionBridge, bridgeStart, bridgeEnd);
+            if (bridge.Length == 0)
             {
                 return frames.Count;
             }
 
             // Rejected bridges remain intact; individual-helper cleanup only visits their leaf-ward prefix.
-            if (!completionPair ||
-                dispatchIndex == frames.Count ||
-                !IsSystemPrivateCoreLibSpan(
-                    context.TraceLog, frames, bridgeStart, dispatchIndex - bridgeStart + 1))
+            if (!bridge.IsMatch || dispatchIndex == frames.Count || bridge.Length != bridgeEnd - bridgeStart)
             {
                 // The root-adjacent completion chain has independent ownership evidence. Do not consume the
                 // application callback or relax protection of the remaining resumption bridge.
-                if (dispatchIndex < frames.Count &&
-                    bridgeStart + 2 < dispatchIndex &&
+                AsyncRuntimeSequenceMatch chain = context.MatchRuntimeSequence(
+                    AsyncRuntimeSequenceKind.TaskCompletionChain, bridgeStart, dispatchIndex);
+                if (dispatchIndex < frames.Count && chain.IsMatch &&
                     context.Diagnostics.V1CompletionAlignmentAmbiguous == 0 &&
                     HasVerifiedAsyncAnchor(context, rootIndex, rootContext) &&
-                    IsInlineCompletionChain(frames, bridgeStart) &&
-                    IsSystemPrivateCoreLibSpan(context.TraceLog, frames, bridgeStart, 3) &&
-                    frames[bridgeStart].Context == null &&
-                    frames[bridgeStart + 1].Context == null &&
-                    frames[bridgeStart + 2].Context == null)
+                    IsUnassignedSyncSpan(frames, bridgeStart, chain.Length))
                 {
-                    frames.RemoveRange(bridgeStart, 3);
-                    context.Diagnostics.AsyncInfrastructureFramesCollapsed += 3;
+                    frames.RemoveRange(bridgeStart, chain.Length);
+                    context.Diagnostics.AsyncInfrastructureFramesCollapsed += chain.Length;
                 }
                 return bridgeStart;
             }
@@ -651,10 +658,17 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             return frames.Count;
         }
 
-        private static bool IsInlineCompletionChain(List<StitchedFrame> frames, int start) =>
-            IsSyncFrameKind(frames[start], StitchSyncFrameKind.SystemPrivateCoreLibTaskRunContinuations) &&
-            IsSyncFrameKind(frames[start + 1], StitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult) &&
-            IsSyncFrameKind(frames[start + 2], StitchSyncFrameKind.SystemPrivateCoreLibTaskCompletionSourceSetResult);
+        private static bool IsUnassignedSyncSpan(List<StitchedFrame> frames, int start, int count)
+        {
+            for (int i = start; i < start + count; i++)
+            {
+                if (frames[i].Origin != StitchedFrameOrigin.Sync || frames[i].Context != null)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
 
         #endregion
     }
