@@ -308,8 +308,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// profiler, is atomically attributed to the nearest active logical async frame. Capture and emission
         /// helpers need not be visible because they may inline. All prefix frames must belong to the same active
         /// activation; cleanup never crosses another async boundary or a physically matched application anchor.
-        /// A registered V1 target without a physical current-method match keeps its dispatch-target metadata,
-        /// even when its retained physical dispatcher is removed by cleanup.
+        /// A registered V1 target without a physical current-method match keeps its dispatch-target metadata.
+        /// Residual recognized V1/V2 dispatcher and box frames outside protected spans are represented by
+        /// <c>[Async dispatcher frames]</c>, rather than deleted, preserving the caller context of their callees.
+        /// Each contiguous span within the same async context gets one marker, whether or not a body was matched.
         /// This is overhead attribution, not evidence that a suspended caller was physically executing.
         /// Missing, unresolved, foreign, interrupted, or context-inconsistent ownership evidence leaves the
         /// candidate prefix protected from general helper cleanup; no partial profiler tail is removed.

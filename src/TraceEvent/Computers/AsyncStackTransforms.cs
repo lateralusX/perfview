@@ -350,7 +350,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// </para>
     /// <para>
     /// Within the remaining unprotected range, removes profile-matched completion chains before individual known builder,
-    /// awaiter, box, dispatcher, dispatcher-creation, Task, and execution-context helpers. Isolated
+    /// awaiter, dispatcher-creation, Task, and execution-context helpers. Residual contiguous dispatcher/box spans
+    /// become <c>[Async dispatcher frames]</c> markers so their callees do not appear to belong to the scheduler.
+    /// Spans belonging to different async contexts are not combined. Isolated
     /// TaskCompletionSource.SetResult frames and application/thread roots outside an owned prefix are retained.
     /// This is not a general CoreLib include/exclude filter.
     /// </para>
@@ -439,7 +441,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     continue;
                 }
                 StitchedFrame frame = frames[i];
-                if (frame.Origin != StitchedFrameOrigin.Sync)
+                if (frame.Origin != StitchedFrameOrigin.Sync ||
+                    frame.Presentation == StitchedFramePresentation.AsyncDispatcherFrames)
                 {
                     continue;
                 }
@@ -447,7 +450,20 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 AsyncStitchBoundaryKind boundaryKind = context.ClassifyBoundary(frame.CodeAddress).Kind;
                 if (context.GetRuntimeProfile(frame.CodeAddress).IsOptionalInfrastructureFrame(frame, boundaryKind))
                 {
-                    frames.RemoveAt(i);
+                    if (boundaryKind != AsyncStitchBoundaryKind.None)
+                    {
+                        frames[i] = frame.WithPresentation(StitchedFramePresentation.AsyncDispatcherFrames);
+                        if (i + 1 < frames.Count &&
+                            frames[i + 1].Presentation == StitchedFramePresentation.AsyncDispatcherFrames &&
+                            ReferenceEquals(frame.Context, frames[i + 1].Context))
+                        {
+                            frames.RemoveAt(i + 1);
+                        }
+                    }
+                    else
+                    {
+                        frames.RemoveAt(i);
+                    }
                     context.Diagnostics.AsyncInfrastructureFramesCollapsed++;
                 }
             }

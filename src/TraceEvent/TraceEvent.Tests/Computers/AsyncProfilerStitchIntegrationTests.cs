@@ -996,7 +996,8 @@ namespace TraceEventTests
                     Frame.WorkerThreadStart,
                 },
                 Async = logical,
-                ExpectedStitched = (conservative || cleanup ? Array.Empty<Frame>() : new[] { Frame.V2Wrapper(0) })
+                ExpectedStitched = (conservative ? Array.Empty<Frame>() :
+                    new[] { cleanup ? Frame.V2Wrapper(0).DispatcherFrames() : Frame.V2Wrapper(0) })
                     .Concat(logical).Concat(root).ToArray(),
                 EnableActiveAsyncFrameAnnotations = annotations,
                 EnableConservativeTransforms = conservative,
@@ -1021,10 +1022,13 @@ namespace TraceEventTests
                     Assert.False(target.IsStateMachineBoxCarrier);
                     Assert.Same(context.Segments[0], target.Context);
                     Assert.DoesNotContain(context.Frames, frame => frame.Origin == StitchedFrameOrigin.AsyncCurrent);
-                    Assert.Equal(conservative || cleanup ? 0 : 1,
+                    Assert.Equal(conservative ? 0 : 1,
                         context.Frames.Count(frame => frame.Origin == StitchedFrameOrigin.Sync &&
                             context.ClassifyBoundary(frame.CodeAddress).Kind ==
                                 AsyncStitchBoundaryKind.V2ContinuationWrapper));
+                    Assert.Equal(!conservative && cleanup ? 1 : 0,
+                        context.Frames.Count(frame =>
+                            frame.Presentation == StitchedFramePresentation.AsyncDispatcherFrames));
                 },
                 AssertStitchedStackSource = stackSource =>
                 {
@@ -1404,42 +1408,129 @@ namespace TraceEventTests
             scenario.AssertProductionStitch();
         }
 
-        [Fact]
-        public void RuntimeAsync_DispatchPlumbingWithoutWrapper_PreservesPhysicalStack()
+        [Theory]
+        [InlineData(false, false)]
+        [InlineData(false, true)]
+        [InlineData(true, false)]
+        [InlineData(true, true)]
+        public void RuntimeAsync_DispatchPlumbingWithoutWrapper_PreservesCallerContext(bool cleanup, bool flush)
         {
+            Frame[] callees = flush
+                ? new[]
+                {
+                    Frame.CoreLib("System.Diagnostics.Tracing.EventPipeInternal.WriteEventData", "EventPipeInternal.WriteEventData"),
+                    Frame.CoreLib("System.Diagnostics.Tracing.EventSource.WriteEventWithRelatedActivityIdCore", "EventSource.WriteEventWithRelatedActivityIdCore"),
+                    Frame.CoreLib("System.Runtime.CompilerServices.AsyncProfiler+AsyncThreadContext.Flush", "AsyncThreadContext.Flush"),
+                }
+                : new[]
+                {
+                    Frame.CoreLib("System.Threading.Thread.PollGCWorker", "Thread.PollGCWorker"),
+                    Frame.CoreLib("Interop+Kernel32.QueryPerformanceCounter", "QueryPerformanceCounter"),
+                };
+            Frame[] dispatch = { Frame.V2InstrumentedDispatch, Frame.V2Dispatch };
+            Frame[] root = { Frame.ThreadPoolDispatch, Frame.WorkerThreadStart };
             var scenario = new StitchScenario
             {
-                Sync = new[]
-                {
-                    Frame.V2InstrumentedDispatch,
-                    Frame.V2Dispatch,
-                    Frame.ThreadPoolDispatch,
-                    Frame.WorkerThreadStart,
-                },
+                Sync = callees.Concat(dispatch).Concat(root).ToArray(),
                 Async = new[]
                 {
                     Frame.App("Scenario.Level3Async"),
                     Frame.App("Scenario.Level2Async"),
                     Frame.App("Program.Main"),
                 },
-                ExpectedStitched = new[]
+                ExpectedStitched = callees.Concat(cleanup
+                    ? new[] { Frame.V2InstrumentedDispatch.DispatcherFrames() } : dispatch).Concat(root).ToArray(),
+                EnableAsyncInfrastructureCleanup = cleanup,
+                IncludeEventSourceEvents = false,
+                VerifySampleWeights = true,
+                VerifyThreadTimeComputer = true,
+                AssertTransformContext = context =>
                 {
-                    Frame.V2InstrumentedDispatch,
-                    Frame.V2Dispatch,
-                    Frame.ThreadPoolDispatch,
-                    Frame.WorkerThreadStart,
+                    Assert.All(context.Frames, frame => Assert.Equal(StitchedFrameOrigin.Sync, frame.Origin));
+                    Assert.All(context.Frames, frame => Assert.Null(frame.Context));
+                    Assert.Equal(cleanup ? 1 : 0, context.Frames.Count(frame =>
+                        frame.Presentation == StitchedFramePresentation.AsyncDispatcherFrames));
+                },
+                AssertStitchedStackSource = stackSource =>
+                {
+                    int markers = 0;
+                    for (int i = 0; i < stackSource.CallFrameIndexLimit; i++)
+                    {
+                        var index = (StackSourceFrameIndex)i;
+                        if (stackSource.GetFrameName(index, false) == "[Async dispatcher frames]")
+                        {
+                            markers++;
+                            Assert.False(stackSource.TryGetAsyncFrameInfo(index, out _));
+                            Assert.Equal(CodeAddressIndex.Invalid, stackSource.GetFrameCodeAddress(index));
+                        }
+                    }
+                    Assert.Equal(cleanup ? 1 : 0, markers);
                 },
                 ExpectedDiagnostics = new StitchDiagnosticsExpectation
                 {
                     V2SyncLayoutUsed = 2,
+                    AsyncInfrastructureFramesCollapsed = cleanup ? 4 : 0,
                 },
             };
 
             scenario.AssertProductionStitch();
         }
 
-        [Fact]
-        public void RuntimeAsync_OtherProcessHasActiveSegment_DoesNotStitchSample()
+        [Theory]
+        [InlineData(false, false)]
+        [InlineData(false, true)]
+        [InlineData(true, false)]
+        [InlineData(true, true)]
+        public void StateMachineAsync_DispatcherCallee_PreservesCallerContext(bool cleanup, bool standalone)
+        {
+            Frame pollGC = Frame.CoreLib("System.Threading.Thread.PollGCWorker", "Thread.PollGCWorker");
+            Frame counter = Frame.CoreLib("Interop+Kernel32.QueryPerformanceCounter", "QueryPerformanceCounter");
+            Frame dispatcher = standalone
+                ? Frame.CoreLib("System.Runtime.CompilerServices.AsyncStateMachineDispatcher.MoveNext()", "AsyncStateMachineDispatcher.MoveNext")
+                : Frame.V1MoveNextAsDispatcher;
+            Frame[] logical =
+            {
+                Frame.App("Scenario.Level3Async"),
+                Frame.App("Scenario.Level2Async"),
+                Frame.App("Program.Main"),
+            };
+            var scenario = new StitchScenario
+            {
+                Kind = AsyncCallstackKind.StateMachineAsync,
+                Sync = new[] { pollGC, counter, dispatcher, Frame.ThreadPoolDispatch, Frame.WorkerThreadStart },
+                Async = logical,
+                ExpectedStitched = new[] { pollGC, counter, cleanup ? dispatcher.DispatcherFrames() : dispatcher }
+                    .Concat(logical).Concat(new[] { Frame.ThreadPoolDispatch, Frame.WorkerThreadStart }).ToArray(),
+                EnableAsyncInfrastructureCleanup = cleanup,
+                IncludeEventSourceEvents = false,
+                VerifySampleWeights = true,
+                VerifyThreadTimeComputer = true,
+                AssertTransformContext = context =>
+                {
+                    StitchedFrame target = Assert.Single(context.Frames.Where(frame =>
+                        frame.Origin == StitchedFrameOrigin.AsyncDispatchTarget));
+                    Assert.DoesNotContain(context.Frames, frame => frame.Origin == StitchedFrameOrigin.AsyncCurrent);
+                    StitchedFrame physicalDispatcher = context.Frames[2];
+                    Assert.Equal(StitchedFrameOrigin.Sync, physicalDispatcher.Origin);
+                    Assert.Same(target.Context, physicalDispatcher.Context);
+                    Assert.Equal(cleanup ? StitchedFramePresentation.AsyncDispatcherFrames :
+                        StitchedFramePresentation.Native, physicalDispatcher.Presentation);
+                },
+                ExpectedDiagnostics = new StitchDiagnosticsExpectation
+                {
+                    SegmentsProcessed = 2,
+                    V1InlineFallbackUsed = 2,
+                    AsyncInfrastructureFramesCollapsed = cleanup ? 2 : 0,
+                },
+            };
+
+            scenario.AssertProductionStitch();
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void RuntimeAsync_OtherProcessHasActiveSegment_DoesNotStitchSample(bool cleanup)
         {
             var scenario = new StitchScenario
             {
@@ -1472,6 +1563,7 @@ namespace TraceEventTests
                 AsyncStartQpc = 100_030,
                 AsyncEndQpc = 100_040,
                 AddForeignProcessActiveSegment = true,
+                EnableAsyncInfrastructureCleanup = cleanup,
             };
 
             scenario.AssertProductionStitch();
@@ -6681,6 +6773,9 @@ namespace TraceEventTests
 
             public static Frame CoreLib(string symbolName, string label) =>
                 new Frame(AsyncStitchBoundary.HostModuleName, symbolName, label);
+
+            public Frame DispatcherFrames() =>
+                new Frame(ModuleName, SymbolName, "[Async dispatcher frames]", Kind, WrapperIndex);
 
             public Frame Logical(string label, int? state = null)
             {

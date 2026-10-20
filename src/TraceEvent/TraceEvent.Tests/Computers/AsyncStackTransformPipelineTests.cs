@@ -7,6 +7,7 @@ using System.Linq;
 
 using Microsoft.Diagnostics.Tracing.Computers;
 using Microsoft.Diagnostics.Tracing.Etlx;
+using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
 
 using Xunit;
 
@@ -135,8 +136,103 @@ namespace Microsoft.Diagnostics.Tracing.Tests.Computers
 
             pipeline.EnableAsyncInfrastructureCleanup = true;
             pipeline.ApplyInPlace(context);
-            Assert.Equal(new[] { CA(30), CA(32) }, frames.Select(frame => frame.CodeAddress));
+            Assert.Equal(new[] { CA(30), CA(31), CA(32) }, frames.Select(frame => frame.CodeAddress));
+            Assert.Equal(StitchedFramePresentation.AsyncDispatcherFrames, frames[1].Presentation);
             Assert.Equal(1, diagnostics.AsyncInfrastructureFramesCollapsed);
+        }
+
+        [Theory]
+        [InlineData(AsyncStitchBoundaryKind.V1Dispatcher, AsyncStitchBoundaryKind.V1DispatcherInfrastructure, false)]
+        [InlineData(AsyncStitchBoundaryKind.V1Dispatcher, AsyncStitchBoundaryKind.V1DispatcherInfrastructure, true)]
+        [InlineData(AsyncStitchBoundaryKind.V2DispatchContinuation, AsyncStitchBoundaryKind.V2DispatchContinuation, false)]
+        [InlineData(AsyncStitchBoundaryKind.V2DispatchContinuation, AsyncStitchBoundaryKind.V2DispatchContinuation, true)]
+        [InlineData(AsyncStitchBoundaryKind.V2ContinuationWrapper, AsyncStitchBoundaryKind.V2DispatchContinuation, false)]
+        [InlineData(AsyncStitchBoundaryKind.V2ContinuationWrapper, AsyncStitchBoundaryKind.V2DispatchContinuation, true)]
+        public void AsyncInfrastructureCleanup_RepresentsResidualDispatcherSpans(
+            AsyncStitchBoundaryKind leafKind, AsyncStitchBoundaryKind rootKind, bool conservative)
+        {
+            var diagnostics = new StitchDiagnostics();
+            var frames = new List<StitchedFrame> { Sync(30), Sync(31), Sync(32), Sync(33) };
+            var pipeline = new AsyncStackTransformPipeline
+            {
+                EnableConservativeTransforms = conservative,
+            };
+            var context = Context(frames, diagnostics, classifyBoundary: ca =>
+                new AsyncStitchBoundaryInfo(ca == CA(31) ? leafKind :
+                    ca == CA(32) ? rootKind : AsyncStitchBoundaryKind.None, 0));
+
+            pipeline.ApplyInPlace(context);
+            Assert.Equal(new[] { CA(30), CA(31), CA(32), CA(33) }, frames.Select(frame => frame.CodeAddress));
+            Assert.All(frames, frame => Assert.Equal(StitchedFramePresentation.Native, frame.Presentation));
+
+            pipeline.EnableAsyncInfrastructureCleanup = true;
+            pipeline.ApplyInPlace(context);
+
+            Assert.Equal(new[] { CA(30), CA(31), CA(33) }, frames.Select(frame => frame.CodeAddress));
+            Assert.Equal(StitchedFramePresentation.AsyncDispatcherFrames, frames[1].Presentation);
+            Assert.Equal(StitchedFrameOrigin.Sync, frames[1].Origin);
+            Assert.Null(frames[1].Context);
+            Assert.Equal(2, diagnostics.AsyncInfrastructureFramesCollapsed);
+
+            pipeline.ApplyInPlace(context);
+            Assert.Equal(new[] { CA(30), CA(31), CA(33) }, frames.Select(frame => frame.CodeAddress));
+            Assert.Equal(2, diagnostics.AsyncInfrastructureFramesCollapsed);
+        }
+
+        [Fact]
+        public void AsyncInfrastructureCleanup_DoesNotMergeDispatcherSpansAcrossCallees()
+        {
+            var frames = new List<StitchedFrame> { Sync(30), Sync(31), Sync(32), Sync(33) };
+            var diagnostics = new StitchDiagnostics();
+            var pipeline = new AsyncStackTransformPipeline { EnableAsyncInfrastructureCleanup = true };
+
+            pipeline.ApplyInPlace(Context(frames, diagnostics, classifyBoundary: ca =>
+                new AsyncStitchBoundaryInfo(ca == CA(30) || ca == CA(32)
+                    ? AsyncStitchBoundaryKind.V2DispatchContinuation : AsyncStitchBoundaryKind.None, -1)));
+
+            Assert.Equal(new[] { CA(30), CA(31), CA(32), CA(33) }, frames.Select(frame => frame.CodeAddress));
+            Assert.Equal(StitchedFramePresentation.AsyncDispatcherFrames, frames[0].Presentation);
+            Assert.Equal(StitchedFramePresentation.Native, frames[1].Presentation);
+            Assert.Equal(StitchedFramePresentation.AsyncDispatcherFrames, frames[2].Presentation);
+            Assert.Equal(StitchedFramePresentation.Native, frames[3].Presentation);
+            Assert.Equal(2, diagnostics.AsyncInfrastructureFramesCollapsed);
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void AsyncInfrastructureCleanup_PreservesDispatcherContextBoundaries(bool sameContext)
+        {
+            AsyncCallStack CreateContext() =>
+                new AsyncCallStack(0, (AsyncCallStackFramesIndex)0,
+                    new AsyncCallStackFrames(AsyncCallstackKind.StateMachineAsync, new ulong[] { 3 }, new[] { 0 }),
+                    0, 32, 0, long.MaxValue, Array.Empty<AsyncCallStack.CompletionDelta>(),
+                    Array.Empty<AsyncCallStack.CompletionDelta>(), Array.Empty<long>());
+            AsyncCallStack leafContext = CreateContext();
+            AsyncCallStack rootContext = sameContext ? leafContext : CreateContext();
+            var frames = new List<StitchedFrame>
+            {
+                StitchedFrame.CreateSync(new StitchSyncFrame(CA(30), MethodIndex.Invalid), leafContext),
+                StitchedFrame.CreateSync(new StitchSyncFrame(CA(31), MethodIndex.Invalid), rootContext),
+                Sync(32),
+            };
+            var diagnostics = new StitchDiagnostics();
+            var pipeline = new AsyncStackTransformPipeline { EnableAsyncInfrastructureCleanup = true };
+
+            pipeline.ApplyInPlace(Context(frames, diagnostics, classifyBoundary: ca =>
+                new AsyncStitchBoundaryInfo(ca == CA(32) ? AsyncStitchBoundaryKind.None :
+                    AsyncStitchBoundaryKind.V1DispatcherInfrastructure, -1)));
+
+            Assert.Equal(sameContext ? 2 : 3, frames.Count);
+            Assert.Equal(StitchedFramePresentation.AsyncDispatcherFrames, frames[0].Presentation);
+            Assert.Same(leafContext, frames[0].Context);
+            if (!sameContext)
+            {
+                Assert.Equal(StitchedFramePresentation.AsyncDispatcherFrames, frames[1].Presentation);
+                Assert.Same(rootContext, frames[1].Context);
+            }
+            Assert.Equal(CA(32), frames[frames.Count - 1].CodeAddress);
+            Assert.Equal(2, diagnostics.AsyncInfrastructureFramesCollapsed);
         }
 
         [Fact]
@@ -347,7 +443,7 @@ namespace Microsoft.Diagnostics.Tracing.Tests.Computers
                 int[] expected = !conservative && !cleanup
                     ? new[] { 20, 10, 11, 12, 13, 14, 15, 16, 17 }
                     : cleanup
-                        ? new[] { 10, 11, 14, 16, 17 }
+                        ? conservative ? new[] { 10, 11, 14, 16, 17 } : new[] { 20, 10, 11, 14, 16, 17 }
                         : new[] { 10, 11, 14, 15, 16, 17 };
 
                 for (int sample = 0; sample < 2; sample++)
@@ -524,12 +620,13 @@ namespace Microsoft.Diagnostics.Tracing.Tests.Computers
             List<StitchedFrame> frames,
             StitchDiagnostics diagnostics,
             CodeAddressIndex wrapperCodeAddress = CodeAddressIndex.Invalid,
-            CodeAddressIndex infrastructureCodeAddress = CodeAddressIndex.Invalid) =>
+            CodeAddressIndex infrastructureCodeAddress = CodeAddressIndex.Invalid,
+            Func<CodeAddressIndex, AsyncStitchBoundaryInfo> classifyBoundary = null) =>
             new AsyncStackTransformContext(
                 traceLog: null,
                 segments: new List<AsyncCallStack>(),
                 timestampQpc: 1,
-                classifyBoundary: codeAddress =>
+                classifyBoundary: classifyBoundary ?? (codeAddress =>
                 {
                     if (codeAddress == wrapperCodeAddress)
                     {
@@ -544,7 +641,7 @@ namespace Microsoft.Diagnostics.Tracing.Tests.Computers
                             wrapperIndex: -1);
                     }
                     return AsyncStitchBoundaryInfo.None;
-                },
+                }),
                 diagnostics,
                 frames);
 

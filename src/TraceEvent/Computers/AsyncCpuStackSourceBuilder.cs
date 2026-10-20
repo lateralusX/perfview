@@ -338,6 +338,16 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     "BROKEN", m_outputStackSource.Interner.ModuleIntern(string.Empty));
             }
 
+            if (frame.Presentation == StitchedFramePresentation.AsyncDispatcherFrames)
+            {
+                if (m_asyncDispatcherFrame == StackSourceFrameIndex.Invalid)
+                {
+                    m_asyncDispatcherFrame =
+                        m_outputStackSource.Interner.FrameIntern("[Async dispatcher frames]");
+                }
+                return m_asyncDispatcherFrame;
+            }
+
             if (frame.Origin != StitchedFrameOrigin.Sync && frame.Segment != null)
             {
                 return InternAsyncFrame(frame, processIndex);
@@ -583,6 +593,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         private Dictionary<string, MethodIndex> m_stateMachineMethodByTypeName;
         private Dictionary<CodeAddressIndex, StackSourceFrameIndex> m_logicalSyncFrameByCodeAddress;
         private Dictionary<AsyncStackSourceFrameIdentity, StackSourceFrameIndex> m_frameByIdentity;
+        private StackSourceFrameIndex m_asyncDispatcherFrame = StackSourceFrameIndex.Invalid;
         private StackSourceFrameIndex m_asyncContextTransitionFrame = StackSourceFrameIndex.Invalid;
         private Func<TraceEvent, TraceThread, StackSourceCallStackIndex> m_rootFactory;
 

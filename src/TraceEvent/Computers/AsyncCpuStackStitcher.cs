@@ -70,6 +70,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// The original code address remains attached to the frame for source and identity correlation.
         /// </summary>
         LogicalStateMachineMethod,
+
+        /// <summary>
+        /// Represent a contiguous span of recognized V1/V2 dispatcher frames as
+        /// <c>[Async dispatcher frames]</c>, retaining the span's leafmost physical frame identity.
+        /// </summary>
+        AsyncDispatcherFrames,
     }
 
     /// <summary>
@@ -487,7 +493,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// otherwise only the known builder frames are removed.</summary>
         public int V1SynchronousStartupFramesCollapsed;
 
-        /// <summary>Recognized V1/V2 runtime-infrastructure frames removed by
+        /// <summary>Recognized V1/V2 runtime-infrastructure frames hidden or represented by dispatcher markers by
         /// <see cref="AsyncStackTransformPipeline.EnableAsyncInfrastructureCleanup"/>.
         /// Does not include frames removed by structural stitching or conservative normalization.</summary>
         public int AsyncInfrastructureFramesCollapsed;
