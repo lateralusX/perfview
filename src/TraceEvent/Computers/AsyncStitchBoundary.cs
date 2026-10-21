@@ -450,6 +450,27 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 moveNext - stateMachineSuffixStart - 1);
             return true;
         }
+
+        /// <summary>
+        /// Returns a stitching-only view of a method name with perfmap's type/method separator replaced by
+        /// rundown's separator. Stored/displayed symbols and parameter type spellings remain unchanged.
+        /// </summary>
+        internal static string NormalizeMethodName(string methodName)
+        {
+            if (string.IsNullOrEmpty(methodName))
+            {
+                return methodName;
+            }
+
+            int parameters = methodName.IndexOf('(');
+            int nameEnd = parameters >= 0 ? parameters : methodName.Length;
+            int separator = nameEnd > 0
+                ? methodName.LastIndexOf("::", nameEnd - 1, nameEnd, StringComparison.Ordinal)
+                : -1;
+            return separator >= 0
+                ? methodName.Substring(0, separator) + "." + methodName.Substring(separator + 2)
+                : methodName;
+        }
     }
 
     /// <summary>
@@ -555,7 +576,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                         continue; // not System.Private.CoreLib; skip before any string work
                     }
 
-                    AsyncStitchBoundaryInfo info = profile.ClassifyBoundary(methods.FullMethodName(methodIndex));
+                    string name = AsyncStitchBoundary.NormalizeMethodName(methods.FullMethodName(methodIndex));
+                    AsyncStitchBoundaryInfo info = profile.ClassifyBoundary(name);
                     if (info.Kind != AsyncStitchBoundaryKind.None)
                     {
                         _boundaries[methodIndex] = info;

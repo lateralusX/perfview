@@ -18,6 +18,65 @@ namespace TraceEventTests
     public class AsyncStitchBoundaryTests
     {
         [Theory]
+        [InlineData(null, null)]
+        [InlineData("", "")]
+        [InlineData("(", "(")]
+        [InlineData("Namespace.Type.Method()", "Namespace.Type.Method()")]
+        [InlineData("Namespace.Type.Method(class Other::Parameter)", "Namespace.Type.Method(class Other::Parameter)")]
+        [InlineData("Namespace.Type::Method(class Other::Parameter)", "Namespace.Type.Method(class Other::Parameter)")]
+        [InlineData("Namespace.Type::Method", "Namespace.Type.Method")]
+        [InlineData("Namespace.Type::.ctor()", "Namespace.Type..ctor()")]
+        [InlineData("Namespace.Type::.cctor()", "Namespace.Type..cctor()")]
+        [InlineData("Namespace.Type::System.IDisposable.Dispose()", "Namespace.Type.System.IDisposable.Dispose()")]
+        [InlineData("System.Runtime.CompilerServices.AsyncHelpers+RuntimeAsyncTask`1[System.Threading.Tasks.VoidTaskResult]::DispatchContinuations()",
+                    "System.Runtime.CompilerServices.AsyncHelpers+RuntimeAsyncTask`1[System.Threading.Tasks.VoidTaskResult].DispatchContinuations()")]
+        [InlineData("System.Runtime.CompilerServices.AsyncHelpers+RuntimeAsyncTask`1[System.Threading.Tasks.VoidTaskResult]::InstrumentedDispatchContinuations(valuetype System.Runtime.CompilerServices.AsyncInstrumentation/Flags)",
+                    "System.Runtime.CompilerServices.AsyncHelpers+RuntimeAsyncTask`1[System.Threading.Tasks.VoidTaskResult].InstrumentedDispatchContinuations(valuetype System.Runtime.CompilerServices.AsyncInstrumentation/Flags)")]
+        [InlineData("System.Private.CoreLib!System.Runtime.CompilerServices.AsyncProfiler+ContinuationWrapper::Continuation_Wrapper_1(class System.Runtime.CompilerServices.Continuation,uint8&)",
+                    "System.Private.CoreLib!System.Runtime.CompilerServices.AsyncProfiler+ContinuationWrapper.Continuation_Wrapper_1(class System.Runtime.CompilerServices.Continuation,uint8&)")]
+        public void NormalizeMethodName_ChangesOnlyTheTypeMethodSeparator(string name, string expected)
+        {
+            string normalized = AsyncStitchBoundary.NormalizeMethodName(name);
+            Assert.Equal(expected, normalized);
+            Assert.Same(normalized, AsyncStitchBoundary.NormalizeMethodName(normalized));
+            if (name == expected)
+            {
+                Assert.Same(name, normalized);
+            }
+        }
+
+        [Theory]
+        [InlineData("Namespace.Type+<RunAsync>d__1::MoveNext()", "Namespace.Type+<RunAsync>d__1")]
+        [InlineData("Namespace.Type`1+<RunAsync>d__1`1[System.Int64,System.String]::MoveNext()",
+                    "Namespace.Type`1+<RunAsync>d__1`1[System.Int64,System.String]")]
+        public void NormalizeMethodName_SupportsExistingV1CompilerNameDecoding(string name, string expectedType)
+        {
+            string normalized = AsyncStitchBoundary.NormalizeMethodName(name);
+            Assert.Equal(expectedType, AsyncStitchBoundary.GetStateMachineTypeName(normalized));
+            Assert.True(AsyncStitchBoundary.TryGetLogicalStateMachineMethodName(
+                normalized, out string logicalName, out string suffix));
+            Assert.StartsWith("Namespace.Type", logicalName);
+            Assert.EndsWith(".RunAsync", logicalName);
+            Assert.StartsWith("d__1", suffix);
+        }
+
+        [Fact]
+        public void NormalizeMethodName_PreservesV1CarrierTypeIdentity()
+        {
+            const string stateMachineType = "Namespace.Type`1+<RunAsync>d__1`1[System.Int64,System.String]";
+            string box = AsyncStitchBoundary.NormalizeMethodName(
+                "System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1+AsyncProfilerAsyncStateMachineBox`1[" +
+                "System.Int64," + stateMachineType + "]::InstrumentedMoveNext(class System.Threading.Thread)");
+            string moveNext = AsyncStitchBoundary.NormalizeMethodName(stateMachineType + "::MoveNext()");
+            foreach (AsyncRuntimeRuleProfile profile in new[] { AsyncRuntimeRuleProfile.Common, AsyncRuntimeRuleProfile.CoreClr11 })
+            {
+                Assert.True(profile.TryGetBoxedStateMachineTypeName(box, true, out string boxedType));
+                Assert.Equal(AsyncStitchBoundary.GetStateMachineTypeName(moveNext), boxedType);
+                Assert.False(profile.TryGetBoxedStateMachineTypeName(box, false, out _));
+            }
+        }
+
+        [Theory]
         [InlineData("Continuation_Wrapper_0", "Continuation_Wrapper_0")]                                     // already bare
         [InlineData("System.Private.CoreLib!AsyncProfiler+ContinuationWrapper.Continuation_Wrapper_7", "Continuation_Wrapper_7")] // module + nested type
         [InlineData("SomeModule!Ns.Type.Method(System.Int32, System.String)", "Method")]                     // signature stripped

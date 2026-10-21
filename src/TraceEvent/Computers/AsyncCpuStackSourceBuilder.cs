@@ -171,7 +171,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             m_methodCompletionObserved = index.MethodCompletionObserved;
             m_canonicalMethodByMethodIndex = new Dictionary<MethodIndex, MethodIndex>();
             m_canonicalMethodByIdentity = new Dictionary<AsyncManagedMethodIdentity, MethodIndex>();
-            m_methodOf = ca => NormalizeMethod(eventLog.CodeAddresses.MethodIndex(ca));
+            m_methodOf = ca => ca == CodeAddressIndex.Invalid
+                ? MethodIndex.Invalid
+                : NormalizeMethod(eventLog.CodeAddresses.MethodIndex(ca));
             m_diagnostics = new StitchDiagnostics();
             m_sampleDiagnostics = new StitchDiagnostics();
             m_segments = new List<AsyncCallStack>();
@@ -201,7 +203,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 if (!m_syncFrameMetadata.TryGetValue(ca, out var metadata))
                 {
                     TraceCodeAddress codeAddress = ca == CodeAddressIndex.Invalid ? null : codeAddresses[ca];
-                    string frameName = codeAddress?.FullMethodName;
+                    string frameName = AsyncStitchBoundary.NormalizeMethodName(codeAddress?.FullMethodName);
                     TraceModuleFile module = ca == CodeAddressIndex.Invalid ? null : codeAddresses.ModuleFile(ca);
                     bool isHostModule = AsyncRuntimeRuleProfileCache.IsHostModule(module);
                     AsyncRuntimeRuleProfile profile = module == null
@@ -233,7 +235,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 : m_runtimeProfiles.GetProfile(module.ModuleFileIndex);
             MethodIndex method = MethodIndex.Invalid;
             if (profile.TryGetBoxedStateMachineTypeName(
-                codeAddress.FullMethodName, isHostModule, out string stateMachineType))
+                AsyncStitchBoundary.NormalizeMethodName(codeAddress.FullMethodName),
+                isHostModule, out string stateMachineType))
             {
                 if (m_stateMachineMethodByTypeName == null)
                 {
@@ -241,7 +244,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     TraceMethods methods = m_eventLog.CodeAddresses.Methods;
                     for (int i = 0; i < methods.Count; i++)
                     {
-                        string typeName = AsyncStitchBoundary.GetStateMachineTypeName(methods.FullMethodName((MethodIndex)i));
+                        string typeName = AsyncStitchBoundary.GetStateMachineTypeName(
+                            AsyncStitchBoundary.NormalizeMethodName(methods.FullMethodName((MethodIndex)i)));
                         if (typeName == null)
                         {
                             continue;
@@ -366,7 +370,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
                 TraceCodeAddress codeAddress = m_eventLog.CodeAddresses[frame.CodeAddress];
                 if (AsyncStitchBoundary.TryGetLogicalStateMachineMethodName(
-                    codeAddress.FullMethodName,
+                    AsyncStitchBoundary.NormalizeMethodName(codeAddress.FullMethodName),
                     out string logicalName,
                     out string stateMachineSuffix))
                 {
@@ -434,7 +438,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 TraceCodeAddress codeAddress = m_eventLog.CodeAddresses[
                     frame.IsStateMachineBoxCarrier ? segment.CodeAddressAt(segmentFrameIndex) : frame.CodeAddress];
                 if (AsyncStitchBoundary.TryGetLogicalStateMachineMethodName(
-                    codeAddress.FullMethodName,
+                    AsyncStitchBoundary.NormalizeMethodName(codeAddress.FullMethodName),
                     out string logicalName,
                     out string stateMachineSuffix))
                 {

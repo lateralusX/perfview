@@ -297,12 +297,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     kickoffCodeAddress.ModuleName,
                     StringComparison.OrdinalIgnoreCase) ||
                 !AsyncStitchBoundary.TryGetLogicalStateMachineMethodName(
-                    moveNextCodeAddress.FullMethodName, out string logicalMethod))
+                    AsyncStitchBoundary.NormalizeMethodName(moveNextCodeAddress.FullMethodName),
+                    out string logicalMethod))
             {
                 return false;
             }
 
-            string kickoffMethod = kickoffCodeAddress.FullMethodName;
+            string kickoffMethod = AsyncStitchBoundary.NormalizeMethodName(kickoffCodeAddress.FullMethodName);
             if (string.IsNullOrEmpty(kickoffMethod))
             {
                 return false;

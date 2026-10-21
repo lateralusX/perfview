@@ -29,6 +29,169 @@ namespace TraceEventTests
     public class AsyncProfilerStitchIntegrationTests
     {
         [Theory]
+        [InlineData(AsyncCallstackKind.RuntimeAsync, false)]
+        [InlineData(AsyncCallstackKind.RuntimeAsync, true)]
+        [InlineData(AsyncCallstackKind.StateMachineAsync, false)]
+        [InlineData(AsyncCallstackKind.StateMachineAsync, true)]
+        public void PerfMapSymbols_StitchBothAsyncFamiliesWithoutRewritingStoredSymbols(
+            AsyncCallstackKind kind, bool cleanup)
+        {
+            bool stateMachine = kind == AsyncCallstackKind.StateMachineAsync;
+            Frame current = Frame.PerfMap(Frame.ApplicationModule,
+                stateMachine ? "Scenario+<ChildAsync>d__1::MoveNext()" : "AsyncDemo.ClockScenario::ChildAAsync(int32)",
+                "Physical current");
+            Frame parent = Frame.PerfMap(Frame.ApplicationModule,
+                stateMachine ? "Scenario+<ParentAsync>d__2::MoveNext()" : "AsyncDemo.ClockScenario::ParentAAsync(int32)",
+                "Captured parent");
+            Frame native = Frame.Library("NativeHelpers", "NativeHelper::Run()", "NativeHelper::Run");
+            Frame dispatcher = Frame.PerfMap(AsyncStitchBoundary.HostModuleName,
+                "System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1+AsyncProfilerAsyncStateMachineBox`1[" +
+                "System.Int64,Scenario+<ChildAsync>d__1]::MoveNextAsDispatcher(class System.Threading.Thread," +
+                "valuetype System.Runtime.CompilerServices.AsyncInstrumentation/Flags)", "V1 dispatcher");
+            Frame wrapper = Frame.PerfMap(AsyncStitchBoundary.HostModuleName,
+                "System.Runtime.CompilerServices.AsyncProfiler+ContinuationWrapper::Continuation_Wrapper_1(" +
+                "class System.Runtime.CompilerServices.Continuation,uint8&)", "V2 wrapper");
+            const string runtimeTask = "System.Runtime.CompilerServices.AsyncHelpers+RuntimeAsyncTask`1[" +
+                "System.Threading.Tasks.VoidTaskResult]";
+            Frame instrumented = Frame.PerfMap(AsyncStitchBoundary.HostModuleName,
+                runtimeTask + "::InstrumentedDispatchContinuations(valuetype System.Runtime.CompilerServices.AsyncInstrumentation/Flags)",
+                "V2 instrumented dispatch");
+            Frame dispatch = Frame.PerfMap(AsyncStitchBoundary.HostModuleName,
+                runtimeTask + "::DispatchContinuations()", "V2 dispatch");
+            Frame threadPool = Frame.PerfMap(AsyncStitchBoundary.HostModuleName,
+                "System.Threading.ThreadPoolWorkQueue::Dispatch()", "ThreadPoolWorkQueue.Dispatch");
+            Frame worker = Frame.PerfMap(AsyncStitchBoundary.HostModuleName,
+                "System.Threading.PortableThreadPool+WorkerThread::WorkerThreadStart()", "WorkerThreadStart");
+            Frame logicalCurrent = stateMachine ? current.Logical("Scenario.ChildAsync") : current;
+            Frame logicalParent = stateMachine ? parent.Logical("Scenario.ParentAsync") : parent;
+            var scenario = new StitchScenario
+            {
+                Kind = kind,
+                Sync = stateMachine
+                    ? new[] { native, current, dispatcher, threadPool, worker }
+                    : new[] { native, current, wrapper, instrumented, dispatch, threadPool, worker },
+                Async = new[] { current, parent },
+                AsyncStates = stateMachine ? new[] { 0, 1 } : null,
+                ContinuationIndexBase = 1,
+                ExpectedStitched = new[] { native, logicalCurrent, logicalParent, threadPool, worker },
+                ExpectedDiagnostics = new StitchDiagnosticsExpectation
+                {
+                    SegmentsProcessed = 2,
+                    V1InlineFallbackUsed = stateMachine ? 2 : 0,
+                    V2PlumbingFramesCollapsed = stateMachine ? 0 : 4,
+                },
+                EnableAsyncInfrastructureCleanup = cleanup,
+                VerifyThreadTimeComputer = true,
+                IncludeEventSourceEvents = false,
+                AllowSupplementalSamples = true,
+                VerifySampleWeights = true,
+                AssertStitchedStackSource = stackSource =>
+                {
+                    var names = new List<string>();
+                    stackSource.ForEach(sample =>
+                    {
+                        for (var stack = sample.StackIndex; stack != StackSourceCallStackIndex.Invalid;
+                            stack = stackSource.GetCallerIndex(stack))
+                        {
+                            names.Add(stackSource.GetFrameName(stackSource.GetFrameIndex(stack), false));
+                        }
+                    });
+                    Assert.Contains(names, name => name.Contains(worker.SymbolName));
+                    Assert.Contains(names, name => name.Contains(native.SymbolName));
+                    Assert.DoesNotContain(names, name => name.Contains(AsyncStitchBoundary.NormalizeMethodName(worker.SymbolName)));
+                },
+            };
+            scenario.AssertProductionStitch();
+        }
+
+        [Fact]
+        public void PerfMapSymbols_V1ReentrantRegistrationMatchesItsKickoff()
+        {
+            Frame work = Frame.PerfMap(Frame.ApplicationModule, "Scenario::ReentrantWork()", "ReentrantWork");
+            Frame inner = Frame.PerfMap(Frame.ApplicationModule, "Scenario+<InnerAsync>d__1::MoveNext()", "Inner.MoveNext");
+            Frame outer = Frame.PerfMap(Frame.ApplicationModule, "Scenario+<OuterAsync>d__2::MoveNext()", "Outer.MoveNext");
+            Frame logicalInner = inner.Logical("Scenario.InnerAsync");
+            Frame logicalOuter = outer.Logical("Scenario.OuterAsync");
+            Frame kickoff = Frame.PerfMap(Frame.ApplicationModule, "Scenario::InnerAsync(int32)", "Kickoff");
+            Frame dispatcher = Frame.PerfMap(AsyncStitchBoundary.HostModuleName,
+                "System.Runtime.CompilerServices.AsyncStateMachineDispatcher::MoveNext()", "AsyncStateMachineDispatcher.MoveNext");
+            Frame box = Frame.PerfMap(AsyncStitchBoundary.HostModuleName,
+                "System.Runtime.CompilerServices.AsyncTaskMethodBuilder+AsyncProfilerAsyncStateMachineBox::InstrumentedMoveNext()",
+                "Box.InstrumentedMoveNext");
+            Frame await = Frame.PerfMap(AsyncStitchBoundary.HostModuleName,
+                "System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1[System.Int64]::AwaitUnsafeOnCompleted(!!0&,!!1&)",
+                "Builder.AwaitUnsafeOnCompleted");
+            Frame start = Frame.PerfMap(AsyncStitchBoundary.HostModuleName,
+                "System.Runtime.CompilerServices.AsyncMethodBuilderCore::Start(!!0&)", "AsyncMethodBuilderCore.Start");
+            var scenario = new StitchScenario
+            {
+                Kind = AsyncCallstackKind.StateMachineAsync,
+                Sync = new[]
+                {
+                    work, inner, dispatcher, box, await, inner, start, kickoff,
+                    outer, dispatcher, box, Frame.ThreadPoolDispatch, Frame.WorkerThreadStart,
+                },
+                AsyncSegments = new[] { AsyncSegment.StateMachine(logicalOuter), AsyncSegment.StateMachine(logicalInner) },
+                ExpectedStitched = new[] { work, logicalInner, logicalOuter, Frame.ThreadPoolDispatch, Frame.WorkerThreadStart },
+                ExpectedWithoutConservativeTransforms = new[]
+                {
+                    work, logicalInner, await, inner, start, kickoff, logicalOuter,
+                    Frame.ThreadPoolDispatch, Frame.WorkerThreadStart,
+                },
+                ExpectedDiagnostics = new StitchDiagnosticsExpectation
+                {
+                    SegmentsProcessed = 4,
+                    V1InlineFallbackUsed = 4,
+                    V1InfrastructureFramesCollapsed = 4,
+                    V1ReentrantFramesCollapsed = 8,
+                },
+                VerifyThreadTimeComputer = true,
+                IncludeEventSourceEvents = false,
+                AllowSupplementalSamples = true,
+                VerifySampleWeights = true,
+            };
+            scenario.AssertProductionStitch();
+        }
+
+        [Theory]
+        [InlineData(AsyncCallstackKind.StateMachineAsync)]
+        [InlineData(AsyncCallstackKind.RuntimeAsync)]
+        public void PerfMapSymbols_ZeroIpWithoutBoundary_PreservesPhysicalStackAndAppendsAncestry(AsyncCallstackKind kind)
+        {
+            bool stateMachine = kind == AsyncCallstackKind.StateMachineAsync;
+            Frame work = Frame.PerfMap(Frame.ApplicationModule, "Scenario::SampledWork()", "SampledWork");
+            Frame current = Frame.PerfMap(Frame.ApplicationModule,
+                stateMachine ? "Scenario+<CurrentAsync>d__1::MoveNext()" : "Scenario::CurrentAsync()", "Captured current");
+            Frame parent = Frame.PerfMap(Frame.ApplicationModule,
+                stateMachine ? "Scenario+<ParentAsync>d__2::MoveNext()" : "Scenario::ParentAsync()", "Captured parent");
+            var scenario = new StitchScenario
+            {
+                Kind = kind,
+                Sync = new[] { work, Frame.ThreadPoolDispatch, Frame.WorkerThreadStart },
+                Async = new[] { Frame.Zero, current, parent },
+                ExpectedStitched = new[]
+                {
+                    work, Frame.ThreadPoolDispatch, Frame.WorkerThreadStart,
+                    stateMachine ? current.Logical("Scenario.CurrentAsync") : current,
+                    stateMachine ? parent.Logical("Scenario.ParentAsync") : parent,
+                },
+                ExpectedDiagnostics = new StitchDiagnosticsExpectation
+                {
+                    SegmentsProcessed = 2,
+                    BoundariesNotFound = 2,
+                    V1InlineFallbackUsed = stateMachine ? 2 : 0,
+                },
+                VerifyThreadTimeComputer = true,
+                IncludeEventSourceEvents = false,
+                AllowSupplementalSamples = true,
+                VerifySampleWeights = true,
+                AssertTransformContext = context =>
+                    Assert.DoesNotContain(context.Frames, frame => frame.Origin == StitchedFrameOrigin.IncompleteRoot),
+            };
+            scenario.AssertProductionStitch();
+        }
+
+        [Theory]
         [InlineData(AsyncCallstackKind.StateMachineAsync)]
         [InlineData(AsyncCallstackKind.RuntimeAsync)]
         public void VersionedWholeBridge_RejectsAnOtherwiseAcceptedLayoutAtomically(AsyncCallstackKind kind)
@@ -2895,17 +3058,21 @@ namespace TraceEventTests
         [InlineData("AsyncStateMachineBox", "InstrumentedMoveNext(class System.Threading.Thread)", false, true, false, "11.0.0")]
         [InlineData("AsyncProfilerAsyncStateMachineBox", "InstrumentedMoveNext(class System.Threading.Thread)", true, false, false, "11.0.0")]
         [InlineData("AsyncStateMachineBox", "InstrumentedMoveNext(class System.Threading.Thread)", true, true, true, "12.0.0")]
+        [InlineData("AsyncStateMachineBox", "InstrumentedMoveNext(class System.Threading.Thread)", true, true, true, null, true)]
+        [InlineData("AsyncStateMachineBox", "InstrumentedMoveNext(class System.Threading.Thread)", true, true, true, "11.0.0", true)]
         public void StateMachineAsync_LeafBoxCarrier_RepresentsTheResumedParentOnce(
-            string boxType, string member, bool annotations, bool cleanup, bool conservative, string productVersion)
+            string boxType, string member, bool annotations, bool cleanup, bool conservative, string productVersion,
+            bool perfMap = false)
         {
-            Frame child = Frame.App("Scenario+<BurnCpuAsync>d__63.MoveNext");
-            Frame parent = Frame.App("Scenario+<ParentAsync>d__12.MoveNext");
-            Frame ancestor = Frame.App("Scenario+<AncestorAsync>d__11.MoveNext");
+            string separator = perfMap ? "::" : ".";
+            Frame child = Frame.App("Scenario+<BurnCpuAsync>d__63" + separator + "MoveNext");
+            Frame parent = Frame.App("Scenario+<ParentAsync>d__12" + separator + "MoveNext");
+            Frame ancestor = Frame.App("Scenario+<AncestorAsync>d__11" + separator + "MoveNext");
             Frame capturedParent = parent.Logical("Scenario.ParentAsync", annotations ? 0 : (int?)null);
             Frame runningParent = parent.Logical("Scenario.ParentAsync", annotations ? 0 : (int?)null);
             Frame capturedAncestor = ancestor.Logical("Scenario.AncestorAsync", annotations ? 1 : (int?)null);
             const string boxPrefix = "System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1+";
-            const string boxArguments = "`1[System.Int64,Scenario+<ParentAsync>d__12].";
+            string boxArguments = "`1[System.Int64,Scenario+<ParentAsync>d__12]" + separator;
             Frame leaf = Frame.CoreLib(boxPrefix + boxType + boxArguments + member, "ParentBoxLeaf");
             Frame profiler = Frame.CoreLib(
                 boxPrefix + "AsyncProfilerAsyncStateMachineBox" + boxArguments + "InstrumentedMoveNext()", "ParentBoxOverride");
@@ -6286,7 +6453,7 @@ namespace TraceEventTests
                         ulong mappingId = mappings[frame.ModuleName].Id;
                         ulong address = addresses[frame.Key];
                         w.WriteEventBlob(EventOptions(4, sequence++, StartQpc + 2), p =>
-                            WriteProcessSymbolPayload(p, symbolId++, mappingId, address, frame.SymbolName));
+                            WriteProcessSymbolPayload(p, symbolId++, mappingId, address, frame.RawSymbolName));
                     }
 
                     Guid activityId = new Guid("9f7e55d2-694f-4cc2-a68d-df35efca1c81");
@@ -6748,10 +6915,12 @@ namespace TraceEventTests
         {
             public const string ApplicationModule = "TestApp";
 
-            private Frame(string moduleName, string symbolName, string label, FrameKind kind = FrameKind.Ordinary, byte wrapperIndex = 0)
+            private Frame(string moduleName, string symbolName, string label, FrameKind kind = FrameKind.Ordinary,
+                byte wrapperIndex = 0, string rawSymbolName = null)
             {
                 ModuleName = moduleName;
                 SymbolName = symbolName;
+                RawSymbolName = rawSymbolName ?? symbolName;
                 Label = label;
                 Kind = kind;
                 WrapperIndex = wrapperIndex;
@@ -6759,6 +6928,7 @@ namespace TraceEventTests
 
             public string ModuleName { get; }
             public string SymbolName { get; }
+            public string RawSymbolName { get; }
             public string Label { get; }
             public FrameKind Kind { get; }
             public byte WrapperIndex { get; }
@@ -6774,6 +6944,10 @@ namespace TraceEventTests
             public static Frame CoreLib(string symbolName, string label) =>
                 new Frame(AsyncStitchBoundary.HostModuleName, symbolName, label);
 
+            public static Frame PerfMap(string moduleName, string methodSignature, string label) =>
+                new Frame(moduleName, methodSignature, label,
+                    rawSymbolName: "instance void [" + moduleName + "] " + methodSignature + "[Optimized]");
+
             public Frame DispatcherFrames() =>
                 new Frame(ModuleName, SymbolName, "[Async dispatcher frames]", Kind, WrapperIndex);
 
@@ -6781,7 +6955,7 @@ namespace TraceEventTests
             {
                 Assert.True(
                     AsyncStitchBoundary.TryGetLogicalStateMachineMethodName(
-                        SymbolName, out _, out string stateMachineSuffix));
+                        AsyncStitchBoundary.NormalizeMethodName(SymbolName), out _, out string stateMachineSuffix));
                 string ordinal = stateMachineSuffix.StartsWith("d__", StringComparison.Ordinal)
                     ? stateMachineSuffix.Substring(3)
                     : (stateMachineSuffix.StartsWith("d_", StringComparison.Ordinal)
@@ -6794,7 +6968,8 @@ namespace TraceEventTests
                         ? label + " [ordinal " + ordinal + ", state " + state.Value + "]"
                         : label + " [ordinal " + ordinal + "]",
                     Kind,
-                    WrapperIndex);
+                    WrapperIndex,
+                    RawSymbolName);
             }
 
             public static Frame V1InlineInfrastructure(string level, string name) =>
