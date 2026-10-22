@@ -12,6 +12,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Remove="AsyncProfilerValidation\**\*.cs" />
     <ProjectReference Include="..\TraceEvent.csproj" />
     <PackageReference Include="System.Reactive.Linq" />
   </ItemGroup>
