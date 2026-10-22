@@ -27,7 +27,8 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
             bool isDispatchTarget,
             bool isCurrent,
             bool isStateMachineBoxCarrier,
-            bool isCompleting)
+            bool isCompleting,
+            bool isCompletionUnwind)
         {
             Kind = kind;
             ProcessIndex = processIndex;
@@ -39,6 +40,7 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
             IsCurrent = isCurrent;
             IsStateMachineBoxCarrier = isStateMachineBoxCarrier;
             IsCompleting = isCompleting;
+            IsCompletionUnwind = isCompletionUnwind;
         }
 
         /// <summary>The async-profiler call-stack kind.</summary>
@@ -59,7 +61,7 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
         /// <summary>
         /// The raw signed compiler state for <see cref="AsyncCallstackKind.StateMachineAsync"/>, not an IL/native offset. This value is not
         /// meaningful for <see cref="AsyncCallstackKind.RuntimeAsync"/>. This is the captured value, even when
-        /// a current frame displays inferred running state -1 or a completing frame displays inferred state -2.
+        /// a current frame displays inferred running state -1 or a completing/unwind frame displays inferred state -2.
         /// </summary>
         public int State { get; }
 
@@ -79,6 +81,10 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
         /// <summary>True when completion records establish that this physically present V1 method has logically
         /// completed but its invocation is still finishing. Its annotated presentation uses inferred state -2.</summary>
         public bool IsCompleting { get; }
+
+        /// <summary>True when verified physical return-unwind work is attributed to the logical root of a fully
+        /// completed V1 activation. Displays inferred state -2 without claiming physical root-body execution.</summary>
+        public bool IsCompletionUnwind { get; }
 
         /// <summary>
         /// True when a V1 resumption target was identified from the generic state-machine type of a physical

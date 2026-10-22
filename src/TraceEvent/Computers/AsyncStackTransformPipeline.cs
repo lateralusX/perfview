@@ -226,8 +226,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         /// <summary>
         /// Enables default strong-signal presentation transforms that fail open when their exact frame pattern is
-        /// absent. This includes V1 synchronous-startup normalization, exact reentrant-activation deduplication, and
-        /// V2 sampled-leaf wrapper cleanup. It also collapses an all-System.Private.CoreLib synchronous handoff span
+        /// absent. This includes V1 synchronous-startup normalization, exact reentrant-activation deduplication,
+        /// V1 completed-return attribution to the logical root with inferred state -2, and V2 sampled-leaf wrapper
+        /// cleanup. Completed-return attribution requires explicit full-completion records and a uniquely ordered,
+        /// resolved physical completion span; uncertain work is retained. V1 reentrant dispatch-entry deduplication requires a retained
+        /// dispatcher, resolved startup identity, and a physically matched enclosing context; dispatch targets
+        /// retain their captured state and role. It also collapses an all-System.Private.CoreLib synchronous handoff span
         /// between verified adjacent V1/V2 activations with a physically matched outer method and a matched
         /// inner method or unambiguous dispatch target. V1 targets require a matched box carrier or recorded
         /// completion progress and a retained dispatcher. Ambiguous completion evidence and physically
@@ -308,6 +312,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// profiler, is atomically attributed to the nearest active logical async frame. Capture and emission
         /// helpers need not be visible because they may inline. All prefix frames must belong to the same active
         /// activation; cleanup never crosses another async boundary or a physically matched application anchor.
+        /// A resolved CoreLib <c>CreateDispatcher</c> and await-registration spine directly above a physical
+        /// current V1 method likewise establish ownership of the dispatcher's entire callee prefix, regardless
+        /// of callee names. Rejected dispatcher-callee prefixes remain protected from individual-helper cleanup.
         /// A registered V1 target without a physical current-method match keeps its dispatch-target metadata.
         /// Residual recognized V1/V2 dispatcher and box frames outside protected spans are represented by
         /// <c>[Async dispatcher frames]</c>, rather than deleted, preserving the caller context of their callees.

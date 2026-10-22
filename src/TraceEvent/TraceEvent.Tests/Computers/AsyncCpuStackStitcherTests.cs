@@ -1427,6 +1427,107 @@ namespace TraceEventTests
         }
 
         [Theory]
+        [InlineData(0)]
+        [InlineData(1)]
+        [InlineData(3)]
+        public void V1_SurvivingDispatcher_MarksCallerTailCutInsideRuntimePlumbing(int plumbingLength)
+        {
+            var s = new Scenario();
+            AsyncCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
+                new[] { 500, 501 }, new[] { 30, 31 });
+            var sync = new List<StitchSyncFrame>
+            {
+                s.Sync(40, 70),
+                s.Sync(41, 30),
+                s.Boundary(42, V1Dispatcher),
+            };
+            sync.AddRange(Enumerable.Range(0, plumbingLength).Select(i => s.Boundary(43 + i, V1Infrastructure)));
+
+            StitchResult result = s.Run(sync, new[] { segment });
+
+            Assert.Equal(new[] { Scenario.CA(40), Scenario.CA(41), Scenario.CA(501), CodeAddressIndex.Invalid },
+                result.Frames.Select(frame => frame.CodeAddress));
+            Assert.Equal(StitchedFrameOrigin.IncompleteRoot, result.Frames.Last().Origin);
+            Assert.Null(result.Frames.Last().Context);
+            Assert.Equal(0, result.Diagnostics.BoundariesNotFound);
+            Assert.Equal(plumbingLength, result.Diagnostics.V1InfrastructureFramesCollapsed);
+            Assert.Equal(1, result.Diagnostics.IncompleteAsyncRootsNormalized);
+        }
+
+        [Theory]
+        [InlineData("unknown")]
+        [InlineData("foreign-profile")]
+        [InlineData("foreign-boundary")]
+        public void V1_SurvivingDispatcher_PreservesUnverifiedCallerTail(string obstruction)
+        {
+            var s = new Scenario();
+            var profile = new StructuralRulesProfile(0);
+            AsyncCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
+                new[] { 500, 501 }, new[] { 30, 31 });
+            StitchSyncFrame tail = obstruction == "unknown" ? s.Sync(43, 90) :
+                s.Boundary(43, obstruction == "foreign-boundary" ? Wrapper(0) : V1Infrastructure);
+            var sync = new[] { s.Sync(40, 30), s.Boundary(42, V1Dispatcher), tail };
+
+            StitchResult result = s.Run(sync, new[] { segment }, profile,
+                ca => obstruction == "foreign-profile" && ca == Scenario.CA(43)
+                    ? AsyncRuntimeRuleProfile.Common : profile);
+
+            Assert.Equal(Scenario.CA(43), result.Frames.Last().CodeAddress);
+            Assert.DoesNotContain(result.Frames, frame => frame.Origin == StitchedFrameOrigin.IncompleteRoot);
+        }
+
+        [Fact]
+        public void V1_SurvivingDispatcher_UnresolvedBoundaryDoesNotProveAnIncompleteRoot()
+        {
+            var s = new Scenario();
+            AsyncCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
+                new[] { 500, 501 }, new[] { 30, 31 });
+            s.Boundary(42, V1Dispatcher);
+            var sync = new[]
+            {
+                s.Sync(40, 30),
+                new StitchSyncFrame(Scenario.CA(42), MethodIndex.Invalid),
+            };
+
+            StitchResult result = s.Run(sync, new[] { segment });
+
+            Assert.DoesNotContain(result.Frames, frame => frame.Origin == StitchedFrameOrigin.IncompleteRoot);
+        }
+
+        [Theory]
+        [InlineData(0)]
+        [InlineData(2)]
+        public void V1_SurvivingDispatcher_NestedContextsHaveOneOutermostIncompleteRoot(int plumbingLength)
+        {
+            var s = new Scenario();
+            AsyncCallStack outer = s.Segment(AsyncCallstackKind.StateMachineAsync,
+                new[] { 500, 501 }, new[] { 30, 31 });
+            AsyncCallStack inner = s.Segment(AsyncCallstackKind.StateMachineAsync,
+                new[] { 600, 601 }, new[] { 40, 41 });
+            var sync = new List<StitchSyncFrame>
+            {
+                s.Sync(40, 40),
+                s.Boundary(41, V1Dispatcher),
+                s.Boundary(42, V1Infrastructure),
+                s.Sync(43, 70),
+                s.Sync(44, 30),
+                s.Boundary(45, V1Dispatcher),
+            };
+            sync.AddRange(Enumerable.Range(0, plumbingLength).Select(i => s.Boundary(46 + i, V1Infrastructure)));
+
+            StitchResult result = s.Run(sync, new[] { outer, inner });
+
+            Assert.Equal(new[]
+                {
+                    Scenario.CA(40), Scenario.CA(601), Scenario.CA(43),
+                    Scenario.CA(44), Scenario.CA(501), CodeAddressIndex.Invalid,
+                }, result.Frames.Select(frame => frame.CodeAddress));
+            Assert.Single(result.Frames.Where(frame => frame.Origin == StitchedFrameOrigin.IncompleteRoot));
+            Assert.Equal(StitchedFrameOrigin.IncompleteRoot, result.Frames.Last().Origin);
+            Assert.Equal(2, result.Diagnostics.SegmentsProcessed);
+        }
+
+        [Theory]
         [InlineData(AsyncCallstackKind.StateMachineAsync, false)]
         [InlineData(AsyncCallstackKind.StateMachineAsync, true)]
         [InlineData(AsyncCallstackKind.RuntimeAsync, false)]

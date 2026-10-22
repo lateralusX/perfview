@@ -99,6 +99,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 return profilerKind;
             }
 
+            if (method == "ExecutionContextCallback" && IsCommonV1DispatcherInfrastructure(frameName))
+            {
+                return StitchSyncFrameKind.V1StateMachineBoxExecutionContextCallback;
+            }
+
             StitchSyncFrameKind bridgeKind = ClassifySystemPrivateCoreLibAsyncBridge(frameName, method);
             if (bridgeKind != StitchSyncFrameKind.None)
             {
@@ -150,14 +155,15 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 : StitchSyncFrameKind.None;
         }
 
-        /// <summary>Recognizes a constructed V1 carrier's state-machine type; identity is resolved separately.</summary>
+        /// <summary>Recognizes a constructed V1 execution/callback box's state-machine type; identity resolution
+        /// and resumption-carrier approval are separate.</summary>
         public virtual bool TryGetBoxedStateMachineTypeName(
             string frameName, bool isHostModule, out string stateMachineType)
         {
             stateMachineType = null;
             string method = GetBareMethodName(frameName);
             if (!isHostModule ||
-                (method != "MoveNext" && method != "InstrumentedMoveNext") ||
+                (method != "MoveNext" && method != "InstrumentedMoveNext" && method != "ExecutionContextCallback") ||
                 !IsCommonV1DispatcherInfrastructure(frameName))
             {
                 return false;
@@ -264,12 +270,26 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         /// <summary>
+        /// Recognizes return-unwind plumbing after full completion has independently been recorded. Captured
+        /// method order, box identities, and runtime-module ownership are checked by the presentation transform.
+        /// </summary>
+        public virtual bool IsV1CompletionUnwindInfrastructure(
+            StitchedFrame frame, AsyncStitchBoundaryKind boundary) =>
+            (boundary == AsyncStitchBoundaryKind.V1DispatcherInfrastructure &&
+             frame.BoxedStateMachineMethod != MethodIndex.Invalid) ||
+            frame.SyncFrameKind == StitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure ||
+            frame.SyncFrameKind == StitchSyncFrameKind.SystemPrivateCoreLibTaskRunContinuations ||
+            frame.SyncFrameKind == StitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult ||
+            frame.SyncFrameKind == StitchSyncFrameKind.V1MethodBuilderCompletion;
+
+        /// <summary>
         /// Filters candidate V1 carriers. Resolved identity and physical-application-body precedence are
         /// checked independently by the stitcher and cannot be relaxed by this predicate.
         /// </summary>
         public virtual bool IsV1BoxCarrierCandidate(
             IReadOnlyList<StitchSyncFrame> frames, int start, int end, int index) =>
-            frames[index].BoxedStateMachineMethod != MethodIndex.Invalid;
+            frames[index].BoxedStateMachineMethod != MethodIndex.Invalid &&
+            frames[index].Kind != StitchSyncFrameKind.V1StateMachineBoxExecutionContextCallback;
 
         /// <summary>The synchronous scheduler anchor retained beneath an optional resumption bridge.</summary>
         public virtual bool IsRuntimeResumptionAnchor(StitchedFrame frame) =>
@@ -339,7 +359,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             return AsyncRuntimeSequenceMatch.Match(next - start);
         }
 
-        /// <summary>Matches the await-registration spine before a duplicate startup body.</summary>
+        /// <summary>Matches the await-registration spine before a V1 method body.</summary>
         protected virtual AsyncRuntimeSequenceMatch MatchV1AwaitRegistration(
             AsyncStackTransformContext context, int start, int end)
         {
@@ -357,12 +377,27 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         protected virtual AsyncRuntimeSequenceMatch MatchAsyncProfilerEntry(
             AsyncStackTransformContext context, int start, int end)
         {
-            if (start == end || end == context.Frames.Count ||
-                !IsSyncFrameKind(context.Frames[start], StitchSyncFrameKind.AsyncProfilerContextResume))
+            if (start == end || end == context.Frames.Count)
             {
                 return default;
             }
             StitchedFrame target = context.Frames[end];
+            if (IsSyncFrameKind(context.Frames[start], StitchSyncFrameKind.V1DispatcherCreationInfrastructure))
+            {
+                if (target.Origin != StitchedFrameOrigin.AsyncCurrent ||
+                    target.Segment.Kind != AsyncCallstackKind.StateMachineAsync)
+                {
+                    return default;
+                }
+                AsyncRuntimeSequenceMatch registration = context.MatchRuntimeSequence(
+                    AsyncRuntimeSequenceKind.V1AwaitRegistration, start + 1, end);
+                return registration.IsMatch && registration.Length == end - start - 1
+                    ? AsyncRuntimeSequenceMatch.Match(end - start) : default;
+            }
+            if (!IsSyncFrameKind(context.Frames[start], StitchSyncFrameKind.AsyncProfilerContextResume))
+            {
+                return default;
+            }
             bool dispatcherTarget = target.Origin == StitchedFrameOrigin.AsyncDispatchTarget &&
                 !target.IsStateMachineBoxCarrier;
             int length = dispatcherTarget ? 2 : 1;

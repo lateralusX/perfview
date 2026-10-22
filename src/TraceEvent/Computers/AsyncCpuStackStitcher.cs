@@ -44,6 +44,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// it has no code address or async-method identity and does not imply a particular execution host.
         /// </summary>
         IncompleteRoot,
+
+        /// <summary>
+        /// The logical root of a fully completed V1 activation, to which a verified physical return-unwind
+        /// span is attributed. Does not claim that the root method is physically present or executing.
+        /// </summary>
+        AsyncCompletionUnwind,
     }
 
     /// <summary>The async-context membership of a <see cref="StitchedFrame"/>.</summary>
@@ -161,6 +167,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// async-infrastructure cleanup. This is not an async splice boundary.
         /// </summary>
         V1DispatcherCreationInfrastructure,
+
+        /// <summary>A CoreLib box execution-context callback. Its state-machine identity is available for
+        /// completed-return ownership, but it is not a V1 resumption carrier.</summary>
+        V1StateMachineBoxExecutionContextCallback,
     }
 
     /// <summary>
@@ -232,9 +242,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         public readonly MethodIndex Method;
 
         /// <summary>
-        /// The canonical application method represented by a matched V1 box carrier, or
-        /// <see cref="MethodIndex.Invalid"/>. <see cref="Method"/> and <see cref="CodeAddress"/> retain the
-        /// sampled runtime helper's physical identity.
+        /// The canonical application method carried by a resolved physical V1 box execution frame, or
+        /// <see cref="MethodIndex.Invalid"/>. Also retained on synchronous frames for presentation ownership
+        /// checks. <see cref="Method"/> and <see cref="CodeAddress"/> retain the runtime helper's physical identity.
         /// </summary>
         public readonly MethodIndex BoxedStateMachineMethod;
 
@@ -295,7 +305,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             AsyncCallStack context) =>
             new StitchedFrame(
                 StitchedFrameOrigin.Sync, frame.CodeAddress, frame.Method, null, -1, frame.Kind,
-                StitchedFramePresentation.Native, context);
+                StitchedFramePresentation.Native, context, frame.BoxedStateMachineMethod);
 
         /// <summary>
         /// Creates a physically present current frame with its logical async identity. Supplying a V1 boxed
@@ -326,6 +336,14 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             int segmentFrameIndex) =>
             new StitchedFrame(
                 StitchedFrameOrigin.AsyncCompleting, codeAddress, method, context.Frames, segmentFrameIndex,
+                StitchSyncFrameKind.None, StitchedFramePresentation.LogicalStateMachineMethod, context);
+
+        /// <summary>Attributes verified V1 return-unwind work to the completed activation's logical root.</summary>
+        public static StitchedFrame CreateAsyncCompletionUnwind(AsyncCallStack context) =>
+            new StitchedFrame(
+                StitchedFrameOrigin.AsyncCompletionUnwind,
+                context.Frames.CodeAddressAt(context.Frames.FrameCount - 1),
+                MethodIndex.Invalid, context.Frames, context.Frames.FrameCount - 1,
                 StitchSyncFrameKind.None, StitchedFramePresentation.LogicalStateMachineMethod, context);
 
         /// <summary>Creates a suspended-ancestry frame from an async call-stack segment.</summary>
@@ -452,6 +470,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <summary>V1 segments anchored by a physically present, record-verified completing method.</summary>
         public int V1CompletionTailUsed;
 
+        /// <summary>Physical V1 return-unwind frames attributed by default presentation to a record-verified,
+        /// fully completed activation's logical root.</summary>
+        public int V1CompletionUnwindFramesCollapsed;
+
         /// <summary>V1 segments whose completion evidence cannot be safely aligned to a physical anchor,
         /// including repeated occurrences or records beyond the matched prefix. Their physical slices are retained.</summary>
         public int V1CompletionAlignmentAmbiguous;
@@ -561,6 +583,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             V2TruncatedSuffixFallbackUsed = 0;
             IncompleteAsyncRootsNormalized = 0;
             V1CompletionTailUsed = 0;
+            V1CompletionUnwindFramesCollapsed = 0;
             V1CompletionAlignmentAmbiguous = 0;
             V2SyncLayoutUsed = 0;
             V2LeafWrapperDropped = 0;
@@ -590,6 +613,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             target.V2TruncatedSuffixFallbackUsed += V2TruncatedSuffixFallbackUsed;
             target.IncompleteAsyncRootsNormalized += IncompleteAsyncRootsNormalized;
             target.V1CompletionTailUsed += V1CompletionTailUsed;
+            target.V1CompletionUnwindFramesCollapsed += V1CompletionUnwindFramesCollapsed;
             target.V1CompletionAlignmentAmbiguous += V1CompletionAlignmentAmbiguous;
             target.V2SyncLayoutUsed += V2SyncLayoutUsed;
             target.V2LeafWrapperDropped += V2LeafWrapperDropped;
@@ -674,9 +698,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// A missing outermost dispatcher can instead be recovered from a unique ordered physical-method match.
     /// If its completion position agrees and the root-ward span is resolved and contains no other dispatcher,
     /// that incomplete span is replaced by <see cref="StitchedFrameOrigin.IncompleteRoot"/>. This does not
-    /// depend on the captured frame count, helper names, or a thread-pool root. Ambiguous or unresolved spans
-    /// and callers beyond an observed dispatcher are retained. V2 recovery without method-completion events
-    /// must also respect recorded wrapper-reset and exception-completion lower bounds.
+    /// depend on the captured frame count, helper names, or a thread-pool root. A surviving outermost V1
+    /// dispatcher also marks an incomplete root when the capture ends at that resolved dispatcher or within its
+    /// fully resolved, same-runtime-profile caller-side plumbing. Arbitrary managed/native callers, unresolved
+    /// spans, and unrecognized callers beyond an observed dispatcher are retained. V2 recovery without
+    /// method-completion events must also respect recorded wrapper-reset and exception-completion lower bounds.
     /// </para>
     /// <para>
     /// This type is intentionally free of any <c>StackSource</c> / interning dependency: it consumes materialized
@@ -1126,11 +1152,6 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 pSync = recoveredInner
                     ? recoveredTailPos
                     : (boundaryFound ? boundaryPos + 1 : syncEnd);
-                if (incompleteRoot)
-                {
-                    output.Add(StitchedFrame.CreateIncompleteRoot());
-                    diagnostics.IncompleteAsyncRootsNormalized++;
-                }
                 if (boundaryFound)
                 {
                     // Collapse the dispatch-continuation plumbing for this segment immediately, rather than waiting
@@ -1147,6 +1168,16 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     {
                         diagnostics.V2PlumbingFramesCollapsed += plumbingCount;
                     }
+
+                    // A surviving dispatcher can still have its required callers cut off inside the runtime plumbing.
+                    incompleteRoot = segmentIndex == 0 && kind == AsyncCallstackKind.StateMachineAsync &&
+                        pSync == syncLeafToRoot.Count &&
+                        IsResolvedRuntimeRootSpan(syncLeafToRoot, boundaryPos, runtimeTraceLog);
+                }
+                if (incompleteRoot)
+                {
+                    output.Add(StitchedFrame.CreateIncompleteRoot());
+                    diagnostics.IncompleteAsyncRootsNormalized++;
                 }
             }
 
@@ -1156,6 +1187,20 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 output.Add(StitchedFrame.CreateSync(
                     syncLeafToRoot[i], null));
             }
+        }
+
+        private static bool IsResolvedRuntimeRootSpan(
+            IReadOnlyList<StitchSyncFrame> frames, int boundaryIndex, TraceLog traceLog)
+        {
+            for (int i = boundaryIndex; i < frames.Count; i++)
+            {
+                if (frames[i].CodeAddress == CodeAddressIndex.Invalid || frames[i].Method == MethodIndex.Invalid)
+                {
+                    return false;
+                }
+            }
+            return traceLog == null ||
+                AsyncRuntimeRuleProfileCache.IsHostModule(traceLog.CodeAddresses.ModuleFile(frames[boundaryIndex].CodeAddress));
         }
 
         private static int MatchDispatchPlumbing(

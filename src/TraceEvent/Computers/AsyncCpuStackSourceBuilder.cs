@@ -406,7 +406,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             bool dispatchTarget = frame.Origin == StitchedFrameOrigin.AsyncDispatchTarget;
             bool current = frame.Origin == StitchedFrameOrigin.AsyncCurrent;
             bool completing = frame.Origin == StitchedFrameOrigin.AsyncCompleting;
-            int presentationState = completing ? -2 : (current ? -1 : state);
+            bool completionUnwind = frame.Origin == StitchedFrameOrigin.AsyncCompletionUnwind;
+            int presentationState = completing || completionUnwind ? -2 : (current ? -1 : state);
             bool annotateActive =
                 m_transforms.EnableActiveAsyncFrameAnnotations &&
                 frame.ContextKind == StitchedFrameContextKind.Active;
@@ -497,7 +498,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 asyncFrame,
                 new AsyncStackSourceFrameInfo(
                     kind, processIndex, frame.CodeAddress, methodId, state, historicalParent, dispatchTarget,
-                    current, frame.IsStateMachineBoxCarrier, completing));
+                    current, frame.IsStateMachineBoxCarrier, completing, completionUnwind));
             return asyncFrame;
         }
 

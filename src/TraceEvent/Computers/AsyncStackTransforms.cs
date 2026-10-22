@@ -60,17 +60,22 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
     /// <summary>
     /// Normalizes synchronous V1 startup frames, deduplicates exact reentrant V1 activation scaffolding, and
-    /// removes an exact completed-V2-dispatch tail beneath a physically matched V1 activation.
+    /// attributes verified fully completed V1 return spans to their logical root, and removes an exact
+    /// completed-V2-dispatch tail beneath a physically matched V1 activation.
     /// </summary>
     /// <remarks>
     /// <para>
     /// <b>Edits:</b> a classified generated MoveNext is presented as its logical async method, and adjacent
     /// known builder Start frames are removed. If a same-module kickoff name matches, the startup MoveNext and
     /// Start frames are removed instead, retaining the kickoff. Reentrant deduplication retains the resumed
-    /// current/box representation and removes contiguous await-registration helpers, the identical startup
-    /// MoveNext, builder Start frames, and matching kickoff. Profiles supply the startup and registration spans;
-    /// the common layouts are described here. Kickoff matching compares logical names with
+    /// current/box representation or verified nested dispatch target and removes contiguous await-registration
+    /// helpers, the identical startup MoveNext, builder Start frames, and matching kickoff. Profiles supply
+    /// the startup and registration spans; the common layouts are described here. Kickoff matching compares logical names with
     /// parameter lists stripped; it is not metadata/token-based or exact-signature resolution.
+    /// A dispatch-only target requires its retained same-context V1 dispatcher, resolved target/startup method
+    /// identity, and a physically current outer context exactly one depth shallower. The startup span must belong
+    /// wholly to that outer context, with one matching body and no intervening boundary. Its captured state and
+    /// dispatch role are retained; recursive or unverified layouts are not deduplicated.
     /// </para>
     /// <para>
     /// Under the common profile, the completed V2 tail is the leaf-to-root sequence: one classified Task-continuation or execution-context
@@ -95,6 +100,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// Its startup, reentrant, and completed-tail rules deliberately share one leaf-to-root traversal.
     /// Missing trace/symbol identity or an incomplete pattern prevents the identity-dependent folds;
     /// classified MoveNext normalization and adjacent builder-Start removal can still run without a TraceLog.
+    /// Fully completed V1 return spans additionally require completion events, unique consecutive captured
+    /// method identities in physical return order, resolved same-module runtime plumbing, a box carrier, and
+    /// builder-completion evidence. Unverified leaf callees remain outside the fold; an interrupted span is retained.
     /// </para>
     /// </remarks>
     internal sealed class AsyncV1PresentationTransform
@@ -102,11 +110,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         public void Apply(AsyncStackTransformContext context)
         {
             List<StitchedFrame> frames = context.Frames;
+            CollapseCompletedV1Unwinds(context);
             // Preserve the leaf-to-root interleaving of handoff, deduplication, and startup edits.
             for (int i = 0; i < frames.Count; i++)
             {
                 StitchedFrame frame = frames[i];
-                if (frame.Origin == StitchedFrameOrigin.AsyncCurrent || frame.IsStateMachineBoxCarrier)
+                if (frame.Origin == StitchedFrameOrigin.AsyncCurrent ||
+                    frame.Origin == StitchedFrameOrigin.AsyncDispatchTarget)
                 {
                     if (frame.Segment != null && frame.Segment.Kind == AsyncCallstackKind.StateMachineAsync)
                     {
@@ -158,6 +168,184 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         #region private
+
+        private static void CollapseCompletedV1Unwinds(AsyncStackTransformContext context)
+        {
+            if (context.TraceLog == null)
+            {
+                return;
+            }
+
+            List<StitchedFrame> frames = context.Frames;
+            for (int start = 0; start < frames.Count;)
+            {
+                AsyncCallStack activation = frames[start].Context;
+                int end = start + 1;
+                while (end < frames.Count && ReferenceEquals(frames[end].Context, activation))
+                {
+                    end++;
+                }
+                if (activation != null &&
+                    activation.Frames.Kind == AsyncCallstackKind.StateMachineAsync &&
+                    context.TraceLog.AsyncMethodCompletionObserved(activation) &&
+                    activation.GetMethodCompletedFrameCount(context.TimestampQpc) > 0 &&
+                    activation.GetCompletedFrameCount(context.TimestampQpc) == activation.Frames.FrameCount &&
+                    TryMatchCompletedV1Unwind(context, start, end, activation, out int unwindStart))
+                {
+                    bool incompleteRoot = end == frames.Count && context.Segments.Count != 0 &&
+                        ReferenceEquals(context.Segments[0], activation);
+                    int removed = end - unwindStart;
+                    frames.RemoveRange(unwindStart, removed);
+                    frames.Insert(unwindStart, StitchedFrame.CreateAsyncCompletionUnwind(activation));
+                    context.Diagnostics.V1CompletionUnwindFramesCollapsed += removed;
+                    end = unwindStart + 1;
+                    if (incompleteRoot)
+                    {
+                        frames.Insert(end++, StitchedFrame.CreateIncompleteRoot());
+                        context.Diagnostics.IncompleteAsyncRootsNormalized++;
+                    }
+                }
+                start = end;
+            }
+        }
+
+        private static bool TryMatchCompletedV1Unwind(
+            AsyncStackTransformContext context, int start, int end, AsyncCallStack activation, out int unwindStart)
+        {
+            unwindStart = start;
+            TraceLog log = context.TraceLog;
+            TraceMethods methods = log.CodeAddresses.Methods;
+            AsyncCallStackFrames captured = activation.Frames;
+            var capturedMethods = new MethodIndex[captured.FrameCount];
+            for (int i = 0; i < capturedMethods.Length; i++)
+            {
+                CodeAddressIndex address = captured.CodeAddressAt(i);
+                MethodIndex method = address == CodeAddressIndex.Invalid
+                    ? MethodIndex.Invalid : log.CodeAddresses.MethodIndex(address);
+                if (method == MethodIndex.Invalid ||
+                    (i == capturedMethods.Length - 1 &&
+                     !AsyncStitchBoundary.TryGetLogicalStateMachineMethodName(
+                         AsyncStitchBoundary.NormalizeMethodName(log.CodeAddresses[address].FullMethodName), out _)))
+                {
+                    return false;
+                }
+                for (int j = 0; j < i; j++)
+                {
+                    if (SameMethodIdentity(methods, capturedMethods[j], method))
+                    {
+                        return false;
+                    }
+                }
+                capturedMethods[i] = method;
+            }
+
+            int previous = -1;
+            int identities = 0;
+            bool bodyAtPrevious = false;
+            bool hasBody = false;
+            bool hasBox = false;
+            bool hasCompletion = false;
+            ModuleFileIndex runtimeModule = ModuleFileIndex.Invalid;
+            AsyncRuntimeRuleProfile runtimeProfile = null;
+            for (int i = start; i < end; i++)
+            {
+                StitchedFrame frame = context.Frames[i];
+                if (frame.Origin != StitchedFrameOrigin.Sync)
+                {
+                    return false;
+                }
+                bool body = frame.SyncFrameKind == StitchSyncFrameKind.V1StateMachineMoveNext;
+                bool box = frame.BoxedStateMachineMethod != MethodIndex.Invalid;
+                MethodIndex method = body ? frame.Method : (box ? frame.BoxedStateMachineMethod : MethodIndex.Invalid);
+                int capturedIndex = -1;
+                for (int j = 0; j < capturedMethods.Length && method != MethodIndex.Invalid; j++)
+                {
+                    if (SameMethodIdentity(methods, capturedMethods[j], method))
+                    {
+                        capturedIndex = j;
+                        break;
+                    }
+                }
+
+                AsyncRuntimeRuleProfile profile = context.GetRuntimeProfile(frame.CodeAddress);
+                bool infrastructure = profile.IsV1CompletionUnwindInfrastructure(
+                    frame, context.ClassifyBoundary(frame.CodeAddress).Kind);
+                if ((body && capturedIndex < 0) || (!body && (!infrastructure || (box && capturedIndex < 0))) ||
+                    frame.CodeAddress == CodeAddressIndex.Invalid || frame.Method == MethodIndex.Invalid)
+                {
+                    if (identities != 0)
+                    {
+                        return false;
+                    }
+                    // Callees outside the proven return spine retain their physical identity and cost.
+                    unwindStart = i + 1;
+                    runtimeModule = ModuleFileIndex.Invalid;
+                    runtimeProfile = null;
+                    hasCompletion = false;
+                    continue;
+                }
+
+                if (!body)
+                {
+                    TraceModuleFile module = log.CodeAddresses.ModuleFile(frame.CodeAddress);
+                    if (!AsyncRuntimeRuleProfileCache.IsHostModule(module))
+                    {
+                        return false;
+                    }
+                    ModuleFileIndex moduleIndex = (module.ManagedModule ?? module).ModuleFileIndex;
+                    if (runtimeModule != ModuleFileIndex.Invalid &&
+                        (runtimeModule != moduleIndex || !ReferenceEquals(runtimeProfile, profile)))
+                    {
+                        return false;
+                    }
+                    runtimeModule = moduleIndex;
+                    runtimeProfile = profile;
+                    hasCompletion |= frame.SyncFrameKind == StitchSyncFrameKind.V1MethodBuilderCompletion;
+                    hasBox |= box;
+                }
+                if (capturedIndex < 0)
+                {
+                    continue;
+                }
+                if (previous < 0 || capturedIndex == previous - 1)
+                {
+                    identities++;
+                    previous = capturedIndex;
+                    bodyAtPrevious = false;
+                }
+                else if (capturedIndex != previous)
+                {
+                    return false;
+                }
+                if (body)
+                {
+                    if (bodyAtPrevious)
+                    {
+                        return false;
+                    }
+                    bodyAtPrevious = true;
+                    hasBody = true;
+                }
+            }
+            return identities >= 2 && hasBody && hasBox && hasCompletion;
+        }
+
+        private static bool SameMethodIdentity(TraceMethods methods, MethodIndex left, MethodIndex right)
+        {
+            if (left == right)
+            {
+                return left != MethodIndex.Invalid;
+            }
+            if (left == MethodIndex.Invalid || right == MethodIndex.Invalid)
+            {
+                return false;
+            }
+            TraceMethod first = methods[left];
+            TraceMethod second = methods[right];
+            return first.MethodToken != 0 && first.MethodToken == second.MethodToken &&
+                first.MethodModuleFileIndex == second.MethodModuleFileIndex &&
+                string.Equals(first.FullMethodName, second.FullMethodName, StringComparison.Ordinal);
+        }
 
         private static void CollapseV2CompletionHandoff(AsyncStackTransformContext context, int currentIndex)
         {
@@ -233,8 +421,21 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             List<StitchedFrame> frames = context.Frames;
             StitchedFrame current = frames[currentIndex];
             if (current.Segment == null ||
-                current.Segment.Kind != AsyncCallstackKind.StateMachineAsync ||
-                current.Method == MethodIndex.Invalid)
+                current.Segment.Kind != AsyncCallstackKind.StateMachineAsync)
+            {
+                return false;
+            }
+            bool dispatchOnly = current.Origin == StitchedFrameOrigin.AsyncDispatchTarget &&
+                !current.IsStateMachineBoxCarrier;
+            MethodIndex currentMethod = current.IsStateMachineBoxCarrier
+                ? current.BoxedStateMachineMethod : current.Method;
+            if (dispatchOnly)
+            {
+                CodeAddressIndex targetAddress = current.Segment.CodeAddressAt(current.SegmentFrameIndex);
+                currentMethod = targetAddress == CodeAddressIndex.Invalid
+                    ? MethodIndex.Invalid : context.TraceLog.CodeAddresses.MethodIndex(targetAddress);
+            }
+            if (currentMethod == MethodIndex.Invalid)
             {
                 return false;
             }
@@ -249,12 +450,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             StitchedFrame startupMoveNext = frames[startupMoveNextIndex];
-            MethodIndex currentMethod = current.IsStateMachineBoxCarrier
-                ? current.BoxedStateMachineMethod
-                : current.Method;
             if (startupMoveNext.Origin != StitchedFrameOrigin.Sync ||
                 startupMoveNext.SyncFrameKind != StitchSyncFrameKind.V1StateMachineMoveNext ||
-                startupMoveNext.Method != currentMethod)
+                startupMoveNext.CodeAddress == CodeAddressIndex.Invalid ||
+                (dispatchOnly
+                    ? context.TraceLog.CodeAddresses.MethodIndex(startupMoveNext.CodeAddress)
+                    : startupMoveNext.Method) != currentMethod)
             {
                 return false;
             }
@@ -268,14 +469,67 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             {
                 return false;
             }
+            if (dispatchOnly &&
+                !IsVerifiedReentrantDispatchTarget(context, currentIndex, kickoffIndex, startupMoveNext.Method))
+            {
+                return false;
+            }
 
-            // Keep the resumed AsyncCurrent representation. The exact match proves that the intervening CoreLib
-            // await-registration frames, duplicate startup MoveNext, builder Start frames, and kickoff all belong
+            // Keep the resumed representation and its current/dispatch-target role. The exact match proves that
+            // the registration helpers, duplicate startup MoveNext, builder Start frames, and kickoff all belong
             // to the same reentrant activation, so collapse that complete generated span.
             int duplicateFrameCount = kickoffIndex - registrationStart + 1;
             frames.RemoveRange(registrationStart, duplicateFrameCount);
             context.Diagnostics.V1ReentrantFramesCollapsed += duplicateFrameCount;
             return true;
+        }
+
+        private static bool IsVerifiedReentrantDispatchTarget(
+            AsyncStackTransformContext context, int targetIndex, int kickoffIndex, MethodIndex startupMethod)
+        {
+            if (targetIndex == 0 || kickoffIndex + 1 >= context.Frames.Count ||
+                context.Diagnostics.SegmentsProcessed != context.Segments.Count ||
+                context.Diagnostics.BoundariesNotFound != 0 ||
+                context.Diagnostics.AdjacencyMismatches != 0 ||
+                context.Diagnostics.V1CompletionAlignmentAmbiguous != 0)
+            {
+                return false;
+            }
+
+            List<StitchedFrame> frames = context.Frames;
+            StitchedFrame target = frames[targetIndex];
+            StitchedFrame dispatcher = frames[targetIndex - 1];
+            StitchedFrame outer = frames[kickoffIndex + 1];
+            if (target.Context == null ||
+                dispatcher.Origin != StitchedFrameOrigin.Sync ||
+                !ReferenceEquals(dispatcher.Context, target.Context) ||
+                context.ClassifyBoundary(dispatcher.CodeAddress).Kind != AsyncStitchBoundaryKind.V1Dispatcher ||
+                !IsSystemPrivateCoreLibSpan(context.TraceLog, frames, targetIndex - 1, 1) ||
+                outer.Origin != StitchedFrameOrigin.AsyncCurrent ||
+                outer.Context == null || outer.CodeAddress == CodeAddressIndex.Invalid ||
+                outer.Method == MethodIndex.Invalid || outer.Method == startupMethod ||
+                target.Context.Depth != outer.Context.Depth + 1)
+            {
+                return false;
+            }
+
+            int matchingBodies = 0;
+            for (int i = targetIndex + 1; i <= kickoffIndex; i++)
+            {
+                StitchedFrame frame = frames[i];
+                if (frame.Origin != StitchedFrameOrigin.Sync ||
+                    frame.Method == MethodIndex.Invalid ||
+                    !ReferenceEquals(frame.Context, outer.Context) ||
+                    context.ClassifyBoundary(frame.CodeAddress).IsBoundary)
+                {
+                    return false;
+                }
+                if (frame.Method == startupMethod)
+                {
+                    matchingBodies++;
+                }
+            }
+            return matchingBodies == 1;
         }
 
         private static bool IsMatchingV1Kickoff(
@@ -347,6 +601,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// context, with no intervening async boundary. The entire owned prefix, including initialization, GC,
     /// unresolved callees, and callbacks, is attributed to the logical anchor; this is overhead attribution, not
     /// proof that an application's suspended body was executing. Rejected profiler prefixes remain protected too.
+    /// CreateDispatcher and a resolved await-registration spine directly above a physical current V1 method
+    /// also establish ownership of the dispatcher's callees, without requiring their individual names.
     /// Profiles recognize the entry spine; activation ownership and required dispatcher evidence remain shared.
     /// </para>
     /// <para>
@@ -497,6 +753,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 candidate |= frame.SyncFrameKind == StitchSyncFrameKind.AsyncProfilerCallstackCapture ||
                              frame.SyncFrameKind == StitchSyncFrameKind.AsyncProfilerCallstackEmission ||
                              frame.SyncFrameKind == StitchSyncFrameKind.AsyncProfilerContextResume;
+                // A sampled CreateDispatcher already has individual-helper cleanup; its callees need atomic ownership.
+                candidate |= i > 0 &&
+                             frame.SyncFrameKind == StitchSyncFrameKind.V1DispatcherCreationInfrastructure;
             }
             if (!candidate)
             {
