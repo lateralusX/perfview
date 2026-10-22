@@ -295,16 +295,14 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// framework filtering: it targets known helpers owned by System.Private.CoreLib. Disabled by default because
         /// these implementation details are not part of the async-profiler contract.
         /// Before individual-helper cleanup, it atomically folds fully resolved CoreLib resumption bridges from
-        /// a matched async activation to <c>ThreadPoolWorkQueue.Dispatch</c>, retaining that dispatch anchor.
-        /// V1 requires a verified dispatcher boundary; V2 also requires a physically matched current async method.
+        /// a verified async activation to <c>ThreadPoolWorkQueue.Dispatch</c>, retaining that dispatch anchor.
+        /// V1 requires a verified dispatcher boundary; V2 requires a physically matched current async method
+        /// or a resolved structurally verified dispatch target.
         /// Bridges require a runtime-profile completion pair (adjacent
         /// <c>Task.RunContinuations -&gt; Task.TrySetResult</c> under the common rules). Interrupted,
-        /// unresolved, or non-CoreLib candidates remain protected from individual-helper cleanup. An exact,
-        /// resolved <c>Task.RunContinuations -&gt; Task.TrySetResult -&gt; TaskCompletionSource.SetResult</c>
-        /// chain under the common rules, or its selected profile's corresponding layout,
-        /// directly below a verified root activation can still be removed independently, preserving
-        /// application callbacks and the rest of the rejected bridge. The same chain is also removed outside
-        /// protected candidates.
+        /// unresolved, non-CoreLib, or unverified candidates remain intact and protected from all subsequent
+        /// helper cleanup, including completion-chain removal. Exact completion chains can still be removed
+        /// independently outside protected candidates.
         /// A resolved CoreLib profiler <c>Resume</c> immediately above a verified V1 dispatcher or physically
         /// matched current/completing async method or V1 box carrier establishes ownership of the synchronous
         /// leaf-side prefix.

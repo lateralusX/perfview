@@ -486,8 +486,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// Enabled presentation transforms may subsequently normalize that layout.</summary>
         public int V2SyncLayoutUsed;
 
-        /// <summary>V2 samples where the conservative presentation transform dropped a sampled-leaf continuation
-        /// wrapper, leaving its indexed target or the retained dispatch plumbing as the leaf.</summary>
+        /// <summary>V2 sampled-leaf continuation wrappers consumed by structural dispatch-target projection
+        /// or dropped from a retained synchronous layout by conservative presentation.</summary>
         public int V2LeafWrapperDropped;
 
         /// <summary>V2 dispatch-continuation plumbing frames (<c>InstrumentedDispatchContinuations</c> /
@@ -1107,14 +1107,17 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                                 syncLeafToRoot[i], segment));
                 }
 
-                // Retain sampled dispatch machinery separately from its known logical target. Neither a V1
-                // dispatcher nor a sampled V2 wrapper proves that the application body is physically executing.
-                // A V1 completing anchor replaces the boundary, but its next target is still not running.
+                // A known V2 target replaces its sampled wrapper; V1 retains its dispatcher as physical evidence.
+                // Neither target claims that the application body is physically executing.
                 if (boundaryFound && (kind == AsyncCallstackKind.StateMachineAsync || boundaryPos == 0) &&
                     !fullyCompleted && currentSyncPos < 0 && completed < frames.FrameCount &&
                     (frames.CodeAddressAt(completed) != CodeAddressIndex.Invalid || frames.MethodIdAt(completed) != 0))
                 {
-                    if (completingSyncPos < 0)
+                    if (kind == AsyncCallstackKind.RuntimeAsync)
+                    {
+                        diagnostics.V2LeafWrapperDropped++;
+                    }
+                    else if (completingSyncPos < 0)
                     {
                         output.Add(StitchedFrame.CreateSync(syncLeafToRoot[boundaryPos], segment));
                     }

@@ -2953,7 +2953,7 @@ namespace TraceEventTests
         [Theory]
         [InlineData(false)]
         [InlineData(true)]
-        public void V2_WrapperIsLeaf_ProjectsDispatchTargetForPresentationPipeline(bool methodEvents)
+        public void V2_WrapperIsLeaf_ConsumesWrapperAndProjectsDispatchTarget(bool methodEvents)
         {
             var s = new Scenario();
             if (methodEvents)
@@ -2975,25 +2975,24 @@ namespace TraceEventTests
             StitchResult result = s.Run(sync, new[] { seg });
 
             Assert.Equal(
-                new[] { Scenario.CA(80), Scenario.CA(300), Scenario.CA(301), Scenario.CA(82), Scenario.CA(83) },
+                new[] { Scenario.CA(300), Scenario.CA(301), Scenario.CA(82), Scenario.CA(83) },
                 result.Frames.Select(f => f.CodeAddress));
-            Assert.Equal(StitchedFrameOrigin.Sync, result.Frames[0].Origin);
+            Assert.Equal(StitchedFrameOrigin.AsyncDispatchTarget, result.Frames[0].Origin);
             Assert.Same(seg, result.Frames[0].Context);
-            Assert.Equal(StitchedFrameOrigin.AsyncDispatchTarget, result.Frames[1].Origin);
-            Assert.Equal(StitchedFramePresentation.Native, result.Frames[1].Presentation);
-            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[2].Origin);
+            Assert.Equal(StitchedFramePresentation.Native, result.Frames[0].Presentation);
+            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
             Assert.DoesNotContain(result.Frames, frame => frame.Origin == StitchedFrameOrigin.AsyncCurrent);
             Assert.Equal(0, result.Diagnostics.V2SyncLayoutUsed);
-            Assert.Equal(0, result.Diagnostics.V2LeafWrapperDropped);
+            Assert.Equal(1, result.Diagnostics.V2LeafWrapperDropped);
             Assert.Equal(1, result.Diagnostics.SegmentsProcessed);
             Assert.Equal(1, result.Diagnostics.V2PlumbingFramesCollapsed);
             AsyncSegmentPlacement placement = Assert.Single(result.SegmentPlacements);
             Assert.Same(seg, placement.Activation);
             Assert.Equal(0, placement.LeafIndex);
-            Assert.Equal(3, placement.RootIndexExclusive);
+            Assert.Equal(2, placement.RootIndexExclusive);
 
             StitchResult presented = new AsyncStackTransformPipeline().Transform(result, new[] { seg }, Qpc, s.Classify);
-            Assert.Equal(result.Frames.Skip(1), presented.Frames);
+            Assert.Equal(result.Frames, presented.Frames);
             Assert.Equal(1, presented.Diagnostics.V2LeafWrapperDropped);
         }
 
@@ -3044,12 +3043,11 @@ namespace TraceEventTests
             Assert.False(target.IsStateMachineBoxCarrier);
             Assert.Same(segment, target.Context);
             Assert.Equal(
-                new[] { Scenario.CA(80) }
-                    .Concat(addresses.Skip(expectedIndex).Select(address =>
-                        address < 0 ? CodeAddressIndex.Invalid : Scenario.CA(address)))
+                addresses.Skip(expectedIndex).Select(address =>
+                        address < 0 ? CodeAddressIndex.Invalid : Scenario.CA(address))
                     .Concat(new[] { Scenario.CA(999) }),
                 result.Frames.Select(frame => frame.CodeAddress));
-            Assert.All(result.Frames.Skip(2).Take(addresses.Length - expectedIndex - 1),
+            Assert.All(result.Frames.Skip(1).Take(addresses.Length - expectedIndex - 1),
                 frame => Assert.Equal(StitchedFrameOrigin.AsyncRemaining, frame.Origin));
             Assert.DoesNotContain(result.Frames, frame => frame.Origin == StitchedFrameOrigin.AsyncCurrent);
             Assert.Equal(1, result.Diagnostics.SegmentsProcessed);
@@ -3260,7 +3258,7 @@ namespace TraceEventTests
                 s.Boundary(81, DispatchContinuation),
                 s.Boundary(82, DispatchContinuation),
             };
-            var expected = new List<CodeAddressIndex> { Scenario.CA(80), Scenario.CA(901), Scenario.CA(902) };
+            var expected = new List<CodeAddressIndex> { Scenario.CA(901), Scenario.CA(902) };
             for (int i = 2; i >= 0; i--)
             {
                 int address = 100 + i * 10;
@@ -3295,26 +3293,25 @@ namespace TraceEventTests
             Assert.Equal(0, result.Diagnostics.BoundariesNotFound);
             Assert.Equal(0, result.Diagnostics.AdjacencyMismatches);
             Assert.Equal(0, result.Diagnostics.IncompleteAsyncRootsNormalized);
-            Assert.Equal(StitchedFrameOrigin.Sync, result.Frames[0].Origin);
-            Assert.Equal(StitchedFrameOrigin.AsyncDispatchTarget, result.Frames[1].Origin);
-            Assert.Equal(1, result.Frames[1].SegmentFrameIndex);
-            Assert.Same(segments[3], result.Frames[1].Context);
-            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[2].Origin);
+            Assert.Equal(StitchedFrameOrigin.AsyncDispatchTarget, result.Frames[0].Origin);
+            Assert.Equal(1, result.Frames[0].SegmentFrameIndex);
+            Assert.Same(segments[3], result.Frames[0].Context);
+            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
             Assert.Equal(4, result.SegmentPlacements.Count);
             Assert.Same(segments[3], result.SegmentPlacements[0].Activation);
             Assert.Equal(0, result.SegmentPlacements[0].LeafIndex);
-            Assert.Equal(3, result.SegmentPlacements[0].RootIndexExclusive);
+            Assert.Equal(2, result.SegmentPlacements[0].RootIndexExclusive);
             for (int i = 0; i < 3; i++)
             {
                 AsyncCallStack activation = segments[2 - i];
-                StitchedFrame current = result.Frames[4 + i * 3];
+                StitchedFrame current = result.Frames[3 + i * 3];
                 Assert.Equal(StitchedFrameOrigin.AsyncCurrent, current.Origin);
                 Assert.Equal(1, current.SegmentFrameIndex);
                 Assert.Same(activation, current.Context);
                 AsyncSegmentPlacement placement = result.SegmentPlacements[i + 1];
                 Assert.Same(activation, placement.Activation);
-                Assert.Equal(3 + i * 3, placement.LeafIndex);
-                Assert.Equal(6 + i * 3, placement.RootIndexExclusive);
+                Assert.Equal(2 + i * 3, placement.LeafIndex);
+                Assert.Equal(5 + i * 3, placement.RootIndexExclusive);
             }
         }
 

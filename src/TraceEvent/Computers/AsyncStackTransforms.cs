@@ -31,7 +31,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// <para>
     /// <b>Ordering:</b> the first default conservative pass, before
     /// <see cref="AsyncReentrantHandoffTransform"/> and <see cref="AsyncV1PresentationTransform"/>.
-    /// Structural stitching retains the marker so disabling conservative presentation can expose it.
+    /// Structural stitching consumes the marker when its target is known; synchronous fallback layouts
+    /// retain it when conservative presentation is disabled.
     /// </para>
     /// </remarks>
     internal sealed class AsyncSampledV2WrapperTransform
@@ -40,8 +41,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         {
             List<StitchedFrame> frames = context.Frames;
 
-            // Keep sampled wrapper provenance structurally, including when a logical dispatch target is known.
-            // Removing that one transition frame is presentation-only and intentionally opt-out-able.
+            // Known targets normally consume their wrapper structurally. Normalize any retained marker
+            // in a fallback or caller-assembled layout without changing its logical target.
             if (frames.Count != 0 &&
                 frames[0].Origin == StitchedFrameOrigin.Sync &&
                 context.ClassifyBoundary(frames[0].CodeAddress).Kind ==
@@ -589,10 +590,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// profile), retaining that anchor and historical ancestry.
     /// The complete candidate, including the anchor, must resolve to one captured CoreLib module, contain a profile-recognized
     /// bridge layout (containing adjacent Task.RunContinuations/TrySetResult under the common rules), and have no live-context ownership or V1-dispatcher/V2-wrapper
-    /// boundary. V2 additionally requires a physically matched current method. Rejected candidates stay protected.
-    /// An independently verified root-adjacent RunContinuations/TrySetResult/TaskCompletionSource.SetResult
-    /// chain, or its profile-specific counterpart, may still be removed without consuming an application callback
-    /// or exposing the rest of that bridge.
+    /// boundary. V2 additionally requires a physically matched current method or a resolved structural dispatch target.
+    /// Rejected candidates stay intact and protected, including their completion chains.
     /// </para>
     /// <para>
     /// Next, a resolved CoreLib AsyncProfiler.ResumeAsyncContext.Resume entry spine must establish ownership
@@ -840,37 +839,22 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         private static int CollapseRuntimeResumptionBridge(AsyncStackTransformContext context)
         {
             List<StitchedFrame> frames = context.Frames;
-            if (context.TraceLog == null ||
-                context.Segments.Count == 0 ||
-                context.Diagnostics.SegmentsProcessed != context.Segments.Count ||
-                context.Diagnostics.BoundariesNotFound != 0 ||
-                context.Diagnostics.AdjacencyMismatches != 0)
+            if (context.Segments.Count == 0)
             {
                 return frames.Count;
             }
 
             AsyncCallStack rootContext = context.Segments[0];
             int rootIndex = -1;
-            bool currentMatched = false;
             for (int i = frames.Count - 1; i >= 0; i--)
             {
                 if (ReferenceEquals(frames[i].Context, rootContext) &&
                     frames[i].ContextKind == StitchedFrameContextKind.Active)
                 {
-                    if (rootIndex < 0)
-                    {
-                        rootIndex = i;
-                    }
-                    currentMatched |= frames[i].Origin == StitchedFrameOrigin.AsyncCurrent &&
-                                      frames[i].Method != MethodIndex.Invalid;
+                    rootIndex = i;
+                    break;
                 }
             }
-            if (rootIndex < 0 ||
-                (rootContext.Frames.Kind == AsyncCallstackKind.RuntimeAsync && !currentMatched))
-            {
-                return frames.Count;
-            }
-
             int bridgeStart = rootIndex + 1;
             while (bridgeStart < frames.Count &&
                    frames[bridgeStart].Origin == StitchedFrameOrigin.AsyncContextParent)
@@ -887,6 +871,31 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     break;
                 }
             }
+            if (dispatchIndex == frames.Count && rootIndex >= 0)
+            {
+                for (int i = 0; i <= rootIndex; i++)
+                {
+                    if (context.GetRuntimeProfile(frames[i].CodeAddress).IsRuntimeResumptionAnchor(frames[i]))
+                    {
+                        dispatchIndex = i;
+                        break;
+                    }
+                }
+            }
+            // An unplaced root can still expose a physical bridge candidate. Identify it only for protection.
+            bool rootPlaced = rootIndex >= 0 && bridgeStart <= dispatchIndex;
+            if (!rootPlaced)
+            {
+                bridgeStart = 0;
+                for (int i = 0; i < dispatchIndex; i++)
+                {
+                    if (frames[i].Origin != StitchedFrameOrigin.Sync ||
+                        context.ClassifyBoundary(frames[i].CodeAddress).IsBoundary)
+                    {
+                        bridgeStart = i + 1;
+                    }
+                }
+            }
             int bridgeEnd = dispatchIndex < frames.Count ? dispatchIndex + 1 : frames.Count;
             AsyncRuntimeSequenceMatch bridge = context.MatchRuntimeSequence(
                 AsyncRuntimeSequenceKind.RuntimeResumptionBridge, bridgeStart, bridgeEnd);
@@ -896,20 +905,14 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             // Rejected bridges remain intact; individual-helper cleanup only visits their leaf-ward prefix.
-            if (!bridge.IsMatch || dispatchIndex == frames.Count || bridge.Length != bridgeEnd - bridgeStart)
+            if (!bridge.IsMatch || !rootPlaced || context.TraceLog == null ||
+                dispatchIndex == frames.Count || bridge.Length != bridgeEnd - bridgeStart ||
+                context.Diagnostics.SegmentsProcessed != context.Segments.Count ||
+                context.Diagnostics.BoundariesNotFound != 0 ||
+                context.Diagnostics.AdjacencyMismatches != 0 ||
+                (rootContext.Frames.Kind == AsyncCallstackKind.RuntimeAsync &&
+                 !HasVerifiedAsyncAnchor(context, rootIndex, rootContext)))
             {
-                // The root-adjacent completion chain has independent ownership evidence. Do not consume the
-                // application callback or relax protection of the remaining resumption bridge.
-                AsyncRuntimeSequenceMatch chain = context.MatchRuntimeSequence(
-                    AsyncRuntimeSequenceKind.TaskCompletionChain, bridgeStart, dispatchIndex);
-                if (dispatchIndex < frames.Count && chain.IsMatch &&
-                    context.Diagnostics.V1CompletionAlignmentAmbiguous == 0 &&
-                    HasVerifiedAsyncAnchor(context, rootIndex, rootContext) &&
-                    IsUnassignedSyncSpan(frames, bridgeStart, chain.Length))
-                {
-                    frames.RemoveRange(bridgeStart, chain.Length);
-                    context.Diagnostics.AsyncInfrastructureFramesCollapsed += chain.Length;
-                }
                 return bridgeStart;
             }
             for (int i = bridgeStart; i <= dispatchIndex; i++)
@@ -932,18 +935,6 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             context.Diagnostics.AsyncInfrastructureFramesCollapsed += count;
             context.Diagnostics.RuntimeResumptionBridgeFramesCollapsed += count;
             return frames.Count;
-        }
-
-        private static bool IsUnassignedSyncSpan(List<StitchedFrame> frames, int start, int count)
-        {
-            for (int i = start; i < start + count; i++)
-            {
-                if (frames[i].Origin != StitchedFrameOrigin.Sync || frames[i].Context != null)
-                {
-                    return false;
-                }
-            }
-            return true;
         }
 
         #endregion
