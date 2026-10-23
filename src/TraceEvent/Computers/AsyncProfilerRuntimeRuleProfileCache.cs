@@ -14,25 +14,25 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// runtime flavor without replaying events or consulting local binaries. A module shared by processes with
     /// different or unknown flavors uses common rules, as does a process containing conflicting engine flavors.
     /// </summary>
-    internal sealed class AsyncRuntimeRuleProfileCache
+    internal sealed class AsyncProfilerRuntimeRuleProfileCache
     {
-        public AsyncRuntimeRuleProfileCache(TraceModuleFiles moduleFiles)
+        public AsyncProfilerRuntimeRuleProfileCache(TraceModuleFiles moduleFiles)
         {
             m_moduleFiles = moduleFiles ?? throw new ArgumentNullException(nameof(moduleFiles));
         }
 
         /// <summary>Gets the rules for a captured module, including a native image linked to its IL module.</summary>
-        public AsyncRuntimeRuleProfile GetProfile(ModuleFileIndex moduleIndex)
+        public AsyncProfilerRuntimeRuleProfile GetProfile(ModuleFileIndex moduleIndex)
         {
-            if (m_profiles.TryGetValue(moduleIndex, out AsyncRuntimeRuleProfile profile))
+            if (m_profiles.TryGetValue(moduleIndex, out AsyncProfilerRuntimeRuleProfile profile))
             {
                 return profile;
             }
             TraceModuleFile module = m_moduleFiles[moduleIndex];
             if (!IsHostModule(module))
             {
-                m_profiles.Add(moduleIndex, AsyncRuntimeRuleProfile.Common);
-                return AsyncRuntimeRuleProfile.Common;
+                m_profiles.Add(moduleIndex, AsyncProfilerRuntimeRuleProfile.Common);
+                return AsyncProfilerRuntimeRuleProfile.Common;
             }
             module = module.ManagedModule ?? module;
             ModuleFileIndex canonicalIndex = module.ModuleFileIndex;
@@ -43,7 +43,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     m_runtimeFlavors = GetRuntimeFlavors();
                 }
                 m_runtimeFlavors.TryGetValue(canonicalIndex, out RuntimeSku flavor);
-                profile = AsyncRuntimeRuleProfile.Select(module.FileVersion, module.ProductVersion, flavor);
+                profile = AsyncProfilerRuntimeRuleProfile.Select(module.FileVersion, module.ProductVersion, flavor);
                 m_profiles.Add(canonicalIndex, profile);
             }
             if (moduleIndex != canonicalIndex)
@@ -57,13 +57,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// Selects whole presentation stages from a captured process, including samples whose runtime frames
         /// were removed structurally. Conflicting CoreLib profiles never select one version arbitrarily.
         /// </summary>
-        public AsyncRuntimeRuleProfile GetProcessProfile(ProcessIndex processIndex)
+        public AsyncProfilerRuntimeRuleProfile GetProcessProfile(ProcessIndex processIndex)
         {
             if (processIndex == ProcessIndex.Invalid)
             {
-                return AsyncRuntimeRuleProfile.Common;
+                return AsyncProfilerRuntimeRuleProfile.Common;
             }
-            if (!m_processProfiles.TryGetValue(processIndex, out AsyncRuntimeRuleProfile profile))
+            if (!m_processProfiles.TryGetValue(processIndex, out AsyncProfilerRuntimeRuleProfile profile))
             {
                 foreach (TraceLoadedModule loaded in m_moduleFiles.Log.Processes[processIndex].LoadedModules)
                 {
@@ -71,15 +71,15 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     {
                         continue;
                     }
-                    AsyncRuntimeRuleProfile current = GetProfile(loaded.ModuleFile.ModuleFileIndex);
+                    AsyncProfilerRuntimeRuleProfile current = GetProfile(loaded.ModuleFile.ModuleFileIndex);
                     if (profile != null && !ReferenceEquals(profile, current))
                     {
-                        profile = AsyncRuntimeRuleProfile.Common;
+                        profile = AsyncProfilerRuntimeRuleProfile.Common;
                         break;
                     }
                     profile = current;
                 }
-                profile = profile ?? AsyncRuntimeRuleProfile.Common;
+                profile = profile ?? AsyncProfilerRuntimeRuleProfile.Common;
                 m_processProfiles.Add(processIndex, profile);
             }
             return profile;
@@ -88,9 +88,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <summary>Checks captured module identity rather than accepting an untrusted method-name prefix.</summary>
         public static bool IsHostModule(TraceModuleFile module) =>
             module != null &&
-            (string.Equals(module.Name, AsyncStitchBoundary.HostModuleName, StringComparison.OrdinalIgnoreCase) ||
+            (string.Equals(module.Name, AsyncProfilerCallStackStitchBoundary.HostModuleName, StringComparison.OrdinalIgnoreCase) ||
              (module.ManagedModule != null &&
-              string.Equals(module.ManagedModule.Name, AsyncStitchBoundary.HostModuleName, StringComparison.OrdinalIgnoreCase)));
+              string.Equals(module.ManagedModule.Name, AsyncProfilerCallStackStitchBoundary.HostModuleName, StringComparison.OrdinalIgnoreCase)));
 
         #region private
 
@@ -159,10 +159,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         private readonly TraceModuleFiles m_moduleFiles;
-        private readonly Dictionary<ModuleFileIndex, AsyncRuntimeRuleProfile> m_profiles =
-            new Dictionary<ModuleFileIndex, AsyncRuntimeRuleProfile>();
-        private readonly Dictionary<ProcessIndex, AsyncRuntimeRuleProfile> m_processProfiles =
-            new Dictionary<ProcessIndex, AsyncRuntimeRuleProfile>();
+        private readonly Dictionary<ModuleFileIndex, AsyncProfilerRuntimeRuleProfile> m_profiles =
+            new Dictionary<ModuleFileIndex, AsyncProfilerRuntimeRuleProfile>();
+        private readonly Dictionary<ProcessIndex, AsyncProfilerRuntimeRuleProfile> m_processProfiles =
+            new Dictionary<ProcessIndex, AsyncProfilerRuntimeRuleProfile>();
         private Dictionary<ModuleFileIndex, RuntimeSku> m_runtimeFlavors;
 
         #endregion

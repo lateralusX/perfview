@@ -250,14 +250,14 @@ namespace TraceEventTests
 
         public override void WriteHeaders() => WriteHeaders(null, 6, 0);
 
-        public void WriteHeaders(Dictionary<string,string> keyValues, int majorVersion = 6, int minorVersion = 0)
+        public void WriteHeaders(Dictionary<string,string> keyValues, int majorVersion = 6, int minorVersion = 0, long syncTimeQpc = 0)
         {
             if(keyValues == null)
             {
                 keyValues = new Dictionary<string, string>();
             }
             _writer.WriteNetTraceHeaderV6OrGreater(majorVersion, minorVersion);
-            _writer.WriteTraceBlockV6OrGreater(keyValues);
+            _writer.WriteTraceBlockV6OrGreater(keyValues, syncTimeQpc);
         }
 
         public override void WriteMetadataBlock(params EventMetadata[] metadataBlobs)
@@ -487,11 +487,11 @@ namespace TraceEventTests
             });
         }
 
-        public static void WriteTraceBlockV6OrGreater(this BinaryWriter writer, Dictionary<string,string> keyValues)
+        public static void WriteTraceBlockV6OrGreater(this BinaryWriter writer, Dictionary<string,string> keyValues, long syncTimeQpc = 0)
         {
             writer.WriteTraceBlockV6OrGreater(
                 new DateTime(2025, 2, 3, 4, 5, 6),
-                syncTimeQpc: 0,
+                syncTimeQpc: syncTimeQpc,
                 qpcFrequency: 1000,
                 pointerSize: 8,
                 keyValues);

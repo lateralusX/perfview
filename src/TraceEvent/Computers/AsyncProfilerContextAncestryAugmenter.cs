@@ -5,9 +5,6 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 
-using Microsoft.Diagnostics.Tracing.Etlx;
-using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
-
 namespace Microsoft.Diagnostics.Tracing.Computers
 {
     /// <summary>
@@ -15,20 +12,20 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// its parent activation identity; the instance owns reusable scratch buffers because it runs on the CPU-sample
     /// hot path.
     /// </summary>
-    internal sealed class AsyncContextAncestryAugmenter
+    internal sealed class AsyncProfilerContextAncestryAugmenter
     {
         internal const int DefaultMaximumDepth = 64;
         private const int ParentCacheSize = 256;
 
         internal bool Prepare(
-            AsyncCallStacksIndex index,
-            IReadOnlyList<AsyncCallStack> activeSegments)
+            AsyncProfilerCallStacksIndex index,
+            IReadOnlyList<AsyncProfilerCallStack> activeSegments)
         {
             for (int i = activeSegments.Count - 1; i >= 0; i--)
             {
-                AsyncCallStack child = activeSegments[i];
+                AsyncProfilerCallStack child = activeSegments[i];
                 if (!TryGetParent(
-                    index, child, out AsyncCallStack parent, out _))
+                    index, child, out AsyncProfilerCallStack parent, out _))
                 {
                     continue;
                 }
@@ -46,10 +43,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         internal void Augment(
-            AsyncCallStacksIndex index,
-            IReadOnlyList<AsyncCallStack> activeSegments,
-            IReadOnlyList<AsyncSegmentPlacement> placements,
-            List<StitchedFrame> frames,
+            AsyncProfilerCallStacksIndex index,
+            IReadOnlyList<AsyncProfilerCallStack> activeSegments,
+            IReadOnlyList<AsyncProfilerSegmentPlacement> placements,
+            List<AsyncProfilerStitchedFrame> frames,
             int maximumDepth)
         {
             if (index == null) throw new ArgumentNullException(nameof(index));
@@ -68,7 +65,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             // invalidate the still-pending lower insertion indices.
             for (int placementIndex = placements.Count - 1; placementIndex >= 0; placementIndex--)
             {
-                AsyncSegmentPlacement placement = placements[placementIndex];
+                AsyncProfilerSegmentPlacement placement = placements[placementIndex];
                 CollectMissingParents(index, placement.Activation, maximumDepth);
                 if (m_chain.Count == 0)
                 {
@@ -101,19 +98,19 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         private void CollectMissingParents(
-            AsyncCallStacksIndex index,
-            AsyncCallStack activation,
+            AsyncProfilerCallStacksIndex index,
+            AsyncProfilerCallStack activation,
             int maximumDepth)
         {
             m_chain.Clear();
             m_visited.Clear();
             m_visited.Add(new ActivationIdentity(activation));
 
-            AsyncCallStack child = activation;
+            AsyncProfilerCallStack child = activation;
             for (int depth = 0; depth < maximumDepth; depth++)
             {
                 if (!TryGetParent(
-                    index, child, out AsyncCallStack parent, out long childCreationQpc))
+                    index, child, out AsyncProfilerCallStack parent, out long childCreationQpc))
                 {
                     break;
                 }
@@ -131,9 +128,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         private bool TryGetParent(
-            AsyncCallStacksIndex index,
-            AsyncCallStack child,
-            out AsyncCallStack parent,
+            AsyncProfilerCallStacksIndex index,
+            AsyncProfilerCallStack child,
+            out AsyncProfilerCallStack parent,
             out long parentQpc)
         {
             var identity = new ActivationIdentity(child);
@@ -149,7 +146,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 }
             }
 
-            bool found = index.TryGetParentAsyncCallStack(
+            bool found = index.TryGetParentCallStack(
                 child, m_parentCandidates, out parent, out parentQpc);
             if (found)
             {
@@ -164,17 +161,17 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         private static int GetParentCacheIndex(
-            AsyncCallStacksIndex index,
+            AsyncProfilerCallStacksIndex index,
             ActivationIdentity identity) =>
             (identity.GetHashCode() ^ RuntimeHelpers.GetHashCode(index)) &
             (ParentCacheSize - 1);
 
         private void CollectParentFrames(
-            AsyncCallStacksIndex index,
+            AsyncProfilerCallStacksIndex index,
             ParentAtCreation parentAtCreation)
         {
             m_parentFrames.Clear();
-            AsyncCallStack parent = parentAtCreation.Parent;
+            AsyncProfilerCallStack parent = parentAtCreation.Parent;
             int completed = parent.GetExceptionCompletedFrameCount(parentAtCreation.CreationQpc);
             if (index.MethodCompletionObserved(parent))
             {
@@ -195,7 +192,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             for (int frameIndex = completed; frameIndex < frameCount; frameIndex++)
             {
                 m_parentFrames.Add(
-                    StitchedFrame.CreateAsyncContextParent(parent, frameIndex));
+                    AsyncProfilerStitchedFrame.CreateAsyncContextParent(parent, frameIndex));
             }
         }
 
@@ -214,7 +211,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         private static bool Contains(
-            IReadOnlyList<AsyncCallStack> activations,
+            IReadOnlyList<AsyncProfilerCallStack> activations,
             ActivationIdentity candidate)
         {
             for (int i = 0; i < activations.Count; i++)
@@ -230,26 +227,26 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         private readonly List<ActivationIdentity> m_active = new List<ActivationIdentity>();
         private readonly List<ActivationIdentity> m_visited = new List<ActivationIdentity>();
         private readonly List<ParentAtCreation> m_chain = new List<ParentAtCreation>();
-        private readonly List<AsyncCallStack> m_parentCandidates = new List<AsyncCallStack>();
-        private readonly List<StitchedFrame> m_insertion = new List<StitchedFrame>();
-        private readonly List<StitchedFrame> m_parentFrames = new List<StitchedFrame>();
+        private readonly List<AsyncProfilerCallStack> m_parentCandidates = new List<AsyncProfilerCallStack>();
+        private readonly List<AsyncProfilerStitchedFrame> m_insertion = new List<AsyncProfilerStitchedFrame>();
+        private readonly List<AsyncProfilerStitchedFrame> m_parentFrames = new List<AsyncProfilerStitchedFrame>();
         private ParentCacheEntry[] m_parentCache;
 
         private readonly struct ParentAtCreation
         {
-            internal ParentAtCreation(AsyncCallStack parent, long creationQpc)
+            internal ParentAtCreation(AsyncProfilerCallStack parent, long creationQpc)
             {
                 Parent = parent;
                 CreationQpc = creationQpc;
             }
 
-            internal AsyncCallStack Parent { get; }
+            internal AsyncProfilerCallStack Parent { get; }
             internal long CreationQpc { get; }
         }
 
         private readonly struct ActivationIdentity : IEquatable<ActivationIdentity>
         {
-            internal ActivationIdentity(AsyncCallStack activation)
+            internal ActivationIdentity(AsyncProfilerCallStack activation)
             {
                 Thread = activation.Thread;
                 DispatcherId = activation.DispatcherId;
@@ -274,7 +271,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 }
             }
 
-            private readonly AsyncThreadKey Thread;
+            private readonly AsyncProfilerThreadKey Thread;
             private readonly ulong DispatcherId;
             private readonly long StartQpc;
         }
@@ -282,9 +279,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         private readonly struct ParentCacheEntry
         {
             internal ParentCacheEntry(
-                AsyncCallStacksIndex index,
+                AsyncProfilerCallStacksIndex index,
                 ActivationIdentity identity,
-                AsyncCallStack parent,
+                AsyncProfilerCallStack parent,
                 long parentQpc)
             {
                 Index = index;
@@ -294,14 +291,14 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             internal bool Matches(
-                AsyncCallStacksIndex index,
+                AsyncProfilerCallStacksIndex index,
                 ActivationIdentity identity) =>
                 ReferenceEquals(Index, index) && Identity.Equals(identity);
 
-            internal AsyncCallStack Parent { get; }
+            internal AsyncProfilerCallStack Parent { get; }
             internal long ParentQpc { get; }
 
-            private AsyncCallStacksIndex Index { get; }
+            private AsyncProfilerCallStacksIndex Index { get; }
             private ActivationIdentity Identity { get; }
         }
     }

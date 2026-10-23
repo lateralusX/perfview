@@ -11,7 +11,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
     /// Ids 1-10 are the V2 (RuntimeAsync) instrumentation, ids 11-19 are the V1 (StateMachineAsync)
     /// instrumentation, and ids 20-23 are neutral profiler book-keeping events.
     /// </summary>
-    public enum AsyncEventID : byte
+    internal enum AsyncEventID : byte
     {
         // V2 (RuntimeAsync) events.
         CreateRuntimeAsyncContext = 1,
@@ -47,7 +47,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
     /// The width of the length prefix that precedes a sub-event payload in the buffer. Matches the
     /// runtime's <c>EventManifestEntry.PayloadLengthFieldSize</c>.
     /// </summary>
-    public enum PayloadLengthFieldSize : byte
+    internal enum PayloadLengthFieldSize : byte
     {
         None = 0,
         Byte = 1,
@@ -58,9 +58,9 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
     /// The instrumentation family that produced an async callstack. Both families encode native code
     /// instruction pointers: V2 captures runtime-async continuation IPs; V1 captures state-machine
     /// <c>MoveNext</c> body IPs plus raw signed compiler states. V1/V2 instrumentation is independent of
-    /// the buffer layout version and the per-event schema versions in <see cref="AsyncProfilerManifest"/>.
+    /// the buffer layout version and the per-event schema versions in <see cref="Manifest"/>.
     /// </summary>
-    public enum AsyncCallstackKind : byte
+    internal enum AsyncCallstackKind : byte
     {
         /// <summary>V2 runtime-async instrumentation.</summary>
         RuntimeAsync = 0,
@@ -74,7 +74,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
     /// the runtime; a buffer's <c>AsyncProfilerMetadata</c> sub-event carries the live manifest for
     /// forward-version negotiation.
     /// </summary>
-    public static class AsyncEventInfo
+    internal static class AsyncEventInfo
     {
         // Indexed by (byte)AsyncEventID - 1; dense and ordered by ascending id.
         private static readonly PayloadLengthFieldSize[] s_payloadLengthFieldSizes =
@@ -149,12 +149,12 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
     /// manifest instance must persist across buffers from the same process instance. The caller owns this
     /// state: <see cref="Computers.AsyncProfilerComputer"/> maintains one manifest per process instance,
     /// while direct decoder callers must pass their retained manifest to
-    /// <see cref="AsyncProfilerTraceEventParser.ParseBuffer(byte[], AsyncProfilerManifest, IAsyncProfilerSubEventSink)"/>.
+    /// <see cref="AsyncProfilerTraceEventParser.ParseBuffer(byte[], Manifest, ISubEventSink)"/>.
     /// The overload without a manifest creates fresh defaults for each call. Do not share a manifest between
     /// different process instances.
     /// </para>
     /// </summary>
-    public sealed class AsyncProfilerManifest
+    internal sealed class Manifest
     {
         // Indexed by the raw byte event id (0..255) so the manifest can describe framing for future ids the
         // parser does not statically know about.
@@ -162,7 +162,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
         private readonly byte[] _version = new byte[256];
 
         /// <summary>Creates a manifest seeded with the known version-1 event layouts.</summary>
-        public AsyncProfilerManifest()
+        public Manifest()
         {
             // Seed with the built-in v1 layout for the ids we statically know (1..23). Unknown ids default
             // to no payload-length prefix and version 0 until a metadata manifest describes them.
@@ -209,7 +209,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
     /// The fixed-size header at the start of every <c>AsyncEvents</c> buffer (37 bytes, little-endian).
     /// Identifies the emitting OS thread and the timestamp window the batched sub-events fall within.
     /// </summary>
-    public readonly struct AsyncProfilerBufferHeader
+    internal readonly struct BufferHeader
     {
         /// <summary>The size (in bytes) of the serialized header.</summary>
         public const int Size = 37;
@@ -222,7 +222,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
         public readonly long StartTimestampQpc;
         public readonly long EndTimestampQpc;
 
-        public AsyncProfilerBufferHeader(byte version, uint totalSize, uint asyncThreadContextId, ulong osThreadId, uint eventCount, long startTimestampQpc, long endTimestampQpc)
+        public BufferHeader(byte version, uint totalSize, uint asyncThreadContextId, ulong osThreadId, uint eventCount, long startTimestampQpc, long endTimestampQpc)
         {
             Version = version;
             TotalSize = totalSize;
@@ -234,7 +234,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
         }
 
         /// <summary>Reads and validates the buffer header. Returns false for a truncated or unsupported buffer.</summary>
-        public static bool TryRead(byte[] buffer, out AsyncProfilerBufferHeader header)
+        public static bool TryRead(byte[] buffer, out BufferHeader header)
         {
             header = default;
             if (buffer == null || buffer.Length < Size || buffer[0] != 1)
@@ -243,14 +243,14 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
             }
 
             int i = 1;
-            uint totalSize = AsyncProfilerReader.ReadUInt32LE(buffer, ref i);
-            uint asyncThreadContextId = AsyncProfilerReader.ReadUInt32LE(buffer, ref i);
-            ulong osThreadId = AsyncProfilerReader.ReadUInt64LE(buffer, ref i);
-            uint eventCount = AsyncProfilerReader.ReadUInt32LE(buffer, ref i);
-            ulong startTs = AsyncProfilerReader.ReadUInt64LE(buffer, ref i);
-            ulong endTs = AsyncProfilerReader.ReadUInt64LE(buffer, ref i);
+            uint totalSize = BufferReader.ReadUInt32LE(buffer, ref i);
+            uint asyncThreadContextId = BufferReader.ReadUInt32LE(buffer, ref i);
+            ulong osThreadId = BufferReader.ReadUInt64LE(buffer, ref i);
+            uint eventCount = BufferReader.ReadUInt32LE(buffer, ref i);
+            ulong startTs = BufferReader.ReadUInt64LE(buffer, ref i);
+            ulong endTs = BufferReader.ReadUInt64LE(buffer, ref i);
 
-            header = new AsyncProfilerBufferHeader(buffer[0], totalSize, asyncThreadContextId, osThreadId, eventCount, (long)startTs, (long)endTs);
+            header = new BufferHeader(buffer[0], totalSize, asyncThreadContextId, osThreadId, eventCount, (long)startTs, (long)endTs);
             return true;
         }
     }
@@ -259,7 +259,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
     /// Low-level readers for the buffer's little-endian fixed-width fields and its LEB128/zigzag
     /// compressed integers. All compressed readers advance the caller's <c>index</c> and return false on truncation.
     /// </summary>
-    public static class AsyncProfilerReader
+    internal static class BufferReader
     {
         public static ushort ReadUInt16LE(byte[] buffer, ref int index)
         {
@@ -350,11 +350,11 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
     }
 
     /// <summary>A sub-event describing an async-context lifecycle transition (Create/Resume/Suspend/Complete).</summary>
-    public readonly struct AsyncContextEvent
+    internal readonly struct AsyncContextEvent
     {
         public readonly AsyncEventID EventId;
         public readonly long TimestampQpc;
-        public readonly AsyncProfilerBufferHeader Header;
+        public readonly BufferHeader Header;
 
         /// <summary>The parent dispatcher id (only meaningful for Create events; 0 otherwise).</summary>
         public readonly ulong ParentDispatcherId;
@@ -362,7 +362,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
         /// <summary>The dispatcher id (meaningful for Create/Resume; 0 for Suspend/Complete which are implicit on the current context).</summary>
         public readonly ulong DispatcherId;
 
-        public AsyncContextEvent(AsyncEventID eventId, long timestampQpc, in AsyncProfilerBufferHeader header, ulong parentDispatcherId, ulong dispatcherId)
+        public AsyncContextEvent(AsyncEventID eventId, long timestampQpc, in BufferHeader header, ulong parentDispatcherId, ulong dispatcherId)
         {
             EventId = eventId;
             TimestampQpc = timestampQpc;
@@ -377,13 +377,13 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
     }
 
     /// <summary>A sub-event marking that an async method began (Resume) or finished (Complete) running.</summary>
-    public readonly struct AsyncMethodEvent
+    internal readonly struct AsyncMethodEvent
     {
         public readonly AsyncEventID EventId;
         public readonly long TimestampQpc;
-        public readonly AsyncProfilerBufferHeader Header;
+        public readonly BufferHeader Header;
 
-        public AsyncMethodEvent(AsyncEventID eventId, long timestampQpc, in AsyncProfilerBufferHeader header)
+        public AsyncMethodEvent(AsyncEventID eventId, long timestampQpc, in BufferHeader header)
         {
             EventId = eventId;
             TimestampQpc = timestampQpc;
@@ -396,14 +396,14 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
     }
 
     /// <summary>A sub-event recording that an exception unwound some number of async frames.</summary>
-    public readonly struct AsyncUnwindEvent
+    internal readonly struct AsyncUnwindEvent
     {
         public readonly AsyncEventID EventId;
         public readonly long TimestampQpc;
-        public readonly AsyncProfilerBufferHeader Header;
+        public readonly BufferHeader Header;
         public readonly uint UnwoundFrameCount;
 
-        public AsyncUnwindEvent(AsyncEventID eventId, long timestampQpc, in AsyncProfilerBufferHeader header, uint unwoundFrameCount)
+        public AsyncUnwindEvent(AsyncEventID eventId, long timestampQpc, in BufferHeader header, uint unwoundFrameCount)
         {
             EventId = eventId;
             TimestampQpc = timestampQpc;
@@ -416,13 +416,13 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
     }
 
     /// <summary>A neutral profiler book-keeping sub-event (thread-context / wrapper-index reset).</summary>
-    public readonly struct AsyncNeutralEvent
+    internal readonly struct AsyncNeutralEvent
     {
         public readonly AsyncEventID EventId;
         public readonly long TimestampQpc;
-        public readonly AsyncProfilerBufferHeader Header;
+        public readonly BufferHeader Header;
 
-        public AsyncNeutralEvent(AsyncEventID eventId, long timestampQpc, in AsyncProfilerBufferHeader header)
+        public AsyncNeutralEvent(AsyncEventID eventId, long timestampQpc, in BufferHeader header)
         {
             EventId = eventId;
             TimestampQpc = timestampQpc;
@@ -433,14 +433,14 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
     }
 
     /// <summary>An unrecognized/future sub-event; its payload was skipped using the length prefix.</summary>
-    public readonly struct AsyncUnknownEvent
+    internal readonly struct AsyncUnknownEvent
     {
         public readonly AsyncEventID EventId;
         public readonly long TimestampQpc;
-        public readonly AsyncProfilerBufferHeader Header;
+        public readonly BufferHeader Header;
         public readonly int PayloadLength;
 
-        public AsyncUnknownEvent(AsyncEventID eventId, long timestampQpc, in AsyncProfilerBufferHeader header, int payloadLength)
+        public AsyncUnknownEvent(AsyncEventID eventId, long timestampQpc, in BufferHeader header, int payloadLength)
         {
             EventId = eventId;
             TimestampQpc = timestampQpc;
@@ -456,11 +456,11 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
     /// A <see cref="IsCached"/> callstack (frame count 0) references a previously emitted callstack by
     /// dispatcher id and carries no frame data.
     /// </summary>
-    public readonly struct AsyncCallstackEvent
+    internal readonly struct AsyncCallstackEvent
     {
         public readonly AsyncEventID EventId;
         public readonly long TimestampQpc;
-        public readonly AsyncProfilerBufferHeader Header;
+        public readonly BufferHeader Header;
         public readonly byte ContinuationIndex;
         public readonly byte FrameCount;
         public readonly ulong ParentDispatcherId;
@@ -470,7 +470,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
         /// <summary>Raw V1 compiler states, not IL/native offsets; null for V2.</summary>
         public readonly int[] FrameStates;
 
-        private AsyncCallstackEvent(AsyncEventID eventId, long timestampQpc, in AsyncProfilerBufferHeader header,
+        private AsyncCallstackEvent(AsyncEventID eventId, long timestampQpc, in BufferHeader header,
             byte continuationIndex, byte frameCount, ulong parentDispatcherId, ulong dispatcherId, ulong[] methodIds, int[] frameStates)
         {
             EventId = eventId;
@@ -491,7 +491,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
         /// <summary>True when the callstack references a previously emitted callstack by dispatcher id (no frames inline).</summary>
         public bool IsCached => FrameCount == 0;
 
-        internal static bool TryRead(AsyncEventID eventId, long timestampQpc, in AsyncProfilerBufferHeader header,
+        internal static bool TryRead(AsyncEventID eventId, long timestampQpc, in BufferHeader header,
             byte[] buffer, ref int index, int payloadEnd, out AsyncCallstackEvent result)
         {
             result = default;
@@ -521,7 +521,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
             return true;
         }
 
-        internal static bool TryReadInto(AsyncEventID eventId, long timestampQpc, in AsyncProfilerBufferHeader header,
+        internal static bool TryReadInto(AsyncEventID eventId, long timestampQpc, in BufferHeader header,
             byte[] buffer, ref int index, int payloadEnd, ulong[] methodIds, int[] frameStates, out AsyncCallstackEvent result)
         {
             result = default;
@@ -571,25 +571,25 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
             frameCount = buffer[index++];
 
             if (eventId == AsyncEventID.CreateRuntimeAsyncCallstack &&
-                !AsyncProfilerReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out parentDispatcherId))
+                !BufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out parentDispatcherId))
             {
                 return false;
             }
 
-            return AsyncProfilerReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out dispatcherId);
+            return BufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out dispatcherId);
         }
 
         private static bool TryReadFrames(byte[] buffer, ref int index, int payloadEnd, int frameCount,
             ulong[] methodIds, int[] frameStates)
         {
-            if (!AsyncProfilerReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong currentMethodId))
+            if (!BufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong currentMethodId))
             {
                 return false;
             }
             methodIds[0] = currentMethodId;
             if (frameStates != null)
             {
-                if (!AsyncProfilerReader.TryReadCompressedInt32(buffer, ref index, payloadEnd, out int state0))
+                if (!BufferReader.TryReadCompressedInt32(buffer, ref index, payloadEnd, out int state0))
                 {
                     return false;
                 }
@@ -598,7 +598,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
 
             for (int i = 1; i < frameCount; i++)
             {
-                if (!AsyncProfilerReader.TryReadCompressedInt64(buffer, ref index, payloadEnd, out long delta))
+                if (!BufferReader.TryReadCompressedInt64(buffer, ref index, payloadEnd, out long delta))
                 {
                     return false;
                 }
@@ -607,7 +607,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
 
                 if (frameStates != null)
                 {
-                    if (!AsyncProfilerReader.TryReadCompressedInt32(buffer, ref index, payloadEnd, out int state))
+                    if (!BufferReader.TryReadCompressedInt32(buffer, ref index, payloadEnd, out int state))
                     {
                         return false;
                     }
@@ -620,7 +620,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
     }
 
     /// <summary>A single entry of the per-event manifest carried by an <see cref="AsyncMetadataEvent"/>.</summary>
-    public readonly struct AsyncManifestEntry
+    internal readonly struct AsyncManifestEntry
     {
         public readonly AsyncEventID EventId;
         public readonly byte Version;
@@ -638,10 +638,10 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
     /// The profiler metadata sub-event: the QPC frequency and a QPC/UTC synchronization point (so QPC
     /// timestamps can be mapped to wall-clock time), configuration, and the live per-event manifest.
     /// </summary>
-    public readonly struct AsyncMetadataEvent
+    internal readonly struct AsyncMetadataEvent
     {
         public readonly long TimestampQpc;
-        public readonly AsyncProfilerBufferHeader Header;
+        public readonly BufferHeader Header;
         public readonly ulong QpcFrequency;
         public readonly ulong QpcSync;
         public readonly ulong UtcSync;
@@ -649,7 +649,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
         public readonly byte WrapperCount;
         public readonly AsyncManifestEntry[] Manifest;
 
-        private AsyncMetadataEvent(long timestampQpc, in AsyncProfilerBufferHeader header, ulong qpcFrequency, ulong qpcSync, ulong utcSync, uint eventBufferSize, byte wrapperCount, AsyncManifestEntry[] manifest)
+        private AsyncMetadataEvent(long timestampQpc, in BufferHeader header, ulong qpcFrequency, ulong qpcSync, ulong utcSync, uint eventBufferSize, byte wrapperCount, AsyncManifestEntry[] manifest)
         {
             TimestampQpc = timestampQpc;
             Header = header;
@@ -666,13 +666,13 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
         /// <summary>The synchronization point interpreted as a UTC wall-clock time (utcSync is a Windows FILETIME).</summary>
         public DateTime SyncUtc => DateTime.FromFileTimeUtc((long)UtcSync);
 
-        internal static bool TryRead(long timestampQpc, in AsyncProfilerBufferHeader header, byte[] buffer, ref int index, int payloadEnd, out AsyncMetadataEvent result)
+        internal static bool TryRead(long timestampQpc, in BufferHeader header, byte[] buffer, ref int index, int payloadEnd, out AsyncMetadataEvent result)
         {
             result = default;
-            if (!AsyncProfilerReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong qpcFrequency) ||
-                !AsyncProfilerReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong qpcSync) ||
-                !AsyncProfilerReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong utcSync) ||
-                !AsyncProfilerReader.TryReadCompressedUInt32(buffer, ref index, payloadEnd, out uint eventBufferSize) ||
+            if (!BufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong qpcFrequency) ||
+                !BufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong qpcSync) ||
+                !BufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong utcSync) ||
+                !BufferReader.TryReadCompressedUInt32(buffer, ref index, payloadEnd, out uint eventBufferSize) ||
                 index >= payloadEnd)
             {
                 return false;
@@ -711,14 +711,14 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
     }
 
     /// <summary>A lightweight QPC/UTC re-synchronization point emitted periodically between metadata events.</summary>
-    public readonly struct AsyncSyncClockEvent
+    internal readonly struct AsyncSyncClockEvent
     {
         public readonly long TimestampQpc;
-        public readonly AsyncProfilerBufferHeader Header;
+        public readonly BufferHeader Header;
         public readonly ulong QpcSync;
         public readonly ulong UtcSync;
 
-        public AsyncSyncClockEvent(long timestampQpc, in AsyncProfilerBufferHeader header, ulong qpcSync, ulong utcSync)
+        public AsyncSyncClockEvent(long timestampQpc, in BufferHeader header, ulong qpcSync, ulong utcSync)
         {
             TimestampQpc = timestampQpc;
             Header = header;
@@ -731,14 +731,14 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
     }
 
     /// <summary>Reports a recoverable decode problem in a buffer (truncation, unexpected layout).</summary>
-    public readonly struct AsyncProfilerParseError
+    internal readonly struct ParseError
     {
         /// <summary>The decoding failure.</summary>
         public readonly string Message;
         /// <summary>The byte offset of the failure within the buffer.</summary>
         public readonly int ByteOffset;
         /// <summary>The decoded header, or null when the header could not be read.</summary>
-        public readonly AsyncProfilerBufferHeader? BufferHeader;
+        public readonly BufferHeader? BufferHeader;
         /// <summary>
         /// The failing sub-event's QPC, or the last decoded QPC when its timestamp is unavailable.
         /// Null when the header could not be read.
@@ -748,8 +748,8 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
         public readonly AsyncEventID? EventId;
 
         /// <summary>Creates a decode diagnostic, with any available buffer and sub-event context.</summary>
-        public AsyncProfilerParseError(string message, int byteOffset,
-            AsyncProfilerBufferHeader? bufferHeader = null, long? timestampQpc = null, AsyncEventID? eventId = null)
+        public ParseError(string message, int byteOffset,
+            BufferHeader? bufferHeader = null, long? timestampQpc = null, AsyncEventID? eventId = null)
         {
             Message = message;
             ByteOffset = byteOffset;
@@ -763,11 +763,11 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
 
     /// <summary>
     /// Receives the strongly typed sub-events decoded from an <c>AsyncEvents</c> buffer by
-    /// <see cref="AsyncProfilerTraceEventParser.ParseBuffer(byte[], IAsyncProfilerSubEventSink)"/>. A single sink handles both the V2
+    /// <see cref="AsyncProfilerTraceEventParser.ParseBuffer(byte[], ISubEventSink)"/>. A single sink handles both the V2
     /// (RuntimeAsync) and V1 (StateMachineAsync) instrumentation; the concrete
     /// <see cref="AsyncEventID"/> on each event distinguishes the family.
     /// </summary>
-    public interface IAsyncProfilerSubEventSink
+    internal interface ISubEventSink
     {
         void OnContextCreate(in AsyncContextEvent e);
         void OnContextResume(in AsyncContextEvent e);
@@ -782,12 +782,12 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
         void OnMetadata(in AsyncMetadataEvent e);
         void OnSyncClock(in AsyncSyncClockEvent e);
         void OnUnknown(in AsyncUnknownEvent e);
-        void OnParseError(in AsyncProfilerParseError e);
+        void OnParseError(in ParseError e);
     }
 
-    internal interface IAsyncProfilerCallstackPayloadSink
+    internal interface ICallstackPayloadSink
     {
-        bool TryOnCallstack(AsyncEventID eventId, long timestampQpc, in AsyncProfilerBufferHeader header,
+        bool TryOnCallstack(AsyncEventID eventId, long timestampQpc, in BufferHeader header,
             byte[] buffer, ref int index, int payloadEnd);
     }
 }

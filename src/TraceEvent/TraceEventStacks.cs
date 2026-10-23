@@ -15,9 +15,9 @@ using System.Diagnostics;
 namespace Microsoft.Diagnostics.Tracing.Stacks
 {
     /// <summary>Raw async-profiler identity associated with a frame in a generated stack source.</summary>
-    public readonly struct AsyncStackSourceFrameInfo
+    internal readonly struct AsyncProfilerCallStackSourceFrameInfo
     {
-        internal AsyncStackSourceFrameInfo(
+        internal AsyncProfilerCallStackSourceFrameInfo(
             AsyncCallstackKind kind,
             ProcessIndex processIndex,
             CodeAddressIndex codeAddress,
@@ -234,8 +234,8 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
             uint codeAddressIndex = (uint)frameIndex - (uint)StackSourceFrameIndex.Start;
             if (codeAddressIndex >= m_log.CodeAddresses.Count)
             {
-                return TryGetAsyncFrameInfo(frameIndex, out AsyncStackSourceFrameInfo asyncFrame)
-                    ? asyncFrame.CodeAddress
+                return TryGetAsyncProfilerCallStackFrameInfo(frameIndex, out AsyncProfilerCallStackSourceFrameInfo asyncProfilerFrame)
+                    ? asyncProfilerFrame.CodeAddress
                     : CodeAddressIndex.Invalid;
             }
 
@@ -245,9 +245,9 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
         /// <summary>
         /// Returns async-profiler metadata for a generated async frame. Ordinary sync and pseudo frames return false.
         /// </summary>
-        public virtual bool TryGetAsyncFrameInfo(
+        internal virtual bool TryGetAsyncProfilerCallStackFrameInfo(
             StackSourceFrameIndex frameIndex,
-            out AsyncStackSourceFrameInfo frameInfo)
+            out AsyncProfilerCallStackSourceFrameInfo frameInfo)
         {
             frameInfo = default;
             return false;
@@ -819,7 +819,7 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
     /// </summary>
     public class MutableTraceEventStackSource : TraceEventStackSource
     {
-        private Dictionary<StackSourceFrameIndex, AsyncStackSourceFrameInfo> m_asyncFrameInfo;
+        private Dictionary<StackSourceFrameIndex, AsyncProfilerCallStackSourceFrameInfo> m_asyncProfilerCallStackFrameInfo;
 
         /// <summary>
         /// Create a new MutableTraceEventStackSource that can represent stacks coming from any events in the given TraceLog with a stack.  
@@ -884,31 +884,31 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
         /// </summary>
         public StackSourceInterner Interner { get { return m_Interner; } }
 
-        internal void SetAsyncFrameInfo(
+        internal void SetAsyncProfilerCallStackFrameInfo(
             StackSourceFrameIndex frameIndex,
-            AsyncStackSourceFrameInfo frameInfo)
+            AsyncProfilerCallStackSourceFrameInfo frameInfo)
         {
-            if (m_asyncFrameInfo == null)
+            if (m_asyncProfilerCallStackFrameInfo == null)
             {
-                m_asyncFrameInfo =
-                    new Dictionary<StackSourceFrameIndex, AsyncStackSourceFrameInfo>();
+                m_asyncProfilerCallStackFrameInfo =
+                    new Dictionary<StackSourceFrameIndex, AsyncProfilerCallStackSourceFrameInfo>();
             }
-            m_asyncFrameInfo[frameIndex] = frameInfo;
+            m_asyncProfilerCallStackFrameInfo[frameIndex] = frameInfo;
         }
 
-        internal int NextAsyncFrameIdentityTag()
+        internal int NextAsyncProfilerCallStackFrameIdentityTag()
         {
-            int identityTag = ++m_nextAsyncFrameIdentityTag;
+            int identityTag = ++m_nextAsyncProfilerCallStackFrameIdentityTag;
             Debug.Assert(identityTag > 0);
             return identityTag;
         }
 
         /// <inheritdoc />
-        public override bool TryGetAsyncFrameInfo(
+        internal override bool TryGetAsyncProfilerCallStackFrameInfo(
             StackSourceFrameIndex frameIndex,
-            out AsyncStackSourceFrameInfo frameInfo)
+            out AsyncProfilerCallStackSourceFrameInfo frameInfo)
         {
-            if (m_asyncFrameInfo != null && m_asyncFrameInfo.TryGetValue(frameIndex, out frameInfo))
+            if (m_asyncProfilerCallStackFrameInfo != null && m_asyncProfilerCallStackFrameInfo.TryGetValue(frameIndex, out frameInfo))
             {
                 return true;
             }
@@ -1160,7 +1160,7 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
         /// private
         /// </summary>
         protected StackSourceInterner m_Interner;
-        private int m_nextAsyncFrameIdentityTag;
+        private int m_nextAsyncProfilerCallStackFrameIdentityTag;
 
         /// <summary>
         /// private

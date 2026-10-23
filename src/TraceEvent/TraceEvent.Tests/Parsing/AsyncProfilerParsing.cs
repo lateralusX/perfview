@@ -2,8 +2,6 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System;
-using System.Collections.Generic;
-
 using Microsoft.Diagnostics.Tracing.Parsers;
 using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
 
@@ -12,7 +10,7 @@ using Xunit;
 namespace TraceEventTests
 {
     /// <summary>
-    /// Unit tests for <see cref="AsyncProfilerTraceEventParser.ParseBuffer(byte[], IAsyncProfilerSubEventSink)"/>. Each test synthesizes an
+    /// Unit tests for <see cref="AsyncProfilerTraceEventParser.ParseBuffer(byte[], ISubEventSink)"/>. Each test synthesizes an
     /// <c>AsyncEvents</c> buffer in the exact runtime wire format (see <see cref="AsyncProfilerBufferBuilder"/>)
     /// and asserts the decoded sub-events. These exercise the pure decoder without a live TraceEventSource.
     /// </summary>
@@ -25,10 +23,10 @@ namespace TraceEventTests
         [Fact]
         public void Header_TooShort_ReportsParseError()
         {
-            var sink = new CollectingSink();
+            var sink = new AsyncProfilerCollectingSink();
             AsyncProfilerTraceEventParser.ParseBuffer(new byte[8], sink);
 
-            AsyncProfilerParseError error = Assert.Single(sink.Errors);
+            ParseError error = Assert.Single(sink.Errors);
             Assert.Null(error.BufferHeader);
             Assert.Null(error.TimestampQpc);
             Assert.Empty(sink.Order);
@@ -40,7 +38,7 @@ namespace TraceEventTests
             var buffer = new AsyncProfilerBufferBuilder().Build();
             buffer[0] = 2; // corrupt the version
 
-            var sink = new CollectingSink();
+            var sink = new AsyncProfilerCollectingSink();
             AsyncProfilerTraceEventParser.ParseBuffer(buffer, sink);
 
             Assert.Single(sink.Errors);
@@ -51,7 +49,7 @@ namespace TraceEventTests
         {
             var buffer = new AsyncProfilerBufferBuilder().Build();
 
-            var sink = new CollectingSink();
+            var sink = new AsyncProfilerCollectingSink();
             AsyncProfilerTraceEventParser.ParseBuffer(buffer, sink);
 
             Assert.Empty(sink.Order);
@@ -77,7 +75,7 @@ namespace TraceEventTests
                 .ContextNoPayload(complete, StartQpc + 40)
                 .Build();
 
-            var sink = new CollectingSink();
+            var sink = new AsyncProfilerCollectingSink();
             AsyncProfilerTraceEventParser.ParseBuffer(buffer, sink);
 
             Assert.Empty(sink.Errors);
@@ -104,7 +102,7 @@ namespace TraceEventTests
                 .Method(AsyncEventID.ResumeStateMachineAsyncMethod, StartQpc + 100)
                 .Build();
 
-            var sink = new CollectingSink();
+            var sink = new AsyncProfilerCollectingSink();
             AsyncProfilerTraceEventParser.ParseBuffer(buffer, sink);
 
             Assert.Empty(sink.Errors);
@@ -122,7 +120,7 @@ namespace TraceEventTests
                     parentDispatcherId: 0x99, dispatcherId: 0xAA, ips, states: null)
                 .Build();
 
-            var sink = new CollectingSink();
+            var sink = new AsyncProfilerCollectingSink();
             AsyncProfilerTraceEventParser.ParseBuffer(buffer, sink);
 
             Assert.Empty(sink.Errors);
@@ -147,7 +145,7 @@ namespace TraceEventTests
                     parentDispatcherId: 0 /* not emitted for non-Create */, dispatcherId: 0x55, ips, states: null)
                 .Build();
 
-            var sink = new CollectingSink();
+            var sink = new AsyncProfilerCollectingSink();
             AsyncProfilerTraceEventParser.ParseBuffer(buffer, sink);
 
             Assert.Empty(sink.Errors);
@@ -168,7 +166,7 @@ namespace TraceEventTests
                     parentDispatcherId: 0, dispatcherId: 0x77, handles, states)
                 .Build();
 
-            var sink = new CollectingSink();
+            var sink = new AsyncProfilerCollectingSink();
             AsyncProfilerTraceEventParser.ParseBuffer(buffer, sink);
 
             Assert.Empty(sink.Errors);
@@ -190,7 +188,7 @@ namespace TraceEventTests
                     parentDispatcherId: 0, dispatcherId: 2, methods, states)
                 .Build();
 
-            var sink = new CollectingSink();
+            var sink = new AsyncProfilerCollectingSink();
             AsyncProfilerTraceEventParser.ParseBuffer(buffer, sink);
 
             Assert.Empty(sink.Errors);
@@ -212,7 +210,7 @@ namespace TraceEventTests
                     parentDispatcherId: 0, dispatcherId: 0xC0FFEE, methodIds: Array.Empty<ulong>(), states: null)
                 .Build();
 
-            var sink = new CollectingSink();
+            var sink = new AsyncProfilerCollectingSink();
             AsyncProfilerTraceEventParser.ParseBuffer(buffer, sink);
 
             Assert.Empty(sink.Errors);
@@ -230,7 +228,7 @@ namespace TraceEventTests
                 .Unwind(AsyncEventID.UnwindStateMachineAsyncException, StartQpc + 2, unwoundFrames: 42)
                 .Build();
 
-            var sink = new CollectingSink();
+            var sink = new AsyncProfilerCollectingSink();
             AsyncProfilerTraceEventParser.ParseBuffer(buffer, sink);
 
             Assert.Empty(sink.Errors);
@@ -252,7 +250,7 @@ namespace TraceEventTests
                     eventBufferSize: 4096, wrapperCount: 32, manifest)
                 .Build();
 
-            var sink = new CollectingSink();
+            var sink = new AsyncProfilerCollectingSink();
             AsyncProfilerTraceEventParser.ParseBuffer(buffer, sink);
 
             Assert.Empty(sink.Errors);
@@ -275,7 +273,7 @@ namespace TraceEventTests
                 .SyncClock(StartQpc + 4, qpcSync: 777, utcSync: 888)
                 .Build();
 
-            var sink = new CollectingSink();
+            var sink = new AsyncProfilerCollectingSink();
             AsyncProfilerTraceEventParser.ParseBuffer(buffer, sink);
 
             Assert.Empty(sink.Errors);
@@ -292,7 +290,7 @@ namespace TraceEventTests
                 .ContextNoPayload(AsyncEventID.ResetAsyncContinuationWrapperIndex, StartQpc + 2)
                 .Build();
 
-            var sink = new CollectingSink();
+            var sink = new AsyncProfilerCollectingSink();
             AsyncProfilerTraceEventParser.ParseBuffer(buffer, sink);
 
             Assert.Empty(sink.Errors);
@@ -311,7 +309,7 @@ namespace TraceEventTests
                 .Method(AsyncEventID.CompleteRuntimeAsyncMethod, StartQpc + 2)
                 .Build();
 
-            var sink = new CollectingSink();
+            var sink = new AsyncProfilerCollectingSink();
             AsyncProfilerTraceEventParser.ParseBuffer(buffer, sink);
 
             Assert.Empty(sink.Errors);
@@ -327,7 +325,7 @@ namespace TraceEventTests
                 .Method(AsyncEventID.ResumeRuntimeAsyncMethod, StartQpc + 2)
                 .Build();
 
-            var sink = new CollectingSink();
+            var sink = new AsyncProfilerCollectingSink();
             AsyncProfilerTraceEventParser.ParseBuffer(buffer, sink);
 
             Assert.Empty(sink.Errors);
@@ -354,7 +352,7 @@ namespace TraceEventTests
                 .Method(AsyncEventID.ResumeRuntimeAsyncMethod, StartQpc + 3)
                 .Build();
 
-            var sink = new CollectingSink();
+            var sink = new AsyncProfilerCollectingSink();
             AsyncProfilerTraceEventParser.ParseBuffer(buffer, sink);
 
             Assert.Empty(sink.Errors);
@@ -384,7 +382,7 @@ namespace TraceEventTests
                 .Method(AsyncEventID.CompleteRuntimeAsyncMethod, StartQpc + 3)
                 .Build();
 
-            var sink = new CollectingSink();
+            var sink = new AsyncProfilerCollectingSink();
             AsyncProfilerTraceEventParser.ParseBuffer(buffer, sink);
 
             Assert.Empty(sink.Errors);
@@ -396,8 +394,8 @@ namespace TraceEventTests
         public void Manifest_PersistsAcrossBuffers()
         {
             // The runtime advertises the manifest once (its own buffer); a later data buffer must still be
-            // framed with that manifest. A shared AsyncProfilerManifest carries the state across ParseBuffer calls.
-            var manifest = new AsyncProfilerManifest();
+            // framed with that manifest. A shared Manifest carries the state across ParseBuffer calls.
+            var manifest = new Manifest();
             var entries = new[]
             {
                 new AsyncManifestEntry((AsyncEventID)24, 3, PayloadLengthFieldSize.UShort),
@@ -412,7 +410,7 @@ namespace TraceEventTests
                 .Method(AsyncEventID.ResumeRuntimeAsyncMethod, StartQpc + 3)
                 .Build();
 
-            var sink = new CollectingSink();
+            var sink = new AsyncProfilerCollectingSink();
             AsyncProfilerTraceEventParser.ParseBuffer(metadataBuffer, manifest, sink);
             AsyncProfilerTraceEventParser.ParseBuffer(dataBuffer, manifest, sink);
 
@@ -427,9 +425,9 @@ namespace TraceEventTests
         public void Header_TotalSizeSmallerThanHeader_ReportsParseError()
         {
             byte[] buffer = new AsyncProfilerBufferBuilder().Build();
-            WriteUInt32At(buffer, 1, AsyncProfilerBufferHeader.Size - 1);
+            WriteUInt32At(buffer, 1, BufferHeader.Size - 1);
 
-            var sink = new CollectingSink();
+            var sink = new AsyncProfilerCollectingSink();
             AsyncProfilerTraceEventParser.ParseBuffer(buffer, sink);
 
             Assert.Single(sink.Errors);
@@ -442,7 +440,7 @@ namespace TraceEventTests
             byte[] buffer = new AsyncProfilerBufferBuilder().Build();
             WriteUInt32At(buffer, 1, (uint)buffer.Length + 1);
 
-            var sink = new CollectingSink();
+            var sink = new AsyncProfilerCollectingSink();
             AsyncProfilerTraceEventParser.ParseBuffer(buffer, sink);
 
             Assert.Single(sink.Errors);
@@ -460,7 +458,7 @@ namespace TraceEventTests
             padded[logical.Length] = 0xFF;
             padded[logical.Length + 1] = 0xEE;
 
-            var sink = new CollectingSink();
+            var sink = new AsyncProfilerCollectingSink();
             AsyncProfilerTraceEventParser.ParseBuffer(padded, sink);
 
             Assert.Empty(sink.Errors);
@@ -475,7 +473,7 @@ namespace TraceEventTests
                 .Build();
             WriteUInt32At(buffer, 17, 2);
 
-            var sink = new CollectingSink();
+            var sink = new AsyncProfilerCollectingSink();
             AsyncProfilerTraceEventParser.ParseBuffer(buffer, sink);
 
             Assert.Single(sink.Errors);
@@ -491,7 +489,7 @@ namespace TraceEventTests
                 .Build();
             WriteUInt32At(buffer, 17, 1);
 
-            var sink = new CollectingSink();
+            var sink = new AsyncProfilerCollectingSink();
             AsyncProfilerTraceEventParser.ParseBuffer(buffer, sink);
 
             Assert.Single(sink.Errors);
@@ -505,12 +503,12 @@ namespace TraceEventTests
             byte[] buffer = new AsyncProfilerBufferBuilder()
                 .Method(AsyncEventID.ResumeRuntimeAsyncMethod, StartQpc + 1)
                 .Build();
-            buffer[AsyncProfilerBufferHeader.Size + 1] = 0x80;
+            buffer[BufferHeader.Size + 1] = 0x80;
 
-            var sink = new CollectingSink();
+            var sink = new AsyncProfilerCollectingSink();
             AsyncProfilerTraceEventParser.ParseBuffer(buffer, sink);
 
-            AsyncProfilerParseError error = Assert.Single(sink.Errors);
+            ParseError error = Assert.Single(sink.Errors);
             Assert.Equal(OsThreadId, error.BufferHeader.Value.OsThreadId);
             Assert.Equal(StartQpc, error.TimestampQpc);
             Assert.Equal(AsyncEventID.ResumeRuntimeAsyncMethod, error.EventId);
@@ -527,7 +525,7 @@ namespace TraceEventTests
             Array.Copy(complete, truncated, truncated.Length);
             WriteUInt32At(truncated, 1, (uint)truncated.Length);
 
-            var sink = new CollectingSink();
+            var sink = new AsyncProfilerCollectingSink();
             AsyncProfilerTraceEventParser.ParseBuffer(truncated, sink);
 
             Assert.Single(sink.Errors);
@@ -544,7 +542,7 @@ namespace TraceEventTests
             Array.Copy(complete, truncated, truncated.Length);
             WriteUInt32At(truncated, 1, (uint)truncated.Length);
 
-            var sink = new CollectingSink();
+            var sink = new AsyncProfilerCollectingSink();
             AsyncProfilerTraceEventParser.ParseBuffer(truncated, sink);
 
             Assert.Single(sink.Errors);
@@ -557,9 +555,9 @@ namespace TraceEventTests
             byte[] buffer = new AsyncProfilerBufferBuilder()
                 .ResumeContext(AsyncEventID.ResumeRuntimeAsyncContext, StartQpc + 1, dispatcher: 0x42)
                 .Build();
-            WriteUInt32At(buffer, 1, AsyncProfilerBufferHeader.Size + 3); // id + delta + length prefix, no payload
+            WriteUInt32At(buffer, 1, BufferHeader.Size + 3); // id + delta + length prefix, no payload
 
-            var sink = new CollectingSink();
+            var sink = new AsyncProfilerCollectingSink();
             AsyncProfilerTraceEventParser.ParseBuffer(buffer, sink);
 
             Assert.Single(sink.Errors);
@@ -567,19 +565,20 @@ namespace TraceEventTests
         }
 
         [Theory]
-        [InlineData(AsyncEventID.ResumeRuntimeAsyncContext)]
-        [InlineData(AsyncEventID.UnwindRuntimeAsyncException)]
-        [InlineData(AsyncEventID.ResumeRuntimeAsyncCallstack)]
-        [InlineData(AsyncEventID.AsyncProfilerSyncClock)]
-        public void UndersizedTypedPayload_ReportsErrorAndContinuesAtDeclaredEnd(AsyncEventID eventId)
+        [InlineData((int)AsyncEventID.ResumeRuntimeAsyncContext)]
+        [InlineData((int)AsyncEventID.UnwindRuntimeAsyncException)]
+        [InlineData((int)AsyncEventID.ResumeRuntimeAsyncCallstack)]
+        [InlineData((int)AsyncEventID.AsyncProfilerSyncClock)]
+        public void UndersizedTypedPayload_ReportsErrorAndContinuesAtDeclaredEnd(int eventIdValue)
         {
+            var eventId = (AsyncEventID)eventIdValue;
             byte[] payload = eventId == AsyncEventID.ResumeRuntimeAsyncCallstack ? new byte[] { 0 } : Array.Empty<byte>();
             byte[] buffer = new AsyncProfilerBufferBuilder()
                 .RawEvent((byte)eventId, StartQpc + 1, AsyncEventInfo.GetPayloadLengthFieldSize(eventId), payload)
                 .Method(AsyncEventID.CompleteRuntimeAsyncMethod, StartQpc + 2)
                 .Build();
 
-            var sink = new CollectingSink();
+            var sink = new AsyncProfilerCollectingSink();
             AsyncProfilerTraceEventParser.ParseBuffer(buffer, sink);
 
             Assert.Single(sink.Errors);
@@ -594,7 +593,7 @@ namespace TraceEventTests
         [Fact]
         public void UndersizedMetadata_DoesNotMutateManifest_AndContinuesAtDeclaredEnd()
         {
-            var manifest = new AsyncProfilerManifest();
+            var manifest = new Manifest();
             manifest.Apply(new[]
             {
                 new AsyncManifestEntry((AsyncEventID)24, 3, PayloadLengthFieldSize.Byte),
@@ -611,7 +610,7 @@ namespace TraceEventTests
                 .Method(AsyncEventID.CompleteRuntimeAsyncMethod, StartQpc + 4)
                 .Build();
 
-            var sink = new CollectingSink();
+            var sink = new AsyncProfilerCollectingSink();
             AsyncProfilerTraceEventParser.ParseBuffer(buffer, manifest, sink);
 
             Assert.Single(sink.Errors);
@@ -626,7 +625,7 @@ namespace TraceEventTests
         [Fact]
         public void Metadata_InvalidPayloadLengthFieldSize_DoesNotMutateManifest()
         {
-            var manifest = new AsyncProfilerManifest();
+            var manifest = new Manifest();
             manifest.Apply(new[]
             {
                 new AsyncManifestEntry((AsyncEventID)24, 3, PayloadLengthFieldSize.Byte),
@@ -639,7 +638,7 @@ namespace TraceEventTests
                 .Method(AsyncEventID.CompleteRuntimeAsyncMethod, StartQpc + 3)
                 .Build();
 
-            var sink = new CollectingSink();
+            var sink = new AsyncProfilerCollectingSink();
             AsyncProfilerTraceEventParser.ParseBuffer(buffer, manifest, sink);
 
             Assert.Single(sink.Errors);

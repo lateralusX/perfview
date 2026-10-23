@@ -18,10 +18,10 @@ namespace TraceEventBenchmarks
     public class AsyncProfilerIndexBuildBenchmarks
     {
         private byte[] _buffer;
-        private byte[] _bufferWithCreations;
-        private AsyncProfilerManifest _manifest;
+        private byte[] _bufferWithDispatcherInfo;
+        private Manifest _manifest;
         private CountingSink _sink;
-        private AsyncCallStacksIndex _index;
+        private AsyncProfilerCallStacksIndex _index;
 
         [Params(1_000, 10_000)]
         public int EpisodeCount { get; set; }
@@ -29,8 +29,8 @@ namespace TraceEventBenchmarks
         [Params(4, 16)]
         public int FrameCount { get; set; }
 
-        [Params(AsyncCallstackKind.RuntimeAsync, AsyncCallstackKind.StateMachineAsync)]
-        public AsyncCallstackKind Kind { get; set; }
+        [Params(AsyncProfilerKindMode.V2Only, AsyncProfilerKindMode.V1Only)]
+        public AsyncProfilerKindMode Kind { get; set; }
 
         [Params(false, true)]
         public bool UniqueCallstacks { get; set; }
@@ -38,10 +38,16 @@ namespace TraceEventBenchmarks
         [GlobalSetup]
         public void Setup()
         {
-            _buffer = BuildBuffer(EpisodeCount, FrameCount, Kind, UniqueCallstacks, includeCreations: false);
-            _bufferWithCreations = BuildBuffer(
-                EpisodeCount, FrameCount, Kind, UniqueCallstacks, includeCreations: true);
-            _manifest = new AsyncProfilerManifest();
+            if (Kind != AsyncProfilerKindMode.V2Only && Kind != AsyncProfilerKindMode.V1Only)
+            {
+                throw new ArgumentOutOfRangeException(nameof(Kind));
+            }
+            var kind = Kind == AsyncProfilerKindMode.V2Only
+                ? AsyncCallstackKind.RuntimeAsync : AsyncCallstackKind.StateMachineAsync;
+            _buffer = BuildBuffer(EpisodeCount, FrameCount, kind, UniqueCallstacks, includeDispatcherInfo: false);
+            _bufferWithDispatcherInfo = BuildBuffer(
+                EpisodeCount, FrameCount, kind, UniqueCallstacks, includeDispatcherInfo: true);
+            _manifest = new Manifest();
             _sink = new CountingSink();
 
             var computer = new AsyncProfilerComputer();
@@ -68,10 +74,10 @@ namespace TraceEventBenchmarks
         }
 
         [Benchmark]
-        public int BuildIndexWithCreations()
+        public int BuildIndexWithDispatcherInfo()
         {
             var computer = new AsyncProfilerComputer();
-            computer.Process(_bufferWithCreations, (ProcessIndex)1);
+            computer.Process(_bufferWithDispatcherInfo, (ProcessIndex)1);
             computer.Finish();
             return computer.DistinctFramesCount;
         }
@@ -91,7 +97,7 @@ namespace TraceEventBenchmarks
         }
 
         private static byte[] BuildBuffer(int episodeCount, int frameCount, AsyncCallstackKind kind,
-            bool uniqueCallstacks, bool includeCreations)
+            bool uniqueCallstacks, bool includeDispatcherInfo)
         {
             const long startQpc = 1_000_000;
             var builder = new AsyncProfilerBufferBuilder(startQpc: startQpc)
@@ -113,7 +119,7 @@ namespace TraceEventBenchmarks
                     }
                 }
 
-                if (includeCreations)
+                if (includeDispatcherInfo)
                 {
                     timestampQpc++;
                     builder.CreateContext(
@@ -148,7 +154,7 @@ namespace TraceEventBenchmarks
             return builder.Build();
         }
 
-        private sealed class CountingSink : IAsyncProfilerSubEventSink
+        private sealed class CountingSink : ISubEventSink
         {
             public int EventCount { get; private set; }
 
@@ -167,7 +173,7 @@ namespace TraceEventBenchmarks
             public void OnMetadata(in AsyncMetadataEvent e) => EventCount++;
             public void OnSyncClock(in AsyncSyncClockEvent e) => EventCount++;
             public void OnUnknown(in AsyncUnknownEvent e) => EventCount++;
-            public void OnParseError(in AsyncProfilerParseError e) => EventCount++;
+            public void OnParseError(in ParseError e) => EventCount++;
         }
     }
 

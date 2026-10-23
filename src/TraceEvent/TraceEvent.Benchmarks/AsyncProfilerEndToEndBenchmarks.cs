@@ -53,8 +53,8 @@ namespace TraceEventBenchmarks
         public void Setup()
         {
             _fixture = AsyncProfilerEndToEndFixture.Create(WorkloadProfile, KindMode);
-            _fixture.WriteNettrace(_fixture.NetTracePath, includeAsyncProfilerData: true);
-            _fixture.WriteNettrace(_fixture.ControlNetTracePath, includeAsyncProfilerData: false);
+            _fixture.WriteNettrace(_fixture.NetTracePath, includeProfilerData: true);
+            _fixture.WriteNettrace(_fixture.ControlNetTracePath, includeProfilerData: false);
             TraceLog.CreateFromEventPipeDataFile(_fixture.NetTracePath, _fixture.EtlxPath);
             TraceLog.CreateFromEventPipeDataFile(_fixture.ControlNetTracePath, _fixture.ControlEtlxPath);
             TraceLog.CreateFromEventPipeDataFile(
@@ -118,7 +118,7 @@ namespace TraceEventBenchmarks
             {
                 using (var traceLog = new TraceLog(_fixture.ControlEtlxPath))
                 {
-                    result += traceLog.EventCount + (traceLog.AsyncCallStacks?.DistinctFramesCount ?? 0);
+                    result += traceLog.EventCount + (traceLog.AsyncProfilerCallStacks?.DistinctFramesCount ?? 0);
                 }
             }
             return result;
@@ -132,7 +132,7 @@ namespace TraceEventBenchmarks
             {
                 using (var traceLog = new TraceLog(_fixture.EtlxPath))
                 {
-                    result += traceLog.EventCount + traceLog.AsyncCallStacks.DistinctFramesCount;
+                    result += traceLog.EventCount + traceLog.AsyncProfilerCallStacks.DistinctFramesCount;
                 }
             }
             return result;
@@ -141,26 +141,26 @@ namespace TraceEventBenchmarks
         [Benchmark(OperationsPerInvoke = 6)]
         public int GenerateCpuStacksWithoutAsync()
         {
-            return GenerateCpuStacks(_controlTraceLog, stitchAsyncCallStacks: false, traceCount: 6);
+            return GenerateCpuStacks(_controlTraceLog, enableAsyncCallStacks: false, traceCount: 6);
         }
 
         [Benchmark(OperationsPerInvoke = 6)]
         public int GenerateCpuStacksWithAsyncIndex()
         {
-            return GenerateCpuStacks(_traceLog, stitchAsyncCallStacks: false, traceCount: 6);
+            return GenerateCpuStacks(_traceLog, enableAsyncCallStacks: false, traceCount: 6);
         }
 
         [Benchmark(OperationsPerInvoke = 6)]
         public int GenerateStitchedCpuStacks()
         {
-            return GenerateCpuStacks(_traceLog, stitchAsyncCallStacks: true, traceCount: 6);
+            return GenerateCpuStacks(_traceLog, enableAsyncCallStacks: true, traceCount: 6);
         }
 
         [Benchmark(OperationsPerInvoke = 6)]
         public int GenerateStitchedCpuStacksAndReleaseIndex()
         {
             return GenerateCpuStacks(
-                _traceLog, stitchAsyncCallStacks: true, traceCount: 6, releaseAsyncCallStacks: true);
+                _traceLog, enableAsyncCallStacks: true, traceCount: 6, releaseCallStacks: true);
         }
 
         [Benchmark(OperationsPerInvoke = 2)]
@@ -169,22 +169,23 @@ namespace TraceEventBenchmarks
             int result = 0;
             for (int i = 0; i < 2; i++)
             {
-                if (!_traceLog.ReleaseAsyncCallStacks())
+                if (!_traceLog.ReleaseAsyncProfilerCallStacks())
                 {
                     throw new InvalidOperationException("The async-callstack index was not loaded or reloadable.");
                 }
 
-                result += _traceLog.AsyncCallStacks.DistinctFramesCount;
+                result += _traceLog.AsyncProfilerCallStacks.DistinctFramesCount;
             }
             return result;
         }
 
         private SampleProfilerThreadTimeComputer CreateComputer(
             TraceLog traceLog,
-            bool stitchAsyncCallStacks)
+            bool enableAsyncCallStacks)
         {
-            return new SampleProfilerThreadTimeComputer(traceLog, _symbolReader, stitchAsyncCallStacks)
+            return new SampleProfilerThreadTimeComputer(traceLog, _symbolReader)
             {
+                EnableAsyncCallStacks = enableAsyncCallStacks,
                 IncludeEventSourceEvents = false,
                 GroupByStartStopActivity = false,
             };
@@ -192,18 +193,18 @@ namespace TraceEventBenchmarks
 
         private int GenerateCpuStacks(
             TraceLog traceLog,
-            bool stitchAsyncCallStacks,
+            bool enableAsyncCallStacks,
             int traceCount,
-            bool releaseAsyncCallStacks = false)
+            bool releaseCallStacks = false)
         {
             int sampleCount = 0;
             for (int i = 0; i < traceCount; i++)
             {
                 var stackSource = new MutableTraceEventStackSource(traceLog);
-                var computer = CreateComputer(traceLog, stitchAsyncCallStacks);
+                var computer = CreateComputer(traceLog, enableAsyncCallStacks);
                 computer.GenerateThreadTimeStacks(stackSource);
                 sampleCount += CountSamples(stackSource);
-                if (releaseAsyncCallStacks && !traceLog.ReleaseAsyncCallStacks())
+                if (releaseCallStacks && !traceLog.ReleaseAsyncProfilerCallStacks())
                 {
                     throw new InvalidOperationException("The async-callstack index was not loaded or reloadable.");
                 }
@@ -228,7 +229,7 @@ namespace TraceEventBenchmarks
                 long privateBytesBefore = process.PrivateMemorySize64;
                 long workingSetBefore = process.WorkingSet64;
 
-                AsyncCallStacksIndex index = traceLog.AsyncCallStacks;
+                AsyncProfilerCallStacksIndex index = traceLog.AsyncProfilerCallStacks;
                 if (index == null)
                 {
                     throw new InvalidOperationException("The generated ETLX does not contain an async callstack index.");
@@ -284,7 +285,7 @@ namespace TraceEventBenchmarks
             CollectGarbage();
             long managedHeapBefore = GC.GetTotalMemory(forceFullCollection: false);
 
-            if (!traceLog.ReleaseAsyncCallStacks())
+            if (!traceLog.ReleaseAsyncProfilerCallStacks())
             {
                 throw new InvalidOperationException("The async-callstack index was not loaded or reloadable.");
             }
@@ -296,7 +297,7 @@ namespace TraceEventBenchmarks
                 $"Async index memory after release: managedHeap={managedHeapBefore:N0}->{managedHeapAfter:N0} bytes, " +
                 $"reclaimed={reclaimed:N0} ({reclaimed / (double)contextCount:F2}/context).");
 
-            AsyncCallStacksIndex reloaded = traceLog.AsyncCallStacks;
+            AsyncProfilerCallStacksIndex reloaded = traceLog.AsyncProfilerCallStacks;
             GC.KeepAlive(reloaded);
         }
 
@@ -441,7 +442,7 @@ namespace TraceEventBenchmarks
                 durationSeconds);
         }
 
-        public void WriteNettrace(string path, bool includeAsyncProfilerData)
+        public void WriteNettrace(string path, bool includeProfilerData)
         {
             using (var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None))
             {
@@ -497,7 +498,7 @@ namespace TraceEventBenchmarks
                 });
 
                 int sequence = WriteSymbols(writer);
-                WriteWorkload(writer, sequence, includeAsyncProfilerData);
+                WriteWorkload(writer, sequence, includeProfilerData);
                 writer.WriteEndBlock();
                 writer.Flush();
             }
@@ -507,13 +508,13 @@ namespace TraceEventBenchmarks
         {
             ValidateRawInput();
 
-            Require(controlTraceLog.AsyncCallStacks == null,
+            Require(controlTraceLog.AsyncProfilerCallStacks == null,
                 "The no-async control ETLX unexpectedly contains an async callstack index.");
             ValidatePreservedBuffersEtlx();
             Require(CountAsyncBuffers(traceLog) == 0,
                 "The default ETLX unexpectedly retained raw async-profiler buffers.");
 
-            AsyncCallStacksIndex index = traceLog.AsyncCallStacks;
+            AsyncProfilerCallStacksIndex index = traceLog.AsyncProfilerCallStacks;
             if (index == null)
             {
                 throw new InvalidOperationException("The generated ETLX does not contain an async callstack index.");
@@ -521,10 +522,10 @@ namespace TraceEventBenchmarks
 
             int intervalCount = 0;
             int threadCount = 0;
-            foreach (AsyncThreadKey thread in index.Threads)
+            foreach (AsyncProfilerThreadKey thread in index.Threads)
             {
                 threadCount++;
-                intervalCount += index.GetAsyncCallStacks(thread).Count;
+                intervalCount += index.GetCallStacks(thread).Count;
             }
             Require(threadCount == 1, $"Expected one async thread, found {threadCount}.");
             Require(intervalCount == ContextCount, $"Expected {ContextCount} indexed contexts, found {intervalCount}.");
@@ -535,28 +536,28 @@ namespace TraceEventBenchmarks
                 $"Expected {expectedDistinctFrames} shared async frame sequences, found {index.DistinctFramesCount}.");
 
             var controlStackSource = new MutableTraceEventStackSource(controlTraceLog);
-            CreateComputer(controlTraceLog, symbolReader, stitchAsyncCallStacks: false)
+            CreateComputer(controlTraceLog, symbolReader, enableAsyncCallStacks: false)
                 .GenerateThreadTimeStacks(controlStackSource);
             ValidateStacks(controlStackSource, StackValidationMode.Sync);
 
             var syncStackSource = new MutableTraceEventStackSource(traceLog);
-            CreateComputer(traceLog, symbolReader, stitchAsyncCallStacks: false)
+            CreateComputer(traceLog, symbolReader, enableAsyncCallStacks: false)
                 .GenerateThreadTimeStacks(syncStackSource);
             ValidateStacks(syncStackSource, StackValidationMode.Sync);
 
             var stitchedStackSource = new MutableTraceEventStackSource(traceLog);
             SampleProfilerThreadTimeComputer stitchedComputer =
-                CreateComputer(traceLog, symbolReader, stitchAsyncCallStacks: true);
+                CreateComputer(traceLog, symbolReader, enableAsyncCallStacks: true);
             stitchedComputer.GenerateThreadTimeStacks(stitchedStackSource);
             ValidateStacks(stitchedStackSource, StackValidationMode.Stitched);
-            Require(stitchedComputer.AsyncStitchDiagnostics.SegmentsProcessed == MatchedSampleCount,
+            Require(stitchedComputer.AsyncProfilerCallStackDiagnostics.SegmentsProcessed == MatchedSampleCount,
                 $"Expected {MatchedSampleCount} matched samples, found " +
-                $"{stitchedComputer.AsyncStitchDiagnostics.SegmentsProcessed}.");
-            Require(stitchedComputer.AsyncStitchDiagnostics.BoundariesNotFound == 0,
+                $"{stitchedComputer.AsyncProfilerCallStackDiagnostics.SegmentsProcessed}.");
+            Require(stitchedComputer.AsyncProfilerCallStackDiagnostics.BoundariesNotFound == 0,
                 "A generated CPU sample did not contain the expected V2 continuation wrapper.");
-            Require(stitchedComputer.AsyncStitchDiagnostics.AdjacencyMismatches == 0,
+            Require(stitchedComputer.AsyncProfilerCallStackDiagnostics.AdjacencyMismatches == 0,
                 "A generated CPU sample did not align with the expected current async method.");
-            Require(stitchedComputer.AsyncStitchDiagnostics.V2SyncLayoutUsed == 0,
+            Require(stitchedComputer.AsyncProfilerCallStackDiagnostics.V2SyncLayoutUsed == 0,
                 "A matched generated CPU sample unexpectedly used the synchronous layout.");
 
             long asyncNettraceBytes = new FileInfo(NetTracePath).Length;
@@ -609,7 +610,7 @@ namespace TraceEventBenchmarks
                         RuntimeMappingId,
                         RuntimeMappingStart,
                         RuntimeMappingStart + (4 * AddressStride),
-                        AsyncStitchBoundary.HostModuleName));
+                        AsyncProfilerCallStackStitchBoundary.HostModuleName));
 
                 ulong symbolId = 1;
                 for (int methodIndex = 0; methodIndex < ManagedMethodCount; methodIndex++)
@@ -647,7 +648,7 @@ namespace TraceEventBenchmarks
             return sequence;
         }
 
-        private void WriteWorkload(EventPipeWriterV6 writer, int sequence, bool includeAsyncProfilerData)
+        private void WriteWorkload(EventPipeWriterV6 writer, int sequence, bool includeProfilerData)
         {
             ulong[][] v2Frames = CreateAsyncFrames(AsyncCallstackKind.RuntimeAsync);
             ulong[][] v1Frames = CreateAsyncFrames(AsyncCallstackKind.StateMachineAsync);
@@ -732,7 +733,7 @@ namespace TraceEventBenchmarks
                             w => w.Write((int)ClrThreadSampleType.Managed));
                         sampleIndex++;
                     }
-                    if (includeAsyncProfilerData)
+                    if (includeProfilerData)
                     {
                         block.WriteEventBlob(EventOptions(1, sequence++, bufferEndQpc), w => w.Write(outerPayload));
                     }
@@ -754,7 +755,7 @@ namespace TraceEventBenchmarks
             using (var source = new EventPipeEventSource(NetTracePath))
             {
                 var parser = new AsyncProfilerTraceEventParser(source);
-                var manifest = new AsyncProfilerManifest();
+                var manifest = new Manifest();
                 parser.AsyncEvents += data =>
                 {
                     outerBufferCount++;
@@ -790,7 +791,7 @@ namespace TraceEventBenchmarks
 
                 Require(outerBufferCount == ContextCount / ContextsPerBuffer,
                     $"Expected {ContextCount / ContextsPerBuffer} preserved async buffers, found {outerBufferCount}.");
-                Require(traceLog.AsyncCallStacks != null,
+                Require(traceLog.AsyncProfilerCallStacks != null,
                     "Preserving raw async buffers unexpectedly removed the derived async index.");
             }
         }
@@ -812,10 +813,11 @@ namespace TraceEventBenchmarks
         private static SampleProfilerThreadTimeComputer CreateComputer(
             TraceLog traceLog,
             SymbolReader symbolReader,
-            bool stitchAsyncCallStacks)
+            bool enableAsyncCallStacks)
         {
-            return new SampleProfilerThreadTimeComputer(traceLog, symbolReader, stitchAsyncCallStacks)
+            return new SampleProfilerThreadTimeComputer(traceLog, symbolReader)
             {
+                EnableAsyncCallStacks = enableAsyncCallStacks,
                 IncludeEventSourceEvents = false,
                 GroupByStartStopActivity = false,
             };
@@ -858,7 +860,7 @@ namespace TraceEventBenchmarks
                         MethodName(methodIndex),
                         unmatched || kind == AsyncCallstackKind.RuntimeAsync
                             ? "Wrapper"
-                            : AsyncStitchBoundary.MoveNextAsDispatcherName,
+                            : AsyncProfilerCallStackStitchBoundary.MoveNextAsDispatcherName,
                         unmatched || kind == AsyncCallstackKind.RuntimeAsync
                             ? "DispatchContinuations"
                             : "V1Infrastructure",
@@ -919,17 +921,17 @@ namespace TraceEventBenchmarks
                 int digitsStart = methodStart + stateMachineMethodPrefix.Length;
                 return "TestApp.Workload.Method" + frameName.Substring(digitsStart, 4);
             }
-            if (frameName.IndexOf(AsyncStitchBoundary.ContinuationWrapperPrefix, StringComparison.Ordinal) >= 0)
+            if (frameName.IndexOf(AsyncProfilerCallStackStitchBoundary.ContinuationWrapperPrefix, StringComparison.Ordinal) >= 0)
             {
                 return "Wrapper";
             }
-            if (frameName.IndexOf(AsyncStitchBoundary.DispatchContinuationsName, StringComparison.Ordinal) >= 0)
+            if (frameName.IndexOf(AsyncProfilerCallStackStitchBoundary.DispatchContinuationsName, StringComparison.Ordinal) >= 0)
             {
                 return "DispatchContinuations";
             }
-            if (frameName.IndexOf(AsyncStitchBoundary.MoveNextAsDispatcherName, StringComparison.Ordinal) >= 0)
+            if (frameName.IndexOf(AsyncProfilerCallStackStitchBoundary.MoveNextAsDispatcherName, StringComparison.Ordinal) >= 0)
             {
-                return AsyncStitchBoundary.MoveNextAsDispatcherName;
+                return AsyncProfilerCallStackStitchBoundary.MoveNextAsDispatcherName;
             }
             if (frameName.IndexOf("InstrumentedMoveNext", StringComparison.Ordinal) >= 0)
             {
@@ -1120,7 +1122,7 @@ namespace TraceEventBenchmarks
             }
         }
 
-        private sealed class CountingSink : IAsyncProfilerSubEventSink
+        private sealed class CountingSink : ISubEventSink
         {
             public int SubEventCount { get; private set; }
             public int RuntimeResumeCount { get; private set; }
@@ -1169,7 +1171,7 @@ namespace TraceEventBenchmarks
             public void OnSyncClock(in AsyncSyncClockEvent e) => SubEventCount++;
             public void OnUnknown(in AsyncUnknownEvent e) => SubEventCount++;
 
-            public void OnParseError(in AsyncProfilerParseError e)
+            public void OnParseError(in ParseError e)
             {
                 ParseErrorCount++;
             }

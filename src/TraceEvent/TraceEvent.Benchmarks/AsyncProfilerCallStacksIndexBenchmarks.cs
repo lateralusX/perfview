@@ -10,13 +10,13 @@ using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
 namespace TraceEventBenchmarks
 {
     [MemoryDiagnoser]
-    public class AsyncCallStacksIndexBenchmarks
+    public class AsyncProfilerCallStacksIndexBenchmarks
     {
         private static readonly ProcessIndex s_processIndex = (ProcessIndex)1;
-        private static readonly AsyncThreadKey s_thread = new AsyncThreadKey(s_processIndex, 42);
+        private static readonly AsyncProfilerThreadKey s_thread = new AsyncProfilerThreadKey(s_processIndex, 42);
 
-        private AsyncCallStacksIndex _index;
-        private List<AsyncCallStack> _result;
+        private AsyncProfilerCallStacksIndex _index;
+        private List<AsyncProfilerCallStack> _result;
         private long _queryQpc;
 
         [Params(1_000, 100_000)]
@@ -25,8 +25,8 @@ namespace TraceEventBenchmarks
         [GlobalSetup]
         public void Setup()
         {
-            _index = new AsyncCallStacksIndex();
-            _result = new List<AsyncCallStack>(4);
+            _index = new AsyncProfilerCallStacksIndex();
+            _result = new List<AsyncProfilerCallStack>(4);
 
             ulong[] methodIds = { 0x1000, 0x2000, 0x3000 };
             for (int i = 0; i < IntervalCount; i++)
@@ -43,8 +43,8 @@ namespace TraceEventBenchmarks
                     wrapperCount: 32,
                     startQpc,
                     endQpc: startQpc + 5,
-                    methodCompletions: Array.Empty<AsyncCallStack.CompletionDelta>(),
-                    exceptionCompletions: Array.Empty<AsyncCallStack.CompletionDelta>(),
+                    methodCompletions: Array.Empty<AsyncProfilerCallStack.CompletionDelta>(),
+                    exceptionCompletions: Array.Empty<AsyncProfilerCallStack.CompletionDelta>(),
                     wrapperResets: Array.Empty<long>());
             }
 
@@ -62,20 +62,20 @@ namespace TraceEventBenchmarks
                     wrapperCount: 32,
                     startQpc: _queryQpc - depth,
                     endQpc: _queryQpc + depth + 1,
-                    methodCompletions: Array.Empty<AsyncCallStack.CompletionDelta>(),
-                    exceptionCompletions: Array.Empty<AsyncCallStack.CompletionDelta>(),
+                    methodCompletions: Array.Empty<AsyncProfilerCallStack.CompletionDelta>(),
+                    exceptionCompletions: Array.Empty<AsyncProfilerCallStack.CompletionDelta>(),
                     wrapperResets: Array.Empty<long>());
             }
-            _index.GetAsyncCallStacks(s_thread, _queryQpc, _result);
+            _index.GetCallStacks(s_thread, _queryQpc, _result);
         }
 
         [Benchmark(Baseline = true)]
-        public int AllocateResultList() => _index.GetAsyncCallStacks(s_thread, _queryQpc).Count;
+        public int AllocateResultList() => _index.GetCallStacks(s_thread, _queryQpc).Count;
 
         [Benchmark]
         public int ReuseResultList()
         {
-            _index.GetAsyncCallStacks(s_thread, _queryQpc, _result);
+            _index.GetCallStacks(s_thread, _queryQpc, _result);
             return _result.Count;
         }
     }

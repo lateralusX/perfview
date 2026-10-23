@@ -10,47 +10,47 @@ using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
 namespace TraceEventBenchmarks
 {
     [MemoryDiagnoser]
-    public class AsyncContextAncestryBenchmarks
+    public class AsyncProfilerContextAncestryBenchmarks
     {
         private const long Qpc = 1_000;
         private const int ParentCount = 4;
 
         private static readonly ProcessIndex s_processIndex = (ProcessIndex)1;
-        private static readonly AsyncThreadKey s_childThread =
-            new AsyncThreadKey(s_processIndex, 42);
+        private static readonly AsyncProfilerThreadKey s_childThread =
+            new AsyncProfilerThreadKey(s_processIndex, 42);
 
-        private IReadOnlyList<StitchSyncFrame> _sync;
-        private IReadOnlyList<AsyncCallStack> _segmentsWithoutParents;
-        private IReadOnlyList<AsyncCallStack> _segmentsWithUnrelatedCreation;
-        private IReadOnlyList<AsyncCallStack> _segmentsWithOneParent;
-        private IReadOnlyList<AsyncCallStack> _segmentsWithTwoParents;
-        private IReadOnlyList<AsyncCallStack> _segmentsWithParents;
-        private IReadOnlyList<AsyncCallStack> _segmentsWithEightParents;
-        private AsyncCallStacksIndex _indexWithoutParents;
-        private AsyncCallStacksIndex _indexWithUnrelatedCreation;
-        private AsyncCallStacksIndex _indexWithOneParent;
-        private AsyncCallStacksIndex _indexWithTwoParents;
-        private AsyncCallStacksIndex _indexWithParents;
-        private AsyncCallStacksIndex _indexWithEightParents;
-        private Dictionary<CodeAddressIndex, AsyncStitchBoundaryInfo> _boundaries;
+        private IReadOnlyList<AsyncProfilerStitchSyncFrame> _sync;
+        private IReadOnlyList<AsyncProfilerCallStack> _segmentsWithoutParents;
+        private IReadOnlyList<AsyncProfilerCallStack> _segmentsWithUnrelatedDispatcherInfo;
+        private IReadOnlyList<AsyncProfilerCallStack> _segmentsWithOneParent;
+        private IReadOnlyList<AsyncProfilerCallStack> _segmentsWithTwoParents;
+        private IReadOnlyList<AsyncProfilerCallStack> _segmentsWithParents;
+        private IReadOnlyList<AsyncProfilerCallStack> _segmentsWithEightParents;
+        private AsyncProfilerCallStacksIndex _indexWithoutParents;
+        private AsyncProfilerCallStacksIndex _indexWithUnrelatedDispatcherInfo;
+        private AsyncProfilerCallStacksIndex _indexWithOneParent;
+        private AsyncProfilerCallStacksIndex _indexWithTwoParents;
+        private AsyncProfilerCallStacksIndex _indexWithParents;
+        private AsyncProfilerCallStacksIndex _indexWithEightParents;
+        private Dictionary<CodeAddressIndex, AsyncProfilerCallStackStitchBoundaryInfo> _boundaries;
         private Dictionary<CodeAddressIndex, MethodIndex> _methods;
-        private List<StitchedFrame> _output;
-        private List<AsyncSegmentPlacement> _placements;
-        private StitchDiagnostics _diagnostics;
-        private AsyncContextAncestryAugmenter _augmenter;
-        private Func<CodeAddressIndex, AsyncStitchBoundaryInfo> _classify;
+        private List<AsyncProfilerStitchedFrame> _output;
+        private List<AsyncProfilerSegmentPlacement> _placements;
+        private AsyncProfilerCallStackDiagnostics _diagnostics;
+        private AsyncProfilerContextAncestryAugmenter _augmenter;
+        private Func<CodeAddressIndex, AsyncProfilerCallStackStitchBoundaryInfo> _classify;
         private Func<ProcessIndex, AsyncCallstackKind, long, bool> _methodCompletionObserved;
         private Func<CodeAddressIndex, MethodIndex> _methodOf;
 
         [GlobalSetup]
         public void Setup()
         {
-            _boundaries = new Dictionary<CodeAddressIndex, AsyncStitchBoundaryInfo>();
+            _boundaries = new Dictionary<CodeAddressIndex, AsyncProfilerCallStackStitchBoundaryInfo>();
             _methods = new Dictionary<CodeAddressIndex, MethodIndex>();
-            _output = new List<StitchedFrame>(64);
-            _placements = new List<AsyncSegmentPlacement>(1);
-            _diagnostics = new StitchDiagnostics();
-            _augmenter = new AsyncContextAncestryAugmenter();
+            _output = new List<AsyncProfilerStitchedFrame>(64);
+            _placements = new List<AsyncProfilerSegmentPlacement>(1);
+            _diagnostics = new AsyncProfilerCallStackDiagnostics();
+            _augmenter = new AsyncProfilerContextAncestryAugmenter();
             _classify = Classify;
             _methodCompletionObserved = MethodCompletionObserved;
             _methodOf = MethodOf;
@@ -62,43 +62,43 @@ namespace TraceEventBenchmarks
 
             _indexWithoutParents = CreateIndex(parentCount: 0);
             _segmentsWithoutParents =
-                _indexWithoutParents.GetAsyncCallStacks(s_childThread, Qpc);
+                _indexWithoutParents.GetCallStacks(s_childThread, Qpc);
 
-            _indexWithUnrelatedCreation = CreateIndex(parentCount: 0);
-            _indexWithUnrelatedCreation.AddCreation(
+            _indexWithUnrelatedDispatcherInfo = CreateIndex(parentCount: 0);
+            _indexWithUnrelatedDispatcherInfo.AddDispatcherInfo(
                 s_childThread,
-                childDispatcherId: 999,
+                dispatcherId: 999,
                 parentDispatcherId: 1_000,
-                createQpc: 800);
-            _segmentsWithUnrelatedCreation =
-                _indexWithUnrelatedCreation.GetAsyncCallStacks(s_childThread, Qpc);
+                creationQpc: 800);
+            _segmentsWithUnrelatedDispatcherInfo =
+                _indexWithUnrelatedDispatcherInfo.GetCallStacks(s_childThread, Qpc);
 
             _indexWithOneParent = CreateIndex(parentCount: 1);
             _segmentsWithOneParent =
-                _indexWithOneParent.GetAsyncCallStacks(s_childThread, Qpc);
+                _indexWithOneParent.GetCallStacks(s_childThread, Qpc);
 
             _indexWithTwoParents = CreateIndex(parentCount: 2);
             _segmentsWithTwoParents =
-                _indexWithTwoParents.GetAsyncCallStacks(s_childThread, Qpc);
+                _indexWithTwoParents.GetCallStacks(s_childThread, Qpc);
 
             _indexWithParents = CreateIndex(parentCount: ParentCount);
             _segmentsWithParents =
-                _indexWithParents.GetAsyncCallStacks(s_childThread, Qpc);
+                _indexWithParents.GetCallStacks(s_childThread, Qpc);
 
             _indexWithEightParents = CreateIndex(parentCount: 8);
             _segmentsWithEightParents =
-                _indexWithEightParents.GetAsyncCallStacks(s_childThread, Qpc);
+                _indexWithEightParents.GetCallStacks(s_childThread, Qpc);
 
             int baselineFrameCount = Disabled();
-            if (EnabledWithoutCreationData() != baselineFrameCount)
+            if (EnabledWithoutDispatcherInfo() != baselineFrameCount)
             {
                 throw new InvalidOperationException(
-                    "Enabling ancestry without creation data changed the stitched stack.");
+                    "Enabling ancestry without dispatcher metadata changed the stitched stack.");
             }
-            if (EnabledWithUnrelatedCreationData() != baselineFrameCount)
+            if (EnabledWithUnrelatedDispatcherInfo() != baselineFrameCount)
             {
                 throw new InvalidOperationException(
-                    "Unrelated creation data changed the stitched stack.");
+                    "Unrelated dispatcher metadata changed the stitched stack.");
             }
             if (EnabledWithOneParent() != baselineFrameCount + 6)
             {
@@ -130,16 +130,16 @@ namespace TraceEventBenchmarks
         }
 
         [Benchmark]
-        public int EnabledWithoutCreationData() =>
+        public int EnabledWithoutDispatcherInfo() =>
             StitchWithOptionalAncestry(
                 _indexWithoutParents,
                 _segmentsWithoutParents);
 
         [Benchmark]
-        public int EnabledWithUnrelatedCreationData() =>
+        public int EnabledWithUnrelatedDispatcherInfo() =>
             StitchWithOptionalAncestry(
-                _indexWithUnrelatedCreation,
-                _segmentsWithUnrelatedCreation);
+                _indexWithUnrelatedDispatcherInfo,
+                _segmentsWithUnrelatedDispatcherInfo);
 
         [Benchmark]
         public int EnabledWithOneParent() =>
@@ -166,11 +166,11 @@ namespace TraceEventBenchmarks
                 _segmentsWithEightParents);
 
         private int StitchWithOptionalAncestry(
-            AsyncCallStacksIndex index,
-            IReadOnlyList<AsyncCallStack> segments)
+            AsyncProfilerCallStacksIndex index,
+            IReadOnlyList<AsyncProfilerCallStack> segments)
         {
             bool ancestryAvailable =
-                index.HasCreationRecords &&
+                index.HasDispatcherRecords &&
                 _augmenter.Prepare(index, segments);
             Stitch(segments, ancestryAvailable ? _placements : null);
             if (!ancestryAvailable)
@@ -183,15 +183,15 @@ namespace TraceEventBenchmarks
                 segments,
                 _placements,
                 _output,
-                AsyncContextAncestryAugmenter.DefaultMaximumDepth);
+                AsyncProfilerContextAncestryAugmenter.DefaultMaximumDepth);
             return _output.Count;
         }
 
         private void Stitch(
-            IReadOnlyList<AsyncCallStack> segments,
-            List<AsyncSegmentPlacement> placements)
+            IReadOnlyList<AsyncProfilerCallStack> segments,
+            List<AsyncProfilerSegmentPlacement> placements)
         {
-            AsyncCpuStackStitcher.StitchInto(
+            AsyncProfilerCallStackStitcher.StitchInto(
                 _sync,
                 segments,
                 Qpc,
@@ -205,9 +205,9 @@ namespace TraceEventBenchmarks
                 placements);
         }
 
-        private AsyncCallStacksIndex CreateIndex(int parentCount)
+        private AsyncProfilerCallStacksIndex CreateIndex(int parentCount)
         {
-            var index = new AsyncCallStacksIndex();
+            var index = new AsyncProfilerCallStacksIndex();
             AddActivation(
                 index,
                 s_childThread,
@@ -217,7 +217,7 @@ namespace TraceEventBenchmarks
                 endQpc: 1_100,
                 firstMethodId: 200);
             SetCodeAddresses(
-                index.GetAsyncCallStacks(s_childThread, Qpc)[0],
+                index.GetCallStacks(s_childThread, Qpc)[0],
                 firstCodeAddress: 200);
 
             if (parentCount == 0)
@@ -225,13 +225,13 @@ namespace TraceEventBenchmarks
                 return index;
             }
 
-            ulong childDispatcherId = 1;
+            ulong dispatcherId = 1;
             long childStartQpc = 900;
             for (int parentIndex = 0; parentIndex < parentCount; parentIndex++)
             {
                 ulong parentDispatcherId = (ulong)(10 + parentIndex);
-                long createQpc = childStartQpc - 100;
-                var parentThread = new AsyncThreadKey(
+                long creationQpc = childStartQpc - 100;
+                var parentThread = new AsyncProfilerThreadKey(
                     s_processIndex,
                     (ulong)(100 + parentIndex));
 
@@ -240,28 +240,28 @@ namespace TraceEventBenchmarks
                     parentThread,
                     parentDispatcherId,
                     depth: 0,
-                    startQpc: createQpc - 50,
-                    endQpc: createQpc + 50,
+                    startQpc: creationQpc - 50,
+                    endQpc: creationQpc + 50,
                     firstMethodId: 300 + (parentIndex * 10));
                 SetCodeAddresses(
-                    index.GetAsyncCallStacks(parentThread, createQpc)[0],
+                    index.GetCallStacks(parentThread, creationQpc)[0],
                     firstCodeAddress: 300 + (parentIndex * 10));
-                index.AddCreation(
+                index.AddDispatcherInfo(
                     parentThread,
-                    childDispatcherId,
+                    dispatcherId,
                     parentDispatcherId,
-                    createQpc);
+                    creationQpc);
 
-                childDispatcherId = parentDispatcherId;
-                childStartQpc = createQpc - 50;
+                dispatcherId = parentDispatcherId;
+                childStartQpc = creationQpc - 50;
             }
 
             return index;
         }
 
         private static void AddActivation(
-            AsyncCallStacksIndex index,
-            AsyncThreadKey thread,
+            AsyncProfilerCallStacksIndex index,
+            AsyncProfilerThreadKey thread,
             ulong dispatcherId,
             int depth,
             long startQpc,
@@ -286,12 +286,12 @@ namespace TraceEventBenchmarks
                 wrapperCount: 32,
                 startQpc,
                 endQpc,
-                methodCompletions: Array.Empty<AsyncCallStack.CompletionDelta>(),
-                exceptionCompletions: Array.Empty<AsyncCallStack.CompletionDelta>(),
+                methodCompletions: Array.Empty<AsyncProfilerCallStack.CompletionDelta>(),
+                exceptionCompletions: Array.Empty<AsyncProfilerCallStack.CompletionDelta>(),
                 wrapperResets: Array.Empty<long>());
         }
 
-        private void SetCodeAddresses(AsyncCallStack activation, int firstCodeAddress)
+        private void SetCodeAddresses(AsyncProfilerCallStack activation, int firstCodeAddress)
         {
             for (int i = 0; i < activation.Frames.FrameCount; i++)
             {
@@ -301,7 +301,7 @@ namespace TraceEventBenchmarks
             }
         }
 
-        private StitchSyncFrame[] RuntimeSync(
+        private AsyncProfilerStitchSyncFrame[] RuntimeSync(
             int firstCodeAddress,
             int firstAsyncMethod,
             int wrapperIndex)
@@ -312,41 +312,41 @@ namespace TraceEventBenchmarks
                 Sync(firstCodeAddress + 1, firstAsyncMethod + wrapperIndex),
                 Boundary(
                     firstCodeAddress + 2,
-                    AsyncStitchBoundaryKind.V2ContinuationWrapper,
+                    AsyncProfilerCallStackStitchBoundaryKind.V2ContinuationWrapper,
                     wrapperIndex),
                 Boundary(
                     firstCodeAddress + 3,
-                    AsyncStitchBoundaryKind.V2DispatchContinuation),
+                    AsyncProfilerCallStackStitchBoundaryKind.V2DispatchContinuation),
                 Boundary(
                     firstCodeAddress + 4,
-                    AsyncStitchBoundaryKind.V2DispatchContinuation),
+                    AsyncProfilerCallStackStitchBoundaryKind.V2DispatchContinuation),
                 Sync(firstCodeAddress + 5, 95),
                 Sync(firstCodeAddress + 6, 96),
             };
         }
 
-        private StitchSyncFrame Sync(int codeAddress, int method)
+        private AsyncProfilerStitchSyncFrame Sync(int codeAddress, int method)
         {
             CodeAddressIndex ca = CodeAddress(codeAddress);
             MethodIndex mi = Method(method);
             _methods[ca] = mi;
-            return new StitchSyncFrame(ca, mi);
+            return new AsyncProfilerStitchSyncFrame(ca, mi);
         }
 
-        private StitchSyncFrame Boundary(
+        private AsyncProfilerStitchSyncFrame Boundary(
             int codeAddress,
-            AsyncStitchBoundaryKind kind,
+            AsyncProfilerCallStackStitchBoundaryKind kind,
             int wrapperIndex = -1)
         {
             CodeAddressIndex ca = CodeAddress(codeAddress);
-            _boundaries[ca] = new AsyncStitchBoundaryInfo(kind, wrapperIndex);
-            return new StitchSyncFrame(ca, MethodIndex.Invalid);
+            _boundaries[ca] = new AsyncProfilerCallStackStitchBoundaryInfo(kind, wrapperIndex);
+            return new AsyncProfilerStitchSyncFrame(ca, MethodIndex.Invalid);
         }
 
-        private AsyncStitchBoundaryInfo Classify(CodeAddressIndex codeAddress) =>
-            _boundaries.TryGetValue(codeAddress, out AsyncStitchBoundaryInfo boundary)
+        private AsyncProfilerCallStackStitchBoundaryInfo Classify(CodeAddressIndex codeAddress) =>
+            _boundaries.TryGetValue(codeAddress, out AsyncProfilerCallStackStitchBoundaryInfo boundary)
                 ? boundary
-                : AsyncStitchBoundaryInfo.None;
+                : AsyncProfilerCallStackStitchBoundaryInfo.None;
 
         private MethodIndex MethodOf(CodeAddressIndex codeAddress) =>
             _methods.TryGetValue(codeAddress, out MethodIndex method)

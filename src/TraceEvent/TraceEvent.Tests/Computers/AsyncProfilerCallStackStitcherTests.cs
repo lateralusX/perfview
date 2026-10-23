@@ -14,9 +14,9 @@ using Xunit;
 namespace TraceEventTests
 {
     /// <summary>
-    /// Unit tests for the pure stitch core <see cref="AsyncCpuStackStitcher"/>. They drive the delegate-based
-    /// <c>Stitch</c> overload with synthetic <see cref="StitchSyncFrame"/>s and synthetic
-    /// <see cref="AsyncCallStack"/> segments (built via the internals-visible constructors), plus
+    /// Unit tests for the pure stitch core <see cref="AsyncProfilerCallStackStitcher"/>. They drive the delegate-based
+    /// <c>Stitch</c> overload with synthetic <see cref="AsyncProfilerStitchSyncFrame"/>s and synthetic
+    /// <see cref="AsyncProfilerCallStack"/> segments (built via the internals-visible constructors), plus
     /// dictionary-backed <c>classify</c> / <c>completionObserved</c> / <c>methodOf</c> delegates, so no real
     /// symbol table or <c>TraceLog</c> is required.
     /// <para>
@@ -26,7 +26,7 @@ namespace TraceEventTests
     /// for a 0-IP frame).
     /// </para>
     /// </summary>
-    public class AsyncCpuStackStitcherTests
+    public class AsyncProfilerCallStackStitcherTests
     {
         private const long Qpc = 1000;
 
@@ -34,11 +34,11 @@ namespace TraceEventTests
         private sealed class Scenario
         {
             private readonly Dictionary<CodeAddressIndex, MethodIndex> _methodOf = new Dictionary<CodeAddressIndex, MethodIndex>();
-            private readonly Dictionary<CodeAddressIndex, AsyncStitchBoundaryInfo> _classify = new Dictionary<CodeAddressIndex, AsyncStitchBoundaryInfo>();
+            private readonly Dictionary<CodeAddressIndex, AsyncProfilerCallStackStitchBoundaryInfo> _classify = new Dictionary<CodeAddressIndex, AsyncProfilerCallStackStitchBoundaryInfo>();
             private readonly HashSet<AsyncCallstackKind> _methodCompletionObserved = new HashSet<AsyncCallstackKind>();
 
             public Func<CodeAddressIndex, MethodIndex> MethodOf => ca => _methodOf.TryGetValue(ca, out MethodIndex m) ? m : MethodIndex.Invalid;
-            public Func<CodeAddressIndex, AsyncStitchBoundaryInfo> Classify => ca => _classify.TryGetValue(ca, out AsyncStitchBoundaryInfo b) ? b : AsyncStitchBoundaryInfo.None;
+            public Func<CodeAddressIndex, AsyncProfilerCallStackStitchBoundaryInfo> Classify => ca => _classify.TryGetValue(ca, out AsyncProfilerCallStackStitchBoundaryInfo b) ? b : AsyncProfilerCallStackStitchBoundaryInfo.None;
             public Func<AsyncCallstackKind, bool> MethodCompletionObserved => k => _methodCompletionObserved.Contains(k);
 
             public static CodeAddressIndex CA(int i) => (CodeAddressIndex)i;
@@ -50,19 +50,19 @@ namespace TraceEventTests
                 _methodOf[CA(codeAddr)] = MI(method);
 
             /// <summary>Declares a sync frame with a code address whose method is <paramref name="method"/>.</summary>
-            public StitchSyncFrame Sync(int codeAddr, int method) => new StitchSyncFrame(CA(codeAddr), MI(method));
+            public AsyncProfilerStitchSyncFrame Sync(int codeAddr, int method) => new AsyncProfilerStitchSyncFrame(CA(codeAddr), MI(method));
 
-            public StitchSyncFrame Sync(int codeAddr, int method, StitchSyncFrameKind kind) =>
-                new StitchSyncFrame(CA(codeAddr), MI(method), kind);
+            public AsyncProfilerStitchSyncFrame Sync(int codeAddr, int method, AsyncProfilerStitchSyncFrameKind kind) =>
+                new AsyncProfilerStitchSyncFrame(CA(codeAddr), MI(method), kind);
 
-            public StitchSyncFrame BoxCarrier(int codeAddr, int boxedMethod) =>
-                new StitchSyncFrame(CA(codeAddr), MI(codeAddr), StitchSyncFrameKind.None, MI(boxedMethod));
+            public AsyncProfilerStitchSyncFrame BoxCarrier(int codeAddr, int boxedMethod) =>
+                new AsyncProfilerStitchSyncFrame(CA(codeAddr), MI(codeAddr), AsyncProfilerStitchSyncFrameKind.None, MI(boxedMethod));
 
             /// <summary>Declares a sync boundary frame classified as <paramref name="info"/>.</summary>
-            public StitchSyncFrame Boundary(int codeAddr, AsyncStitchBoundaryInfo info)
+            public AsyncProfilerStitchSyncFrame Boundary(int codeAddr, AsyncProfilerCallStackStitchBoundaryInfo info)
             {
                 _classify[CA(codeAddr)] = info;
-                return new StitchSyncFrame(CA(codeAddr), MI(codeAddr));
+                return new AsyncProfilerStitchSyncFrame(CA(codeAddr), MI(codeAddr));
             }
 
             /// <summary>
@@ -70,14 +70,14 @@ namespace TraceEventTests
             /// value means <see cref="CodeAddressIndex.Invalid"/> (a 0-IP frame). The <paramref name="frameMethods"/>
             /// (same length) wire each async code address to its <c>MethodIndex</c> via the <c>methodOf</c> map.
             /// </summary>
-            public AsyncCallStack Segment(AsyncCallstackKind kind, int[] frameCodeAddrs, int[] frameMethods,
-                AsyncCallStack.CompletionDelta[] completions = null, AsyncCallStack.CompletionDelta[] exceptionCompletions = null,
+            public AsyncProfilerCallStack Segment(AsyncCallstackKind kind, int[] frameCodeAddrs, int[] frameMethods,
+                AsyncProfilerCallStack.CompletionDelta[] completions = null, AsyncProfilerCallStack.CompletionDelta[] exceptionCompletions = null,
                 byte continuationIndexBase = 0, byte wrapperCount = 32, ulong[] frameMethodIds = null,
                 long[] wrapperResets = null)
             {
                 int n = frameCodeAddrs.Length;
                 var methodIds = frameMethodIds ?? new ulong[n];
-                var frames = new AsyncCallStackFrames(kind, methodIds, null);
+                var frames = new AsyncProfilerCallStackFrames(kind, methodIds, null);
                 for (int i = 0; i < n; i++)
                 {
                     if (frameCodeAddrs[i] < 0)
@@ -92,57 +92,58 @@ namespace TraceEventTests
                     }
                 }
 
-                return new AsyncCallStack(depth: 0, framesIndex: (AsyncCallStackFramesIndex)0, frames: frames,
+                return new AsyncProfilerCallStack(depth: 0, framesIndex: (AsyncProfilerCallStackFramesIndex)0, frames: frames,
                     continuationIndexBase: continuationIndexBase, wrapperCount: wrapperCount, startQpc: 0, endQpc: long.MaxValue,
-                    methodCompletions: completions ?? Array.Empty<AsyncCallStack.CompletionDelta>(),
-                    exceptionCompletions: exceptionCompletions ?? Array.Empty<AsyncCallStack.CompletionDelta>(),
+                    methodCompletions: completions ?? Array.Empty<AsyncProfilerCallStack.CompletionDelta>(),
+                    exceptionCompletions: exceptionCompletions ?? Array.Empty<AsyncProfilerCallStack.CompletionDelta>(),
                     wrapperResets: wrapperResets ?? Array.Empty<long>());
             }
 
-            public StitchResult Run(IReadOnlyList<StitchSyncFrame> sync, IReadOnlyList<AsyncCallStack> segmentsRootToLeaf) =>
-                AsyncCpuStackStitcher.Stitch(sync, segmentsRootToLeaf, Qpc, Classify, MethodCompletionObserved, MethodOf);
+            public AsyncProfilerStitchResult Run(IReadOnlyList<AsyncProfilerStitchSyncFrame> sync, IReadOnlyList<AsyncProfilerCallStack> segmentsRootToLeaf) =>
+                AsyncProfilerCallStackStitcher.Stitch(sync, segmentsRootToLeaf, Qpc, Classify, MethodCompletionObserved, MethodOf);
 
-            public StitchResult Run(IReadOnlyList<StitchSyncFrame> sync, IReadOnlyList<AsyncCallStack> segmentsRootToLeaf, bool trace) =>
-                AsyncCpuStackStitcher.Stitch(sync, segmentsRootToLeaf, Qpc, Classify, MethodCompletionObserved, MethodOf, trace);
+            public AsyncProfilerStitchResult Run(IReadOnlyList<AsyncProfilerStitchSyncFrame> sync, IReadOnlyList<AsyncProfilerCallStack> segmentsRootToLeaf, bool trace) =>
+                AsyncProfilerCallStackStitcher.Stitch(sync, segmentsRootToLeaf, Qpc, Classify, MethodCompletionObserved, MethodOf, trace);
 
-            public StitchResult Run(IReadOnlyList<StitchSyncFrame> sync, IReadOnlyList<AsyncCallStack> segments,
-                AsyncRuntimeRuleProfile profile, Func<CodeAddressIndex, AsyncRuntimeRuleProfile> runtimeProfileResolver = null)
+            public AsyncProfilerStitchResult Run(IReadOnlyList<AsyncProfilerStitchSyncFrame> sync, IReadOnlyList<AsyncProfilerCallStack> segments,
+                AsyncProfilerRuntimeRuleProfile profile, Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile> runtimeProfileResolver = null)
             {
-                var output = new List<StitchedFrame>();
-                var diagnostics = new StitchDiagnostics();
-                AsyncCpuStackStitcher.StitchInto(sync, segments, Qpc, Classify,
+                var output = new List<AsyncProfilerStitchedFrame>();
+                var diagnostics = new AsyncProfilerCallStackDiagnostics();
+                AsyncProfilerCallStackStitcher.StitchInto(sync, segments, Qpc, Classify,
                     (process, kind, qpc) => MethodCompletionObserved(kind), ProcessIndex.Invalid, MethodOf,
                     false, output, diagnostics, null, runtimeProfileResolver ?? (_ => profile), profile);
-                return new StitchResult(output, diagnostics);
+                return new AsyncProfilerStitchResult(output, diagnostics);
             }
         }
 
         [Theory]
-        [InlineData(AsyncCallstackKind.StateMachineAsync, false, false)]
-        [InlineData(AsyncCallstackKind.RuntimeAsync, false, false)]
-        [InlineData(AsyncCallstackKind.StateMachineAsync, true, false)]
-        [InlineData(AsyncCallstackKind.RuntimeAsync, true, false)]
-        [InlineData(AsyncCallstackKind.StateMachineAsync, false, true)]
-        [InlineData(AsyncCallstackKind.RuntimeAsync, false, true)]
+        [InlineData((int)AsyncCallstackKind.StateMachineAsync, false, false)]
+        [InlineData((int)AsyncCallstackKind.RuntimeAsync, false, false)]
+        [InlineData((int)AsyncCallstackKind.StateMachineAsync, true, false)]
+        [InlineData((int)AsyncCallstackKind.RuntimeAsync, true, false)]
+        [InlineData((int)AsyncCallstackKind.StateMachineAsync, false, true)]
+        [InlineData((int)AsyncCallstackKind.RuntimeAsync, false, true)]
         public void ProfiledStructuralPlumbing_RecognizesInsertedHelpersButPreservesForeignSpansAndBoundaries(
-            AsyncCallstackKind kind, bool foreignProfile, bool crossesBoundary)
+            int kindValue, bool foreignProfile, bool crossesBoundary)
         {
+            var kind = (AsyncCallstackKind)kindValue;
             var s = new Scenario();
             var profile = new StructuralRulesProfile(2);
-            AsyncCallStack segment = s.Segment(kind, new[] { 800, 801 }, new[] { 10, 11 });
+            AsyncProfilerCallStack segment = s.Segment(kind, new[] { 800, 801 }, new[] { 10, 11 });
             var sync = new[]
             {
                 s.Sync(50, 10),
                 s.Boundary(51, kind == AsyncCallstackKind.StateMachineAsync ? V1Dispatcher : Wrapper(0)),
-                s.Sync(52, 90, StitchSyncFrameKind.V1MethodBuilderInfrastructure),
+                s.Sync(52, 90, AsyncProfilerStitchSyncFrameKind.V1MethodBuilderInfrastructure),
                 s.Boundary(53, crossesBoundary ? V1Dispatcher :
                     kind == AsyncCallstackKind.StateMachineAsync ? V1Infrastructure : DispatchContinuation),
                 s.Sync(54, 99),
             };
-            StitchResult common = s.Run(sync, new[] { segment });
+            AsyncProfilerStitchResult common = s.Run(sync, new[] { segment });
             Assert.Contains(common.Frames, frame => frame.CodeAddress == Scenario.CA(52));
-            StitchResult changed = s.Run(sync, new[] { segment }, profile,
-                ca => foreignProfile && ca == Scenario.CA(52) ? AsyncRuntimeRuleProfile.Common : profile);
+            AsyncProfilerStitchResult changed = s.Run(sync, new[] { segment }, profile,
+                ca => foreignProfile && ca == Scenario.CA(52) ? AsyncProfilerRuntimeRuleProfile.Common : profile);
             Assert.Equal(foreignProfile || crossesBoundary,
                 changed.Frames.Any(frame => frame.CodeAddress == Scenario.CA(52)));
             Assert.Contains(changed.Frames, frame => frame.CodeAddress == Scenario.CA(54));
@@ -153,11 +154,11 @@ namespace TraceEventTests
         public void ProfiledStructuralPlumbing_InvalidBoundsThrow()
         {
             var s = new Scenario();
-            AsyncCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync, new[] { 800 }, new[] { 10 });
+            AsyncProfilerCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync, new[] { 800 }, new[] { 10 });
             var sync = new[]
             {
                 s.Sync(50, 10), s.Boundary(51, V1Dispatcher),
-                s.Sync(52, 90, StitchSyncFrameKind.V1MethodBuilderInfrastructure),
+                s.Sync(52, 90, AsyncProfilerStitchSyncFrameKind.V1MethodBuilderInfrastructure),
             };
             Assert.Throws<InvalidOperationException>(() =>
                 s.Run(sync, new[] { segment }, new StructuralRulesProfile(10)));
@@ -171,20 +172,20 @@ namespace TraceEventTests
         public void ProfiledCarrierEvidence_CannotOverridePhysicalBodyPrecedence(bool allowCarrier, bool physicalBody)
         {
             var s = new Scenario();
-            AsyncCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { 800, 801 }, new[] { 10, 11 });
             var sync = new[]
             {
                 s.Sync(50, physicalBody ? 10 : 90), s.BoxCarrier(51, 10),
                 s.Boundary(52, V1Dispatcher), s.Sync(53, 99),
             };
-            StitchResult result = s.Run(sync, new[] { segment },
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { segment },
                 new StructuralRulesProfile(0, allowCarrier: allowCarrier));
             Assert.Equal(allowCarrier && !physicalBody, result.Frames.Any(frame => frame.IsStateMachineBoxCarrier));
             Assert.Contains(result.Frames, frame => frame.CodeAddress == Scenario.CA(50));
         }
 
-        private sealed class StructuralRulesProfile : AsyncRuntimeRuleProfile
+        private sealed class StructuralRulesProfile : AsyncProfilerRuntimeRuleProfile
         {
             public StructuralRulesProfile(int plumbingLength, bool allowCarrier = true, bool allowCompletion = true)
                 : base("Test-only structural rules")
@@ -194,19 +195,19 @@ namespace TraceEventTests
                 m_allowCompletion = allowCompletion;
             }
 
-            public override AsyncRuntimeSequenceMatch MatchDispatchPlumbing(
-                AsyncCallstackKind kind, IReadOnlyList<StitchSyncFrame> frames, int start, int end,
-                Func<CodeAddressIndex, AsyncStitchBoundaryInfo> classify) =>
+            public override AsyncProfilerRuntimeSequenceMatch MatchDispatchPlumbing(
+                AsyncCallstackKind kind, IReadOnlyList<AsyncProfilerStitchSyncFrame> frames, int start, int end,
+                Func<CodeAddressIndex, AsyncProfilerCallStackStitchBoundaryInfo> classify) =>
                 m_plumbingLength != 0 && start < end &&
-                frames[start].Kind == StitchSyncFrameKind.V1MethodBuilderInfrastructure
-                    ? AsyncRuntimeSequenceMatch.Match(m_plumbingLength)
+                frames[start].Kind == AsyncProfilerStitchSyncFrameKind.V1MethodBuilderInfrastructure
+                    ? AsyncProfilerRuntimeSequenceMatch.Match(m_plumbingLength)
                     : base.MatchDispatchPlumbing(kind, frames, start, end, classify);
 
             public override bool IsV1BoxCarrierCandidate(
-                IReadOnlyList<StitchSyncFrame> frames, int start, int end, int index) =>
+                IReadOnlyList<AsyncProfilerStitchSyncFrame> frames, int start, int end, int index) =>
                 m_allowCarrier && base.IsV1BoxCarrierCandidate(frames, start, end, index);
 
-            public override bool HasV1CompletionEvidence(IReadOnlyList<StitchSyncFrame> frames, int start, int end) =>
+            public override bool HasV1CompletionEvidence(IReadOnlyList<AsyncProfilerStitchSyncFrame> frames, int start, int end) =>
                 m_allowCompletion && base.HasV1CompletionEvidence(frames, start, end);
 
             private readonly int m_plumbingLength;
@@ -214,35 +215,35 @@ namespace TraceEventTests
             private readonly bool m_allowCompletion;
         }
 
-        private static AsyncStitchBoundaryInfo Wrapper(int index) => new AsyncStitchBoundaryInfo(AsyncStitchBoundaryKind.V2ContinuationWrapper, index);
-        private static readonly AsyncStitchBoundaryInfo DispatchContinuation = new AsyncStitchBoundaryInfo(AsyncStitchBoundaryKind.V2DispatchContinuation, -1);
-        private static readonly AsyncStitchBoundaryInfo V1Dispatcher = new AsyncStitchBoundaryInfo(AsyncStitchBoundaryKind.V1Dispatcher, -1);
-        private static readonly AsyncStitchBoundaryInfo V1Infrastructure =
-            new AsyncStitchBoundaryInfo(AsyncStitchBoundaryKind.V1DispatcherInfrastructure, -1);
+        private static AsyncProfilerCallStackStitchBoundaryInfo Wrapper(int index) => new AsyncProfilerCallStackStitchBoundaryInfo(AsyncProfilerCallStackStitchBoundaryKind.V2ContinuationWrapper, index);
+        private static readonly AsyncProfilerCallStackStitchBoundaryInfo DispatchContinuation = new AsyncProfilerCallStackStitchBoundaryInfo(AsyncProfilerCallStackStitchBoundaryKind.V2DispatchContinuation, -1);
+        private static readonly AsyncProfilerCallStackStitchBoundaryInfo V1Dispatcher = new AsyncProfilerCallStackStitchBoundaryInfo(AsyncProfilerCallStackStitchBoundaryKind.V1Dispatcher, -1);
+        private static readonly AsyncProfilerCallStackStitchBoundaryInfo V1Infrastructure =
+            new AsyncProfilerCallStackStitchBoundaryInfo(AsyncProfilerCallStackStitchBoundaryKind.V1DispatcherInfrastructure, -1);
 
-        private static AsyncCallStack.CompletionDelta[] Completed(int count) =>
-            new[] { new AsyncCallStack.CompletionDelta(Qpc, count) };
+        private static AsyncProfilerCallStack.CompletionDelta[] Completed(int count) =>
+            new[] { new AsyncProfilerCallStack.CompletionDelta(Qpc, count) };
 
-        private static AsyncCallStack.CompletionDelta[] Unwound(int frames) =>
-            new[] { new AsyncCallStack.CompletionDelta(Qpc, frames) };
+        private static AsyncProfilerCallStack.CompletionDelta[] Unwound(int frames) =>
+            new[] { new AsyncProfilerCallStack.CompletionDelta(Qpc, frames) };
 
         [Fact]
         public void StitchedFrame_BoxCarrierMetadata_PreservesCompactStorage()
         {
             Assert.Equal(6 * sizeof(int) + 2 * IntPtr.Size,
-                System.Runtime.CompilerServices.Unsafe.SizeOf<StitchedFrame>());
+                System.Runtime.CompilerServices.Unsafe.SizeOf<AsyncProfilerStitchedFrame>());
         }
 
         [Fact]
         public void StitchedFrame_CurrentFactory_BoxIdentityCreatesAResumptionTarget()
         {
             var s = new Scenario();
-            AsyncCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { 500 }, new[] { 30 });
-            StitchedFrame frame = StitchedFrame.CreateAsyncCurrent(
+            AsyncProfilerStitchedFrame frame = AsyncProfilerStitchedFrame.CreateAsyncCurrent(
                 Scenario.CA(40), Scenario.MI(40), segment, 0, Scenario.MI(30));
 
-            Assert.Equal(StitchedFrameOrigin.AsyncDispatchTarget, frame.Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget, frame.Origin);
             Assert.True(frame.IsStateMachineBoxCarrier);
             Assert.Equal(Scenario.CA(40), frame.CodeAddress);
             Assert.Equal(Scenario.MI(40), frame.Method);
@@ -255,10 +256,10 @@ namespace TraceEventTests
             var s = new Scenario();
             var sync = new[] { s.Sync(10, 1), s.Sync(11, 2), s.Sync(12, 3) };
 
-            StitchResult result = s.Run(sync, Array.Empty<AsyncCallStack>());
+            AsyncProfilerStitchResult result = s.Run(sync, Array.Empty<AsyncProfilerCallStack>());
 
             Assert.Equal(3, result.Frames.Count);
-            Assert.All(result.Frames, f => Assert.Equal(StitchedFrameOrigin.Sync, f.Origin));
+            Assert.All(result.Frames, f => Assert.Equal(AsyncProfilerStitchedFrameOrigin.Sync, f.Origin));
             Assert.Equal(new[] { Scenario.CA(10), Scenario.CA(11), Scenario.CA(12) }, result.Frames.Select(f => f.CodeAddress));
             Assert.Equal(0, result.Diagnostics.SegmentsProcessed);
             Assert.Equal(0, result.Diagnostics.BoundariesNotFound);
@@ -268,7 +269,7 @@ namespace TraceEventTests
         public void StitchInto_ReusesAndClearsCallerOwnedBuffers()
         {
             var s = new Scenario();
-            AsyncCallStack segment = s.Segment(
+            AsyncProfilerCallStack segment = s.Segment(
                 AsyncCallstackKind.RuntimeAsync,
                 frameCodeAddrs: new[] { 200, 201 },
                 frameMethods: new[] { 50, 51 });
@@ -278,11 +279,11 @@ namespace TraceEventTests
                 s.Boundary(11, Wrapper(0)),
                 s.Sync(12, 99),
             };
-            var output = new List<StitchedFrame>();
-            var diagnostics = new StitchDiagnostics();
+            var output = new List<AsyncProfilerStitchedFrame>();
+            var diagnostics = new AsyncProfilerCallStackDiagnostics();
             long completionPolicyQpc = long.MinValue;
 
-            AsyncCpuStackStitcher.StitchInto(
+            AsyncProfilerCallStackStitcher.StitchInto(
                 stitchedSync,
                 new[] { segment },
                 Qpc,
@@ -305,9 +306,9 @@ namespace TraceEventTests
             Assert.Equal(segment.StartQpc, completionPolicyQpc);
 
             var passthroughSync = new[] { s.Sync(20, 60), s.Sync(21, 61) };
-            AsyncCpuStackStitcher.StitchInto(
+            AsyncProfilerCallStackStitcher.StitchInto(
                 passthroughSync,
-                Array.Empty<AsyncCallStack>(),
+                Array.Empty<AsyncProfilerCallStack>(),
                 Qpc,
                 s.Classify,
                 (processIndex, kind, activationStartQpc) => s.MethodCompletionObserved(kind),
@@ -339,10 +340,10 @@ namespace TraceEventTests
                 s.Sync(83, 98),
             };
 
-            StitchResult result = s.Run(sync, Array.Empty<AsyncCallStack>());
+            AsyncProfilerStitchResult result = s.Run(sync, Array.Empty<AsyncProfilerCallStack>());
 
             Assert.Equal(4, result.Frames.Count);
-            Assert.All(result.Frames, f => Assert.Equal(StitchedFrameOrigin.Sync, f.Origin));
+            Assert.All(result.Frames, f => Assert.Equal(AsyncProfilerStitchedFrameOrigin.Sync, f.Origin));
             Assert.Equal(new[] { Scenario.CA(80), Scenario.CA(81), Scenario.CA(82), Scenario.CA(83) }, result.Frames.Select(f => f.CodeAddress));
             Assert.Equal(0, result.Diagnostics.V2LeafWrapperDropped);
             Assert.Equal(0, result.Diagnostics.SegmentsProcessed);
@@ -362,10 +363,10 @@ namespace TraceEventTests
                 s.Sync(73, 98),
             };
 
-            StitchResult result = s.Run(sync, Array.Empty<AsyncCallStack>());
+            AsyncProfilerStitchResult result = s.Run(sync, Array.Empty<AsyncProfilerCallStack>());
 
             Assert.Equal(4, result.Frames.Count);
-            Assert.All(result.Frames, f => Assert.Equal(StitchedFrameOrigin.Sync, f.Origin));
+            Assert.All(result.Frames, f => Assert.Equal(AsyncProfilerStitchedFrameOrigin.Sync, f.Origin));
             Assert.Equal(new[] { Scenario.CA(70), Scenario.CA(71), Scenario.CA(72), Scenario.CA(73) }, result.Frames.Select(f => f.CodeAddress));
             Assert.Equal(0, result.Diagnostics.SegmentsProcessed);
         }
@@ -382,7 +383,7 @@ namespace TraceEventTests
                 s.Sync(86, 98),
             };
 
-            StitchResult result = s.Run(sync, Array.Empty<AsyncCallStack>());
+            AsyncProfilerStitchResult result = s.Run(sync, Array.Empty<AsyncProfilerCallStack>());
 
             Assert.Equal(3, result.Frames.Count);
             Assert.Equal(new[] { Scenario.CA(84), Scenario.CA(85), Scenario.CA(86) }, result.Frames.Select(f => f.CodeAddress));
@@ -393,7 +394,7 @@ namespace TraceEventTests
         public void EmptySegment_PreservesPhysicalSyncBoundaries()
         {
             var s = new Scenario();
-            AsyncCallStack empty = s.Segment(
+            AsyncProfilerCallStack empty = s.Segment(
                 AsyncCallstackKind.RuntimeAsync,
                 frameCodeAddrs: Array.Empty<int>(),
                 frameMethods: Array.Empty<int>());
@@ -405,10 +406,10 @@ namespace TraceEventTests
                 s.Sync(73, 98),
             };
 
-            StitchResult result = s.Run(sync, new[] { empty });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { empty });
 
             Assert.Equal(4, result.Frames.Count);
-            Assert.All(result.Frames, frame => Assert.Equal(StitchedFrameOrigin.Sync, frame.Origin));
+            Assert.All(result.Frames, frame => Assert.Equal(AsyncProfilerStitchedFrameOrigin.Sync, frame.Origin));
             Assert.Equal(new[] { Scenario.CA(70), Scenario.CA(71), Scenario.CA(72), Scenario.CA(73) },
                 result.Frames.Select(frame => frame.CodeAddress));
             Assert.Equal(0, result.Diagnostics.SegmentsProcessed);
@@ -420,7 +421,7 @@ namespace TraceEventTests
             // Segment (leaf-first): [C0, C1, Mcur, A1, A2]; completed=2 -> current=Mcur (frames[2]); ancestry=A1,A2.
             var s = new Scenario();
             s.MarkMethodCompletionObserved(AsyncCallstackKind.RuntimeAsync);
-            AsyncCallStack seg = s.Segment(AsyncCallstackKind.RuntimeAsync,
+            AsyncProfilerCallStack seg = s.Segment(AsyncCallstackKind.RuntimeAsync,
                 frameCodeAddrs: new[] { 200, 201, 202, 203, 204 },
                 frameMethods:   new[] {  50,  51,  52,  53,  54 },
                 completions: Completed(2));
@@ -433,17 +434,17 @@ namespace TraceEventTests
                 s.Sync(92, 99),                     // root
             };
 
-            StitchResult result = s.Run(sync, new[] { seg });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { seg });
 
             // Expected: [Mcur(AsyncCurrent), A1(Async), A2(Async), root(Sync)].
             Assert.Equal(4, result.Frames.Count);
-            Assert.Equal(StitchedFrameOrigin.AsyncCurrent, result.Frames[0].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, result.Frames[0].Origin);
             Assert.Equal(Scenario.CA(90), result.Frames[0].CodeAddress);           // retain sampled code address
-            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
             Assert.Equal(Scenario.CA(203), result.Frames[1].CodeAddress);          // A1
-            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[2].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[2].Origin);
             Assert.Equal(Scenario.CA(204), result.Frames[2].CodeAddress);          // A2
-            Assert.Equal(StitchedFrameOrigin.Sync, result.Frames[3].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.Sync, result.Frames[3].Origin);
             Assert.Equal(Scenario.CA(92), result.Frames[3].CodeAddress);           // root
 
             Assert.Equal(1, result.Diagnostics.SegmentsProcessed);
@@ -457,7 +458,7 @@ namespace TraceEventTests
         {
             // No completion events -> completed derived from the wrapper slot (index 1 -> completed 1).
             var s = new Scenario();
-            AsyncCallStack seg = s.Segment(AsyncCallstackKind.RuntimeAsync,
+            AsyncProfilerCallStack seg = s.Segment(AsyncCallstackKind.RuntimeAsync,
                 frameCodeAddrs: new[] { 300, 301, 302 },
                 frameMethods:   new[] {  60,  61,  62 });
 
@@ -468,12 +469,12 @@ namespace TraceEventTests
                 s.Sync(82, 99),                 // root
             };
 
-            StitchResult result = s.Run(sync, new[] { seg });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { seg });
 
             // completed=1 -> current=frames[1]; splice frames[2]=302.
             Assert.Equal(3, result.Frames.Count);
             Assert.Equal(Scenario.CA(80), result.Frames[0].CodeAddress);
-            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
             Assert.Equal(Scenario.CA(302), result.Frames[1].CodeAddress);
             Assert.Equal(Scenario.CA(82), result.Frames[2].CodeAddress);
             Assert.Equal(1, result.Diagnostics.V2WrapperFallbackUsed);
@@ -489,7 +490,7 @@ namespace TraceEventTests
             int physicalMethod, bool resolved, int mismatches)
         {
             var s = new Scenario();
-            AsyncCallStack segment = s.Segment(
+            AsyncProfilerCallStack segment = s.Segment(
                 AsyncCallstackKind.RuntimeAsync, new[] { 500, 501 }, new[] { 30, 32 });
             var sync = new[]
             {
@@ -499,7 +500,7 @@ namespace TraceEventTests
             };
             int resolutionCount = 0;
             Func<CodeAddressIndex, MethodIndex> methodOf = s.MethodOf;
-            StitchResult result = AsyncCpuStackStitcher.Stitch(
+            AsyncProfilerStitchResult result = AsyncProfilerCallStackStitcher.Stitch(
                 sync, new[] { segment }, Qpc, s.Classify, s.MethodCompletionObserved,
                 codeAddress =>
                 {
@@ -510,7 +511,7 @@ namespace TraceEventTests
             Assert.Equal(1, resolutionCount);
             Assert.Equal(mismatches, result.Diagnostics.AdjacencyMismatches);
             Assert.Equal(resolved && physicalMethod == 30,
-                result.Frames[0].Origin == StitchedFrameOrigin.AsyncCurrent);
+                result.Frames[0].Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent);
         }
 
         [Fact]
@@ -518,7 +519,7 @@ namespace TraceEventTests
         {
             var s = new Scenario();
             s.MarkMethodCompletionObserved(AsyncCallstackKind.RuntimeAsync);
-            AsyncCallStack seg = s.Segment(AsyncCallstackKind.RuntimeAsync,
+            AsyncProfilerCallStack seg = s.Segment(AsyncCallstackKind.RuntimeAsync,
                 frameCodeAddrs: new[] { 400, 401 },
                 frameMethods:   new[] {  70,  71 },
                 completions: Completed(0)); // current = frames[0] (method 70)
@@ -530,7 +531,7 @@ namespace TraceEventTests
                 s.Sync(72, 99),
             };
 
-            StitchResult result = s.Run(sync, new[] { seg });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { seg });
 
             Assert.Equal(1, result.Diagnostics.AdjacencyMismatches);
         }
@@ -539,7 +540,7 @@ namespace TraceEventTests
         public void V1_InlineMatching_ReusesTheMethodAcrossPhysicalTransitionFrames()
         {
             var s = new Scenario();
-            AsyncCallStack segment = s.Segment(
+            AsyncProfilerCallStack segment = s.Segment(
                 AsyncCallstackKind.StateMachineAsync, new[] { 500, 501, 502 }, new[] { 30, 31, 32 });
             var sync = new[]
             {
@@ -554,7 +555,7 @@ namespace TraceEventTests
             };
             int firstMethodResolutions = 0;
             Func<CodeAddressIndex, MethodIndex> methodOf = s.MethodOf;
-            StitchResult result = AsyncCpuStackStitcher.Stitch(
+            AsyncProfilerStitchResult result = AsyncProfilerCallStackStitcher.Stitch(
                 sync, new[] { segment }, Qpc, s.Classify, s.MethodCompletionObserved,
                 codeAddress =>
                 {
@@ -568,7 +569,7 @@ namespace TraceEventTests
             Assert.Equal(1, firstMethodResolutions);
             Assert.Equal(new[] { Scenario.CA(40), Scenario.CA(41), Scenario.CA(502), Scenario.CA(47) },
                 result.Frames.Select(frame => frame.CodeAddress));
-            Assert.Equal(StitchedFrameOrigin.AsyncCurrent, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, result.Frames[1].Origin);
             Assert.Equal(1, result.Frames[1].SegmentFrameIndex);
         }
 
@@ -578,7 +579,7 @@ namespace TraceEventTests
             // Inline-resume cascade. Sync (leaf-first): A(current), B, C, dispatcher, root.
             // Async (leaf-first): [C, B, A, P1]; C,B completed -> completed=2; current=A(frames[2]); ancestry=P1.
             var s = new Scenario();
-            AsyncCallStack seg = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack seg = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 frameCodeAddrs: new[] { 500, 501, 502, 503 },  // C, B, A, P1
                 frameMethods:   new[] {  30,  31,  32,  33 });
 
@@ -591,14 +592,14 @@ namespace TraceEventTests
                 s.Sync(44, 99),                  // root
             };
 
-            StitchResult result = s.Run(sync, new[] { seg });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { seg });
 
             // Expected: [A(AsyncCurrent), P1(Async), root(Sync)]. Completed B/C and their physical
             // transition chain are replaced by the logical ancestry.
             Assert.Equal(3, result.Frames.Count);
-            Assert.Equal(StitchedFrameOrigin.AsyncCurrent, result.Frames[0].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, result.Frames[0].Origin);
             Assert.Equal(Scenario.CA(40), result.Frames[0].CodeAddress);
-            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
             Assert.Equal(Scenario.CA(503), result.Frames[1].CodeAddress); // P1 ancestry
             Assert.Equal(Scenario.CA(44), result.Frames[2].CodeAddress);  // root
             Assert.Equal(1, result.Diagnostics.V1InlineFallbackUsed);
@@ -613,9 +614,9 @@ namespace TraceEventTests
         public void V1_LeafBoxCarrier_ExtendsOrderedAlignmentWithoutCountingOtherBoxFrames(int completed)
         {
             var s = new Scenario();
-            AsyncCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { 500, 501, 502, 503 }, new[] { 30, 31, 32, 33 });
-            var sync = new List<StitchSyncFrame>
+            var sync = new List<AsyncProfilerStitchSyncFrame>
             {
                 s.BoxCarrier(40, 30 + completed),
                 s.BoxCarrier(41, 30 + completed),
@@ -627,19 +628,19 @@ namespace TraceEventTests
             sync.Add(s.Boundary(46, V1Dispatcher));
             sync.Add(s.Sync(47, 99));
 
-            StitchResult result = s.Run(sync, new[] { segment });
-            StitchedFrame current = result.Frames[0];
-            Assert.Equal(StitchedFrameOrigin.AsyncDispatchTarget, current.Origin);
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { segment });
+            AsyncProfilerStitchedFrame current = result.Frames[0];
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget, current.Origin);
             Assert.True(current.IsStateMachineBoxCarrier);
             Assert.Equal(Scenario.CA(40), current.CodeAddress);
             Assert.Equal(Scenario.MI(40), current.Method);
             Assert.Equal(Scenario.MI(30 + completed), current.BoxedStateMachineMethod);
             Assert.Equal(completed, current.SegmentFrameIndex);
             Assert.Same(segment, current.Context);
-            Assert.True(current.WithPresentation(StitchedFramePresentation.Native).IsStateMachineBoxCarrier);
+            Assert.True(current.WithPresentation(AsyncProfilerStitchedFramePresentation.Native).IsStateMachineBoxCarrier);
             Assert.Equal(5 - completed, result.Frames.Count);
             Assert.Equal(Scenario.CA(47), result.Frames[result.Frames.Count - 1].CodeAddress);
-            Assert.Single(result.Frames.Where(frame => frame.Origin == StitchedFrameOrigin.AsyncDispatchTarget));
+            Assert.Single(result.Frames.Where(frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget));
         }
 
         [Theory]
@@ -652,11 +653,11 @@ namespace TraceEventTests
             {
                 s.MarkMethodCompletionObserved(AsyncCallstackKind.StateMachineAsync);
             }
-            AsyncCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { 500, 501, 502, 503 }, new[] { 30, 31, 32, 33 },
                 completions: methodEvents ? Completed(1) : null,
                 exceptionCompletions: Unwound(1));
-            StitchResult result = s.Run(
+            AsyncProfilerStitchResult result = s.Run(
                 new[] { s.BoxCarrier(40, 32), s.Sync(41, 31), s.Boundary(42, V1Dispatcher), s.Sync(43, 99) },
                 new[] { segment });
 
@@ -677,17 +678,17 @@ namespace TraceEventTests
         public void V1_LeafBoxCarrier_GuardsPreserveExistingAlignment(string guard)
         {
             var s = new Scenario();
-            AsyncCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { 500, guard == "unresolved-target" ? -1 : 501, 502 }, new[] { 30, 31, 32 });
-            var sync = new List<StitchSyncFrame>();
+            var sync = new List<AsyncProfilerStitchSyncFrame>();
             if (guard == "non-leaf")
             {
                 sync.Add(s.Sync(39, 99));
             }
             sync.Add(guard == "unresolved-address"
-                ? new StitchSyncFrame(CodeAddressIndex.Invalid, Scenario.MI(40), StitchSyncFrameKind.None, Scenario.MI(31))
+                ? new AsyncProfilerStitchSyncFrame(CodeAddressIndex.Invalid, Scenario.MI(40), AsyncProfilerStitchSyncFrameKind.None, Scenario.MI(31))
                 : guard == "unresolved-carrier"
-                ? new StitchSyncFrame(Scenario.CA(40), MethodIndex.Invalid, StitchSyncFrameKind.None, Scenario.MI(31))
+                ? new AsyncProfilerStitchSyncFrame(Scenario.CA(40), MethodIndex.Invalid, AsyncProfilerStitchSyncFrameKind.None, Scenario.MI(31))
                 : s.BoxCarrier(40, guard == "wrong-next" ? 32 : 31));
             sync.Add(s.Sync(41, 30));
             if (guard != "no-boundary")
@@ -695,11 +696,11 @@ namespace TraceEventTests
                 sync.Add(s.Boundary(42, V1Dispatcher));
             }
             sync.Add(s.Sync(43, 99));
-            AsyncCallStack[] segments = guard == "no-segment" ? Array.Empty<AsyncCallStack>() : new[] { segment };
+            AsyncProfilerCallStack[] segments = guard == "no-segment" ? Array.Empty<AsyncProfilerCallStack>() : new[] { segment };
 
-            StitchResult result = s.Run(sync, segments);
-            StitchResult baseline = s.Run(sync.Select(frame =>
-                new StitchSyncFrame(frame.CodeAddress, frame.Method, frame.Kind)).ToArray(), segments);
+            AsyncProfilerStitchResult result = s.Run(sync, segments);
+            AsyncProfilerStitchResult baseline = s.Run(sync.Select(frame =>
+                new AsyncProfilerStitchSyncFrame(frame.CodeAddress, frame.Method, frame.Kind)).ToArray(), segments);
             Assert.Equal(
                 baseline.Frames.Select(frame => (frame.Origin, frame.CodeAddress, frame.SegmentFrameIndex)),
                 result.Frames.Select(frame => (frame.Origin, frame.CodeAddress, frame.SegmentFrameIndex)));
@@ -719,13 +720,13 @@ namespace TraceEventTests
             {
                 s.MarkMethodCompletionObserved(AsyncCallstackKind.StateMachineAsync);
             }
-            AsyncCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { 500, 501, 502, 503 }, new[] { 30, 31, 32, 33 },
                 completions: methodEvents ? Completed(2) : null);
-            var sync = new List<StitchSyncFrame>
+            var sync = new List<AsyncProfilerStitchSyncFrame>
             {
                 s.Sync(40, 90),
-                new StitchSyncFrame(Scenario.CA(41), MethodIndex.Invalid),
+                new AsyncProfilerStitchSyncFrame(Scenario.CA(41), MethodIndex.Invalid),
                 s.BoxCarrier(42, 32),
                 s.BoxCarrier(43, 32),
                 s.Sync(44, 31),
@@ -737,29 +738,29 @@ namespace TraceEventTests
             }
             sync.Add(s.Sync(47, 99));
 
-            StitchResult result = s.Run(sync, new[] { segment });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { segment });
             Assert.Equal(Scenario.CA(40), result.Frames[0].CodeAddress);
             Assert.Equal(Scenario.CA(41), result.Frames[1].CodeAddress);
-            StitchedFrame target = result.Frames[2];
-            Assert.Equal(StitchedFrameOrigin.AsyncDispatchTarget, target.Origin);
+            AsyncProfilerStitchedFrame target = result.Frames[2];
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget, target.Origin);
             Assert.True(target.IsStateMachineBoxCarrier);
             Assert.Equal(2, target.SegmentFrameIndex);
             Assert.Equal(Scenario.CA(42), target.CodeAddress);
             Assert.Equal(Scenario.MI(32), target.BoxedStateMachineMethod);
             Assert.Equal(Scenario.CA(503), result.Frames[3].CodeAddress);
-            Assert.Equal(truncated ? StitchedFrameOrigin.IncompleteRoot : StitchedFrameOrigin.Sync,
+            Assert.Equal(truncated ? AsyncProfilerStitchedFrameOrigin.IncompleteRoot : AsyncProfilerStitchedFrameOrigin.Sync,
                 result.Frames[4].Origin);
             Assert.Equal(truncated ? 1 : 0, result.Diagnostics.IncompleteAsyncRootsNormalized);
-            Assert.DoesNotContain(result.Frames, frame => frame.Origin == StitchedFrameOrigin.AsyncCurrent);
+            Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent);
         }
 
         [Fact]
         public void V1_ApplicationBodyAboveBoxCarrier_TakesPrecedence()
         {
             var s = new Scenario();
-            AsyncCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { 500, 501, 502 }, new[] { 30, 31, 32 });
-            StitchResult result = s.Run(new[]
+            AsyncProfilerStitchResult result = s.Run(new[]
             {
                 s.Sync(40, 31),
                 s.BoxCarrier(41, 31),
@@ -769,7 +770,7 @@ namespace TraceEventTests
                 s.Sync(45, 99),
             }, new[] { segment });
 
-            Assert.Equal(StitchedFrameOrigin.AsyncCurrent, result.Frames[0].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, result.Frames[0].Origin);
             Assert.Equal(Scenario.CA(40), result.Frames[0].CodeAddress);
             Assert.Equal(1, result.Frames[0].SegmentFrameIndex);
             Assert.False(result.Frames[0].IsStateMachineBoxCarrier);
@@ -779,7 +780,7 @@ namespace TraceEventTests
         public void V1_CollapsesContiguousBoxInfrastructureRootwardOfDispatcher()
         {
             var s = new Scenario();
-            AsyncCallStack seg = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack seg = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 frameCodeAddrs: new[] { 500, 501 }, frameMethods: new[] { 30, 31 });
 
             var sync = new[]
@@ -792,12 +793,12 @@ namespace TraceEventTests
                 s.Sync(45, 91),
             };
 
-            StitchResult result = s.Run(sync, new[] { seg });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { seg });
 
             Assert.Equal(new[] { Scenario.CA(40), Scenario.CA(501), Scenario.CA(44), Scenario.CA(45) },
                 result.Frames.Select(frame => frame.CodeAddress));
-            Assert.Equal(StitchedFrameOrigin.AsyncCurrent, result.Frames[0].Origin);
-            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, result.Frames[0].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
             Assert.Equal(2, result.Diagnostics.V1InfrastructureFramesCollapsed);
         }
 
@@ -809,9 +810,9 @@ namespace TraceEventTests
         public void V1_UnmatchedCurrent_RetainsDispatcherAndIndexedDispatchTarget(bool prefix, bool unresolved)
         {
             var s = new Scenario();
-            AsyncCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { unresolved ? -1 : 500, 501 }, new[] { 30, 31 }, frameMethodIds: new ulong[] { 123, 124 });
-            var sync = new List<StitchSyncFrame>();
+            var sync = new List<AsyncProfilerStitchSyncFrame>();
             if (prefix)
             {
                 sync.Add(s.Sync(39, 99));
@@ -820,37 +821,37 @@ namespace TraceEventTests
             sync.Add(s.Boundary(41, V1Infrastructure));
             sync.Add(s.Sync(42, 90));
 
-            StitchResult result = s.Run(sync, new[] { segment });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { segment });
             int dispatcher = prefix ? 1 : 0;
             Assert.Equal(sync[dispatcher].CodeAddress, result.Frames[dispatcher].CodeAddress);
-            Assert.Equal(StitchedFrameOrigin.Sync, result.Frames[dispatcher].Origin);
-            StitchedFrame target = result.Frames[dispatcher + 1];
-            Assert.Equal(StitchedFrameOrigin.AsyncDispatchTarget, target.Origin);
-            Assert.Equal(StitchedFrameContextKind.Active, target.ContextKind);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.Sync, result.Frames[dispatcher].Origin);
+            AsyncProfilerStitchedFrame target = result.Frames[dispatcher + 1];
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget, target.Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameContextKind.Active, target.ContextKind);
             Assert.Equal(0, target.SegmentFrameIndex);
             Assert.Equal(segment.Frames.CodeAddressAt(0), target.CodeAddress);
             Assert.Equal(MethodIndex.Invalid, target.Method);
             Assert.Same(segment, target.Context);
-            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[dispatcher + 2].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[dispatcher + 2].Origin);
             Assert.Equal(Scenario.CA(501), result.Frames[dispatcher + 2].CodeAddress);
             Assert.Equal(Scenario.CA(42), result.Frames[dispatcher + 3].CodeAddress);
             Assert.Equal(dispatcher + 4, result.Frames.Count);
             Assert.Equal(1, result.Diagnostics.V1InfrastructureFramesCollapsed);
-            Assert.DoesNotContain(result.Frames, frame => frame.Origin == StitchedFrameOrigin.AsyncCurrent);
+            Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent);
         }
 
         [Fact]
         public void V1_DispatcherLeaf_SingleFrameSegmentIsNotLost()
         {
             var s = new Scenario();
-            AsyncCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { 500 }, new[] { 30 });
-            StitchResult result = s.Run(
+            AsyncProfilerStitchResult result = s.Run(
                 new[] { s.Boundary(40, V1Dispatcher), s.Sync(41, 90) }, new[] { segment });
 
             Assert.Equal(new[] { Scenario.CA(40), Scenario.CA(500), Scenario.CA(41) },
                 result.Frames.Select(frame => frame.CodeAddress));
-            Assert.Equal(StitchedFrameOrigin.AsyncDispatchTarget, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget, result.Frames[1].Origin);
         }
 
         [Fact]
@@ -858,14 +859,14 @@ namespace TraceEventTests
         {
             var s = new Scenario();
             s.MarkMethodCompletionObserved(AsyncCallstackKind.StateMachineAsync);
-            AsyncCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { 500, 501, 502 }, new[] { 30, 31, 32 }, completions: Completed(1));
-            StitchResult result = s.Run(
+            AsyncProfilerStitchResult result = s.Run(
                 new[] { s.Boundary(40, V1Dispatcher), s.Sync(41, 90) }, new[] { segment });
 
             Assert.Equal(new[] { Scenario.CA(40), Scenario.CA(501), Scenario.CA(502), Scenario.CA(41) },
                 result.Frames.Select(frame => frame.CodeAddress));
-            Assert.Equal(StitchedFrameOrigin.AsyncDispatchTarget, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget, result.Frames[1].Origin);
             Assert.Equal(1, result.Frames[1].SegmentFrameIndex);
         }
 
@@ -873,13 +874,13 @@ namespace TraceEventTests
         public void V1_UnmatchedCurrentWithoutBoundary_DoesNotInventADispatchTarget()
         {
             var s = new Scenario();
-            AsyncCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { 500, 501 }, new[] { 30, 31 });
-            StitchResult result = s.Run(new[] { s.Sync(40, 90) }, new[] { segment });
+            AsyncProfilerStitchResult result = s.Run(new[] { s.Sync(40, 90) }, new[] { segment });
 
             Assert.Equal(new[] { Scenario.CA(40), Scenario.CA(501) },
                 result.Frames.Select(frame => frame.CodeAddress));
-            Assert.DoesNotContain(result.Frames, frame => frame.Origin == StitchedFrameOrigin.AsyncDispatchTarget);
+            Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget);
             Assert.Equal(1, result.Diagnostics.BoundariesNotFound);
         }
 
@@ -887,15 +888,15 @@ namespace TraceEventTests
         public void V1_MatchedMoveNext_DoesNotInsertADispatchTarget()
         {
             var s = new Scenario();
-            AsyncCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { 500, 501 }, new[] { 30, 31 });
-            StitchResult result = s.Run(
+            AsyncProfilerStitchResult result = s.Run(
                 new[] { s.Sync(39, 30), s.Boundary(40, V1Dispatcher), s.Sync(41, 90) }, new[] { segment });
 
             Assert.Equal(new[] { Scenario.CA(39), Scenario.CA(501), Scenario.CA(41) },
                 result.Frames.Select(frame => frame.CodeAddress));
-            Assert.Equal(StitchedFrameOrigin.AsyncCurrent, result.Frames[0].Origin);
-            Assert.DoesNotContain(result.Frames, frame => frame.Origin == StitchedFrameOrigin.AsyncDispatchTarget);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, result.Frames[0].Origin);
+            Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget);
         }
 
         [Fact]
@@ -906,7 +907,7 @@ namespace TraceEventTests
             // Presentation normalization is a later pipeline stage, so the structural stitcher preserves this
             // synchronous sequence while still stitching the active V1 segment around it.
             var s = new Scenario();
-            AsyncCallStack seg = s.Segment(
+            AsyncProfilerCallStack seg = s.Segment(
                 AsyncCallstackKind.StateMachineAsync,
                 frameCodeAddrs: new[] { 500, 501 },
                 frameMethods: new[] { 30, 31 });
@@ -914,15 +915,15 @@ namespace TraceEventTests
             var sync = new[]
             {
                 s.Sync(40, 70), // CPU work
-                s.Sync(41, 71, StitchSyncFrameKind.V1StateMachineMoveNext),
-                s.Sync(42, 72, StitchSyncFrameKind.V1MethodBuilderStart),
-                s.Sync(43, 73, StitchSyncFrameKind.V1MethodBuilderStart),
+                s.Sync(41, 71, AsyncProfilerStitchSyncFrameKind.V1StateMachineMoveNext),
+                s.Sync(42, 72, AsyncProfilerStitchSyncFrameKind.V1MethodBuilderStart),
+                s.Sync(43, 73, AsyncProfilerStitchSyncFrameKind.V1MethodBuilderStart),
                 s.Sync(44, 30), // child kickoff/current async method
                 s.Boundary(45, V1Dispatcher),
                 s.Sync(46, 99),
             };
 
-            StitchResult result = s.Run(sync, new[] { seg });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { seg });
 
             Assert.Equal(
                 new[]
@@ -938,7 +939,7 @@ namespace TraceEventTests
         public void V1_IncompleteSynchronousStartupPattern_IsPreserved()
         {
             var s = new Scenario();
-            AsyncCallStack seg = s.Segment(
+            AsyncProfilerCallStack seg = s.Segment(
                 AsyncCallstackKind.StateMachineAsync,
                 frameCodeAddrs: new[] { 500, 501 },
                 frameMethods: new[] { 30, 31 });
@@ -946,14 +947,14 @@ namespace TraceEventTests
             var sync = new[]
             {
                 s.Sync(40, 70),
-                s.Sync(41, 71, StitchSyncFrameKind.V1StateMachineMoveNext),
+                s.Sync(41, 71, AsyncProfilerStitchSyncFrameKind.V1StateMachineMoveNext),
                 s.Sync(42, 72), // unknown frame interrupts the required contiguous pattern
                 s.Sync(43, 30),
                 s.Boundary(44, V1Dispatcher),
                 s.Sync(45, 99),
             };
 
-            StitchResult result = s.Run(sync, new[] { seg });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { seg });
 
             Assert.Contains(result.Frames, frame => frame.CodeAddress == Scenario.CA(41));
             Assert.Equal(0, result.Diagnostics.V1SynchronousStartupFramesCollapsed);
@@ -965,7 +966,7 @@ namespace TraceEventTests
             // Regression: the current (running) V1 frame has a 0-IP on the async side. Its identity must come
             // from the physical sync leaf, and it must NOT be spliced back in as an Invalid async frame.
             var s = new Scenario();
-            AsyncCallStack seg = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack seg = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 frameCodeAddrs: new[] { 500, 501, -1, 503 },   // C, B, A(0-IP), P1
                 frameMethods:   new[] {  30,  31,  0,  33 });   // A's method irrelevant (Invalid ca)
 
@@ -978,16 +979,16 @@ namespace TraceEventTests
                 s.Sync(44, 99),                  // root
             };
 
-            StitchResult result = s.Run(sync, new[] { seg });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { seg });
 
             // completed must still be 2 (C,B); current A resolved from sync, ancestry P1 spliced.
             Assert.Equal(5, result.Frames.Count);
-            Assert.Equal(StitchedFrameOrigin.Sync, result.Frames[0].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.Sync, result.Frames[0].Origin);
             Assert.Equal(Scenario.CA(40), result.Frames[0].CodeAddress);        // real sync leaf, not Invalid
-            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[3].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[3].Origin);
             Assert.Equal(Scenario.CA(503), result.Frames[3].CodeAddress);       // P1
             // No spliced async frame is the Invalid 0-IP current frame.
-            Assert.DoesNotContain(result.Frames.Where(f => f.Origin == StitchedFrameOrigin.AsyncRemaining),
+            Assert.DoesNotContain(result.Frames.Where(f => f.Origin == AsyncProfilerStitchedFrameOrigin.AsyncRemaining),
                 f => f.CodeAddress == CodeAddressIndex.Invalid);
         }
 
@@ -999,7 +1000,7 @@ namespace TraceEventTests
             // one method completion -> completed=1 -> current=frames[1]; ancestry=frames[2].
             var s = new Scenario();
             s.MarkMethodCompletionObserved(AsyncCallstackKind.StateMachineAsync);
-            AsyncCallStack seg = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack seg = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 frameCodeAddrs: new[] { 500, 501, 502 },   // Mcur, A1, A2
                 frameMethods:   new[] {  30,  31,  32 },
                 completions: Completed(1));                 // one normal completion via events
@@ -1011,12 +1012,12 @@ namespace TraceEventTests
                 s.Sync(44, 99),
             };
 
-            StitchResult result = s.Run(sync, new[] { seg });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { seg });
 
             // Expected: [current(Sync), A2(Async), root(Sync)]. The stack scan is not used (no V1InlineFallbackUsed).
             Assert.Equal(3, result.Frames.Count);
             Assert.Equal(Scenario.CA(40), result.Frames[0].CodeAddress);
-            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
             Assert.Equal(Scenario.CA(502), result.Frames[1].CodeAddress); // A2 ancestry
             Assert.Equal(Scenario.CA(44), result.Frames[2].CodeAddress);
             Assert.Equal(0, result.Diagnostics.V1InlineFallbackUsed);
@@ -1035,7 +1036,7 @@ namespace TraceEventTests
             {
                 s.MarkMethodCompletionObserved(AsyncCallstackKind.StateMachineAsync);
             }
-            AsyncCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { 500, 501, 502, 503, 504 }, new[] { 30, 31, 32, 33, 34 },
                 completions: Completed(normal), exceptionCompletions: Unwound(exceptional));
             var sync = new[]
@@ -1043,17 +1044,17 @@ namespace TraceEventTests
                 s.Sync(40, 90), s.Sync(41, 31), s.Sync(42, 91), s.Sync(43, 30),
                 s.Boundary(44, V1Dispatcher), s.Sync(45, 99),
             };
-            StitchResult result = s.Run(sync, new[] { segment });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { segment });
 
             Assert.Equal(new[] { Scenario.CA(40), Scenario.CA(41), Scenario.CA(502), Scenario.CA(503),
                 Scenario.CA(504), Scenario.CA(45) }, result.Frames.Select(frame => frame.CodeAddress));
-            StitchedFrame finishing = result.Frames[1];
-            Assert.Equal(StitchedFrameOrigin.AsyncCompleting, finishing.Origin);
+            AsyncProfilerStitchedFrame finishing = result.Frames[1];
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCompleting, finishing.Origin);
             Assert.Equal(1, finishing.SegmentFrameIndex);
             Assert.Equal(Scenario.MI(31), finishing.Method);
             Assert.Same(segment, finishing.Context);
-            Assert.Equal(StitchedFramePresentation.LogicalStateMachineMethod, finishing.Presentation);
-            Assert.Equal(StitchedFrameOrigin.AsyncDispatchTarget, result.Frames[2].Origin);
+            Assert.Equal(AsyncProfilerStitchedFramePresentation.LogicalStateMachineMethod, finishing.Presentation);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget, result.Frames[2].Origin);
             Assert.Equal(1, result.Diagnostics.V1CompletionTailUsed);
             Assert.Equal(0, result.Diagnostics.V1CompletionAlignmentAmbiguous);
             Assert.Equal(methodEvents ? 0 : 1, result.Diagnostics.V1InlineFallbackUsed);
@@ -1069,18 +1070,18 @@ namespace TraceEventTests
             {
                 s.MarkMethodCompletionObserved(AsyncCallstackKind.StateMachineAsync);
             }
-            AsyncCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { 500 }, new[] { 30 },
                 completions: methodEvents ? Completed(1) : null,
                 exceptionCompletions: methodEvents ? null : Unwound(1));
-            StitchResult result = s.Run(
+            AsyncProfilerStitchResult result = s.Run(
                 new[] { s.Sync(40, 90), s.Sync(41, 30), s.Boundary(42, V1Dispatcher), s.Sync(43, 99) },
                 new[] { segment });
 
             Assert.Equal(new[] { Scenario.CA(40), Scenario.CA(41), Scenario.CA(43) },
                 result.Frames.Select(frame => frame.CodeAddress));
-            Assert.Equal(StitchedFrameOrigin.AsyncCompleting, result.Frames[1].Origin);
-            Assert.DoesNotContain(result.Frames, frame => frame.Origin == StitchedFrameOrigin.AsyncDispatchTarget);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCompleting, result.Frames[1].Origin);
+            Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget);
         }
 
         [Theory]
@@ -1093,17 +1094,17 @@ namespace TraceEventTests
             {
                 s.MarkMethodCompletionObserved(AsyncCallstackKind.StateMachineAsync);
             }
-            AsyncCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { 500, 501, 502, 503 }, new[] { 30, 31, 32, 33 },
                 completions: methodEvents ? Completed(2) : null,
                 exceptionCompletions: methodEvents ? null : Unwound(2));
-            StitchResult result = s.Run(
+            AsyncProfilerStitchResult result = s.Run(
                 new[] { s.Sync(40, 90), s.Sync(41, 32), s.Boundary(42, V1Dispatcher), s.Sync(43, 99) },
                 new[] { segment });
 
             Assert.Equal(new[] { Scenario.CA(40), Scenario.CA(41), Scenario.CA(503), Scenario.CA(43) },
                 result.Frames.Select(frame => frame.CodeAddress));
-            Assert.Equal(StitchedFrameOrigin.AsyncCurrent, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, result.Frames[1].Origin);
             Assert.Equal(0, result.Diagnostics.V1CompletionTailUsed);
         }
 
@@ -1118,12 +1119,12 @@ namespace TraceEventTests
         {
             var s = new Scenario();
             s.MarkMethodCompletionObserved(AsyncCallstackKind.StateMachineAsync);
-            AsyncCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { 500, guard == "unresolved" ? -1 : 501, 502, 503 },
                 new[] { guard == "repeated" ? 31 : 30, 31, 32, 33 },
                 completions: guard == "no-records" ? null :
-                    new[] { new AsyncCallStack.CompletionDelta(guard == "future-records" ? Qpc + 1 : Qpc, 2) });
-            var sync = new List<StitchSyncFrame>
+                    new[] { new AsyncProfilerCallStack.CompletionDelta(guard == "future-records" ? Qpc + 1 : Qpc, 2) });
+            var sync = new List<AsyncProfilerStitchSyncFrame>
             {
                 s.Sync(40, 90), s.Sync(41, guard == "out-of-order" ? 30 : 31),
                 s.Sync(42, guard == "out-of-order" ? 31 : 30),
@@ -1133,9 +1134,9 @@ namespace TraceEventTests
                 sync.Add(s.Boundary(43, V1Dispatcher));
             }
             sync.Add(s.Sync(44, 99));
-            StitchResult result = s.Run(sync, new[] { segment });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { segment });
 
-            Assert.DoesNotContain(result.Frames, frame => frame.Origin == StitchedFrameOrigin.AsyncCompleting);
+            Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCompleting);
             Assert.Equal(0, result.Diagnostics.V1CompletionTailUsed);
         }
 
@@ -1143,7 +1144,7 @@ namespace TraceEventTests
         public void V1_CompletionTail_PartialRecordsRetainPhysicalCurrentWithoutDoubleCounting()
         {
             var s = new Scenario();
-            AsyncCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { 500, 501, 502, 503, 504 }, new[] { 30, 31, 32, 33, 34 },
                 exceptionCompletions: Unwound(1));
             var sync = new[]
@@ -1151,13 +1152,13 @@ namespace TraceEventTests
                 s.Sync(40, 90), s.Sync(41, 32), s.Sync(42, 31), s.Sync(43, 30),
                 s.Boundary(44, V1Dispatcher), s.Sync(45, 99),
             };
-            StitchResult result = s.Run(sync, new[] { segment }, trace: true);
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { segment }, trace: true);
 
             Assert.Equal(new[] { Scenario.CA(40), Scenario.CA(41), Scenario.CA(503), Scenario.CA(504), Scenario.CA(45) },
                 result.Frames.Select(frame => frame.CodeAddress));
-            Assert.Equal(StitchedFrameOrigin.AsyncCurrent, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, result.Frames[1].Origin);
             Assert.Equal(2, result.Frames[1].SegmentFrameIndex);
-            Assert.DoesNotContain(result.Frames, frame => frame.Origin == StitchedFrameOrigin.AsyncCompleting);
+            Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCompleting);
             Assert.Equal(0, result.Diagnostics.V1CompletionAlignmentAmbiguous);
         }
 
@@ -1165,7 +1166,7 @@ namespace TraceEventTests
         public void V1_CompletionTail_RecordsBeyondPhysicalMatchesDoNotInventFinishingAnchor()
         {
             var s = new Scenario();
-            AsyncCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { 500, 501, 502, 503, 504 }, new[] { 30, 31, 32, 33, 34 },
                 exceptionCompletions: Unwound(3));
             var sync = new[]
@@ -1173,12 +1174,12 @@ namespace TraceEventTests
                 s.Sync(40, 90), s.Sync(41, 31), s.Sync(42, 30),
                 s.Boundary(43, V1Dispatcher), s.Sync(44, 99),
             };
-            StitchResult result = s.Run(sync, new[] { segment });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { segment });
 
             Assert.Equal(sync.Take(4).Select(frame => frame.CodeAddress),
                 result.Frames.Take(4).Select(frame => frame.CodeAddress));
             Assert.DoesNotContain(result.Frames, frame =>
-                frame.Origin == StitchedFrameOrigin.AsyncCompleting || frame.Origin == StitchedFrameOrigin.AsyncCurrent);
+                frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCompleting || frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent);
             Assert.Equal(1, result.Diagnostics.V1CompletionAlignmentAmbiguous);
             Assert.Equal(3, result.Frames[4].SegmentFrameIndex);
         }
@@ -1187,30 +1188,30 @@ namespace TraceEventTests
         public void V1_CompletionTail_UnwindAfterSampleDoesNotRetrospectivelyMarkFrameCompleted()
         {
             var s = new Scenario();
-            AsyncCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { 500, 501, 502 }, new[] { 30, 31, 32 },
                 exceptionCompletions: new[]
                 {
-                    new AsyncCallStack.CompletionDelta(Qpc - 1, 1),
-                    new AsyncCallStack.CompletionDelta(Qpc + 1, 1),
+                    new AsyncProfilerCallStack.CompletionDelta(Qpc - 1, 1),
+                    new AsyncProfilerCallStack.CompletionDelta(Qpc + 1, 1),
                 });
             var sync = new[]
             {
                 s.Sync(40, 90), s.Sync(41, 31), s.Sync(42, 91), s.Sync(43, 30),
                 s.Boundary(44, V1Dispatcher), s.Sync(45, 99),
             };
-            StitchResult atSample = s.Run(sync, new[] { segment });
-            StitchResult afterUnwind = AsyncCpuStackStitcher.Stitch(
+            AsyncProfilerStitchResult atSample = s.Run(sync, new[] { segment });
+            AsyncProfilerStitchResult afterUnwind = AsyncProfilerCallStackStitcher.Stitch(
                 sync, new[] { segment }, Qpc + 1, s.Classify, s.MethodCompletionObserved, s.MethodOf);
 
-            Assert.Equal(StitchedFrameOrigin.AsyncCurrent, atSample.Frames[1].Origin);
-            Assert.Equal(StitchedFrameOrigin.AsyncCompleting, afterUnwind.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, atSample.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCompleting, afterUnwind.Frames[1].Origin);
             Assert.Equal(Scenario.CA(41), atSample.Frames[1].CodeAddress);
             Assert.Equal(Scenario.CA(41), afterUnwind.Frames[1].CodeAddress);
             Assert.Equal(1, atSample.Frames[1].SegmentFrameIndex);
             Assert.Equal(1, afterUnwind.Frames[1].SegmentFrameIndex);
-            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, atSample.Frames[2].Origin);
-            Assert.Equal(StitchedFrameOrigin.AsyncDispatchTarget, afterUnwind.Frames[2].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, atSample.Frames[2].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget, afterUnwind.Frames[2].Origin);
             Assert.Equal(2, afterUnwind.Frames[2].SegmentFrameIndex);
         }
 
@@ -1219,14 +1220,14 @@ namespace TraceEventTests
         {
             var s = new Scenario();
             s.MarkMethodCompletionObserved(AsyncCallstackKind.StateMachineAsync);
-            AsyncCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { 500, 501, 502 }, new[] { 30, 30, 31 }, completions: Completed(1));
-            StitchResult result = s.Run(
+            AsyncProfilerStitchResult result = s.Run(
                 new[] { s.Sync(40, 90), s.Sync(41, 30), s.Boundary(42, V1Dispatcher), s.Sync(43, 99) },
                 new[] { segment });
 
             Assert.DoesNotContain(result.Frames, frame =>
-                frame.Origin == StitchedFrameOrigin.AsyncCurrent || frame.Origin == StitchedFrameOrigin.AsyncCompleting);
+                frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent || frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCompleting);
             Assert.Equal(Scenario.CA(41), result.Frames[1].CodeAddress);
             Assert.Equal(1, result.Diagnostics.V1CompletionAlignmentAmbiguous);
         }
@@ -1235,16 +1236,16 @@ namespace TraceEventTests
         public void V1_CompletionTail_MissingExceptionalChildStillAnchorsFinishingParent()
         {
             var s = new Scenario();
-            AsyncCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { 500, 501, 502, 503 }, new[] { 30, 31, 32, 33 },
                 exceptionCompletions: Unwound(2));
-            StitchResult result = s.Run(
+            AsyncProfilerStitchResult result = s.Run(
                 new[] { s.Sync(40, 90), s.Sync(41, 31), s.Boundary(42, V1Dispatcher), s.Sync(43, 99) },
                 new[] { segment });
 
-            Assert.Equal(StitchedFrameOrigin.AsyncCompleting, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCompleting, result.Frames[1].Origin);
             Assert.Equal(1, result.Frames[1].SegmentFrameIndex);
-            Assert.Equal(StitchedFrameOrigin.AsyncDispatchTarget, result.Frames[2].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget, result.Frames[2].Origin);
             Assert.Equal(2, result.Frames[2].SegmentFrameIndex);
         }
 
@@ -1255,7 +1256,7 @@ namespace TraceEventTests
             // The retained physical sequence C,D,E uniquely aligns with segment[2..4], so E is current and four
             // leaf frames have completed.
             var s = new Scenario();
-            AsyncCallStack seg = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack seg = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 frameCodeAddrs: new[] { 500, 501, 502, 503, 504 },
                 frameMethods: new[] { 30, 31, 32, 33, 34 });
 
@@ -1270,13 +1271,13 @@ namespace TraceEventTests
                 s.Sync(46, 99), // retained root-side frame
             };
 
-            StitchResult result = s.Run(sync, new[] { seg }, trace: true);
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { seg }, trace: true);
 
             Assert.Equal(
                 new[] { Scenario.CA(40), Scenario.CA(41), CodeAddressIndex.Invalid },
                 result.Frames.Select(frame => frame.CodeAddress));
-            Assert.Equal(StitchedFrameOrigin.AsyncCurrent, result.Frames[1].Origin);
-            Assert.Equal(StitchedFrameOrigin.IncompleteRoot, result.Frames[2].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.IncompleteRoot, result.Frames[2].Origin);
             Assert.Null(result.Frames[2].Context);
             Assert.Equal(1, result.Diagnostics.BoundariesNotFound);
             Assert.Equal(1, result.Diagnostics.V1InlineFallbackUsed);
@@ -1286,20 +1287,21 @@ namespace TraceEventTests
         }
 
         [Theory]
-        [InlineData(AsyncCallstackKind.StateMachineAsync, 0)]
-        [InlineData(AsyncCallstackKind.StateMachineAsync, 1)]
-        [InlineData(AsyncCallstackKind.StateMachineAsync, 3)]
-        [InlineData(AsyncCallstackKind.RuntimeAsync, 0)]
-        [InlineData(AsyncCallstackKind.RuntimeAsync, 1)]
-        [InlineData(AsyncCallstackKind.RuntimeAsync, 3)]
+        [InlineData((int)AsyncCallstackKind.StateMachineAsync, 0)]
+        [InlineData((int)AsyncCallstackKind.StateMachineAsync, 1)]
+        [InlineData((int)AsyncCallstackKind.StateMachineAsync, 3)]
+        [InlineData((int)AsyncCallstackKind.RuntimeAsync, 0)]
+        [InlineData((int)AsyncCallstackKind.RuntimeAsync, 1)]
+        [InlineData((int)AsyncCallstackKind.RuntimeAsync, 3)]
         public void IncompleteRoot_DifferentCutDepthsHaveTheSameStructuralRoot(
-            AsyncCallstackKind kind, int fragmentLength)
+            int kindValue, int fragmentLength)
         {
+            var kind = (AsyncCallstackKind)kindValue;
             var s = new Scenario();
-            AsyncCallStack seg = s.Segment(kind,
+            AsyncProfilerCallStack seg = s.Segment(kind,
                 frameCodeAddrs: new[] { 500, 501, 502, 503, 504, 505, 506 },
                 frameMethods: new[] { 30, 31, 32, 33, 34, 35, 36 });
-            var sync = new List<StitchSyncFrame>
+            var sync = new List<AsyncProfilerStitchSyncFrame>
             {
                 s.Sync(40, 70),
                 s.Sync(41, 34),
@@ -1314,16 +1316,16 @@ namespace TraceEventTests
                 sync.Add(s.Sync(90 + i, 100 + i));
             }
 
-            StitchResult result = s.Run(sync, new[] { seg });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { seg });
 
             Assert.Equal(
                 new[] { Scenario.CA(40), Scenario.CA(41), Scenario.CA(505), Scenario.CA(506), CodeAddressIndex.Invalid },
                 result.Frames.Select(frame => frame.CodeAddress));
-            Assert.Equal(StitchedFrameOrigin.AsyncCurrent, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, result.Frames[1].Origin);
             Assert.Equal(4, result.Frames[1].SegmentFrameIndex);
             Assert.Equal(Scenario.MI(34), result.Frames[1].Method);
-            Assert.Equal(StitchedFrameOrigin.IncompleteRoot, result.Frames[4].Origin);
-            Assert.Equal(StitchedFrameContextKind.None, result.Frames[4].ContextKind);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.IncompleteRoot, result.Frames[4].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameContextKind.None, result.Frames[4].ContextKind);
             Assert.Equal(1, result.Diagnostics.IncompleteAsyncRootsNormalized);
             Assert.Equal(kind == AsyncCallstackKind.RuntimeAsync ? 1 : 0,
                 result.Diagnostics.V2TruncatedSuffixFallbackUsed);
@@ -1331,18 +1333,19 @@ namespace TraceEventTests
         }
 
         [Theory]
-        [InlineData(AsyncCallstackKind.StateMachineAsync, 4, true)]
-        [InlineData(AsyncCallstackKind.StateMachineAsync, 2, false)]
-        [InlineData(AsyncCallstackKind.StateMachineAsync, 7, false)]
-        [InlineData(AsyncCallstackKind.RuntimeAsync, 4, true)]
-        [InlineData(AsyncCallstackKind.RuntimeAsync, 2, false)]
-        [InlineData(AsyncCallstackKind.RuntimeAsync, 7, false)]
+        [InlineData((int)AsyncCallstackKind.StateMachineAsync, 4, true)]
+        [InlineData((int)AsyncCallstackKind.StateMachineAsync, 2, false)]
+        [InlineData((int)AsyncCallstackKind.StateMachineAsync, 7, false)]
+        [InlineData((int)AsyncCallstackKind.RuntimeAsync, 4, true)]
+        [InlineData((int)AsyncCallstackKind.RuntimeAsync, 2, false)]
+        [InlineData((int)AsyncCallstackKind.RuntimeAsync, 7, false)]
         public void IncompleteRoot_CompletionRecordsMustAgreeWithPhysicalAlignment(
-            AsyncCallstackKind kind, int completed, bool normalize)
+            int kindValue, int completed, bool normalize)
         {
+            var kind = (AsyncCallstackKind)kindValue;
             var s = new Scenario();
             s.MarkMethodCompletionObserved(kind);
-            AsyncCallStack seg = s.Segment(kind,
+            AsyncProfilerCallStack seg = s.Segment(kind,
                 frameCodeAddrs: new[] { 500, 501, 502, 503, 504, 505, 506 },
                 frameMethods: new[] { 30, 31, 32, 33, 34, 35, 36 },
                 completions: Completed(completed));
@@ -1355,28 +1358,29 @@ namespace TraceEventTests
                 s.Sync(44, 99),
             };
 
-            StitchResult result = s.Run(sync, new[] { seg });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { seg });
 
             Assert.Equal(normalize ? 1 : 0, result.Diagnostics.IncompleteAsyncRootsNormalized);
             if (normalize)
             {
-                Assert.Equal(StitchedFrameOrigin.IncompleteRoot, result.Frames[result.Frames.Count - 1].Origin);
+                Assert.Equal(AsyncProfilerStitchedFrameOrigin.IncompleteRoot, result.Frames[result.Frames.Count - 1].Origin);
             }
             else
             {
-                Assert.DoesNotContain(result.Frames, frame => frame.Origin == StitchedFrameOrigin.IncompleteRoot);
+                Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.IncompleteRoot);
                 Assert.Contains(result.Frames,
-                    frame => frame.CodeAddress == Scenario.CA(44) && frame.Origin == StitchedFrameOrigin.Sync);
+                    frame => frame.CodeAddress == Scenario.CA(44) && frame.Origin == AsyncProfilerStitchedFrameOrigin.Sync);
             }
         }
 
         [Theory]
-        [InlineData(AsyncCallstackKind.StateMachineAsync)]
-        [InlineData(AsyncCallstackKind.RuntimeAsync)]
-        public void IncompleteRoot_UnresolvedCallerCouldConcealABoundary(AsyncCallstackKind kind)
+        [InlineData((int)AsyncCallstackKind.StateMachineAsync)]
+        [InlineData((int)AsyncCallstackKind.RuntimeAsync)]
+        public void IncompleteRoot_UnresolvedCallerCouldConcealABoundary(int kindValue)
         {
+            var kind = (AsyncCallstackKind)kindValue;
             var s = new Scenario();
-            AsyncCallStack seg = s.Segment(kind,
+            AsyncProfilerCallStack seg = s.Segment(kind,
                 frameCodeAddrs: new[] { 500, 501, 502, 503, 504 },
                 frameMethods: new[] { 30, 31, 32, 33, 34 });
             var sync = new[]
@@ -1385,10 +1389,10 @@ namespace TraceEventTests
                 s.Sync(41, 34),
                 s.Sync(42, 33),
                 s.Sync(43, 32),
-                new StitchSyncFrame(Scenario.CA(44), MethodIndex.Invalid),
+                new AsyncProfilerStitchSyncFrame(Scenario.CA(44), MethodIndex.Invalid),
             };
 
-            StitchResult result = s.Run(sync, new[] { seg });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { seg });
 
             Assert.Equal(kind == AsyncCallstackKind.StateMachineAsync ? 1 : 0,
                 result.Diagnostics.V1TruncatedSuffixFallbackUsed);
@@ -1396,16 +1400,17 @@ namespace TraceEventTests
             Assert.Contains(result.Frames, frame => frame.CodeAddress == Scenario.CA(44));
             Assert.Equal(sync.Select(frame => frame.CodeAddress),
                 result.Frames.Take(sync.Length).Select(frame => frame.CodeAddress));
-            Assert.DoesNotContain(result.Frames, frame => frame.Origin == StitchedFrameOrigin.IncompleteRoot);
+            Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.IncompleteRoot);
         }
 
         [Theory]
-        [InlineData(AsyncStitchBoundaryKind.V2ContinuationWrapper)]
-        [InlineData(AsyncStitchBoundaryKind.V2DispatchContinuation)]
-        public void V1_IncompleteRoot_IntactForeignBoundaryAndHostArePreserved(AsyncStitchBoundaryKind kind)
+        [InlineData((int)AsyncProfilerCallStackStitchBoundaryKind.V2ContinuationWrapper)]
+        [InlineData((int)AsyncProfilerCallStackStitchBoundaryKind.V2DispatchContinuation)]
+        public void V1_IncompleteRoot_IntactForeignBoundaryAndHostArePreserved(int kindValue)
         {
+            var kind = (AsyncProfilerCallStackStitchBoundaryKind)kindValue;
             var s = new Scenario();
-            AsyncCallStack seg = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack seg = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 frameCodeAddrs: new[] { 500, 501, 502, 503, 504 },
                 frameMethods: new[] { 30, 31, 32, 33, 34 });
             var sync = new[]
@@ -1414,11 +1419,11 @@ namespace TraceEventTests
                 s.Sync(41, 34),
                 s.Sync(42, 33),
                 s.Sync(43, 32),
-                s.Boundary(44, new AsyncStitchBoundaryInfo(kind, 0)),
+                s.Boundary(44, new AsyncProfilerCallStackStitchBoundaryInfo(kind, 0)),
                 s.Sync(45, 99),
             };
 
-            StitchResult result = s.Run(sync, new[] { seg });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { seg });
 
             Assert.Equal(0, result.Diagnostics.IncompleteAsyncRootsNormalized);
             Assert.Equal(
@@ -1433,9 +1438,9 @@ namespace TraceEventTests
         public void V1_SurvivingDispatcher_MarksCallerTailCutInsideRuntimePlumbing(int plumbingLength)
         {
             var s = new Scenario();
-            AsyncCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { 500, 501 }, new[] { 30, 31 });
-            var sync = new List<StitchSyncFrame>
+            var sync = new List<AsyncProfilerStitchSyncFrame>
             {
                 s.Sync(40, 70),
                 s.Sync(41, 30),
@@ -1443,11 +1448,11 @@ namespace TraceEventTests
             };
             sync.AddRange(Enumerable.Range(0, plumbingLength).Select(i => s.Boundary(43 + i, V1Infrastructure)));
 
-            StitchResult result = s.Run(sync, new[] { segment });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { segment });
 
             Assert.Equal(new[] { Scenario.CA(40), Scenario.CA(41), Scenario.CA(501), CodeAddressIndex.Invalid },
                 result.Frames.Select(frame => frame.CodeAddress));
-            Assert.Equal(StitchedFrameOrigin.IncompleteRoot, result.Frames.Last().Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.IncompleteRoot, result.Frames.Last().Origin);
             Assert.Null(result.Frames.Last().Context);
             Assert.Equal(0, result.Diagnostics.BoundariesNotFound);
             Assert.Equal(plumbingLength, result.Diagnostics.V1InfrastructureFramesCollapsed);
@@ -1462,36 +1467,36 @@ namespace TraceEventTests
         {
             var s = new Scenario();
             var profile = new StructuralRulesProfile(0);
-            AsyncCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { 500, 501 }, new[] { 30, 31 });
-            StitchSyncFrame tail = obstruction == "unknown" ? s.Sync(43, 90) :
+            AsyncProfilerStitchSyncFrame tail = obstruction == "unknown" ? s.Sync(43, 90) :
                 s.Boundary(43, obstruction == "foreign-boundary" ? Wrapper(0) : V1Infrastructure);
             var sync = new[] { s.Sync(40, 30), s.Boundary(42, V1Dispatcher), tail };
 
-            StitchResult result = s.Run(sync, new[] { segment }, profile,
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { segment }, profile,
                 ca => obstruction == "foreign-profile" && ca == Scenario.CA(43)
-                    ? AsyncRuntimeRuleProfile.Common : profile);
+                    ? AsyncProfilerRuntimeRuleProfile.Common : profile);
 
             Assert.Equal(Scenario.CA(43), result.Frames.Last().CodeAddress);
-            Assert.DoesNotContain(result.Frames, frame => frame.Origin == StitchedFrameOrigin.IncompleteRoot);
+            Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.IncompleteRoot);
         }
 
         [Fact]
         public void V1_SurvivingDispatcher_UnresolvedBoundaryDoesNotProveAnIncompleteRoot()
         {
             var s = new Scenario();
-            AsyncCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { 500, 501 }, new[] { 30, 31 });
             s.Boundary(42, V1Dispatcher);
             var sync = new[]
             {
                 s.Sync(40, 30),
-                new StitchSyncFrame(Scenario.CA(42), MethodIndex.Invalid),
+                new AsyncProfilerStitchSyncFrame(Scenario.CA(42), MethodIndex.Invalid),
             };
 
-            StitchResult result = s.Run(sync, new[] { segment });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { segment });
 
-            Assert.DoesNotContain(result.Frames, frame => frame.Origin == StitchedFrameOrigin.IncompleteRoot);
+            Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.IncompleteRoot);
         }
 
         [Theory]
@@ -1500,11 +1505,11 @@ namespace TraceEventTests
         public void V1_SurvivingDispatcher_NestedContextsHaveOneOutermostIncompleteRoot(int plumbingLength)
         {
             var s = new Scenario();
-            AsyncCallStack outer = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack outer = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { 500, 501 }, new[] { 30, 31 });
-            AsyncCallStack inner = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack inner = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { 600, 601 }, new[] { 40, 41 });
-            var sync = new List<StitchSyncFrame>
+            var sync = new List<AsyncProfilerStitchSyncFrame>
             {
                 s.Sync(40, 40),
                 s.Boundary(41, V1Dispatcher),
@@ -1515,28 +1520,29 @@ namespace TraceEventTests
             };
             sync.AddRange(Enumerable.Range(0, plumbingLength).Select(i => s.Boundary(46 + i, V1Infrastructure)));
 
-            StitchResult result = s.Run(sync, new[] { outer, inner });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { outer, inner });
 
             Assert.Equal(new[]
                 {
                     Scenario.CA(40), Scenario.CA(601), Scenario.CA(43),
                     Scenario.CA(44), Scenario.CA(501), CodeAddressIndex.Invalid,
                 }, result.Frames.Select(frame => frame.CodeAddress));
-            Assert.Single(result.Frames.Where(frame => frame.Origin == StitchedFrameOrigin.IncompleteRoot));
-            Assert.Equal(StitchedFrameOrigin.IncompleteRoot, result.Frames.Last().Origin);
+            Assert.Single(result.Frames.Where(frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.IncompleteRoot));
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.IncompleteRoot, result.Frames.Last().Origin);
             Assert.Equal(2, result.Diagnostics.SegmentsProcessed);
         }
 
         [Theory]
-        [InlineData(AsyncCallstackKind.StateMachineAsync, false)]
-        [InlineData(AsyncCallstackKind.StateMachineAsync, true)]
-        [InlineData(AsyncCallstackKind.RuntimeAsync, false)]
-        [InlineData(AsyncCallstackKind.RuntimeAsync, true)]
+        [InlineData((int)AsyncCallstackKind.StateMachineAsync, false)]
+        [InlineData((int)AsyncCallstackKind.StateMachineAsync, true)]
+        [InlineData((int)AsyncCallstackKind.RuntimeAsync, false)]
+        [InlineData((int)AsyncCallstackKind.RuntimeAsync, true)]
         public void CompleteBoundary_PreservesArbitraryManagedAndNativeHosts(
-            AsyncCallstackKind kind, bool unresolvedHost)
+            int kindValue, bool unresolvedHost)
         {
+            var kind = (AsyncCallstackKind)kindValue;
             var s = new Scenario();
-            AsyncCallStack seg = s.Segment(kind,
+            AsyncProfilerCallStack seg = s.Segment(kind,
                 frameCodeAddrs: new[] { 500, 501 },
                 frameMethods: new[] { 30, 31 });
             var sync = new[]
@@ -1545,10 +1551,10 @@ namespace TraceEventTests
                 s.Sync(41, 30),
                 s.Boundary(42, kind == AsyncCallstackKind.StateMachineAsync ? V1Dispatcher : Wrapper(0)),
                 s.Sync(43, 99),
-                new StitchSyncFrame(Scenario.CA(44), unresolvedHost ? MethodIndex.Invalid : Scenario.MI(100)),
+                new AsyncProfilerStitchSyncFrame(Scenario.CA(44), unresolvedHost ? MethodIndex.Invalid : Scenario.MI(100)),
             };
 
-            StitchResult result = s.Run(sync, new[] { seg });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { seg });
 
             Assert.Equal(
                 new[] { Scenario.CA(40), Scenario.CA(41), Scenario.CA(501), Scenario.CA(43), Scenario.CA(44) },
@@ -1557,18 +1563,20 @@ namespace TraceEventTests
         }
 
         [Theory]
-        [InlineData(AsyncCallstackKind.StateMachineAsync, AsyncCallstackKind.RuntimeAsync)]
-        [InlineData(AsyncCallstackKind.RuntimeAsync, AsyncCallstackKind.StateMachineAsync)]
-        [InlineData(AsyncCallstackKind.RuntimeAsync, AsyncCallstackKind.RuntimeAsync)]
-        [InlineData(AsyncCallstackKind.StateMachineAsync, AsyncCallstackKind.StateMachineAsync)]
+        [InlineData((int)AsyncCallstackKind.StateMachineAsync, (int)AsyncCallstackKind.RuntimeAsync)]
+        [InlineData((int)AsyncCallstackKind.RuntimeAsync, (int)AsyncCallstackKind.StateMachineAsync)]
+        [InlineData((int)AsyncCallstackKind.RuntimeAsync, (int)AsyncCallstackKind.RuntimeAsync)]
+        [InlineData((int)AsyncCallstackKind.StateMachineAsync, (int)AsyncCallstackKind.StateMachineAsync)]
         public void NestedIncompleteRoot_IsOnlyAttachedToTheOutermostActivation(
-            AsyncCallstackKind outerKind, AsyncCallstackKind innerKind)
+            int outerKindValue, int innerKindValue)
         {
+            var outerKind = (AsyncCallstackKind)outerKindValue;
+            var innerKind = (AsyncCallstackKind)innerKindValue;
             var s = new Scenario();
-            AsyncCallStack outer = s.Segment(outerKind,
+            AsyncProfilerCallStack outer = s.Segment(outerKind,
                 frameCodeAddrs: new[] { 500, 501, 502, 503, 504, 505, 506 },
                 frameMethods: new[] { 30, 31, 32, 33, 34, 35, 36 });
-            AsyncCallStack inner = s.Segment(innerKind,
+            AsyncProfilerCallStack inner = s.Segment(innerKind,
                 frameCodeAddrs: new[] { 200, 201 },
                 frameMethods: new[] { 50, 51 });
             var sync = new[]
@@ -1583,7 +1591,7 @@ namespace TraceEventTests
                 s.Sync(47, 99),
             };
 
-            StitchResult result = s.Run(sync, new[] { outer, inner });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { outer, inner });
 
             Assert.Equal(
                 new[]
@@ -1594,7 +1602,7 @@ namespace TraceEventTests
                 result.Frames.Select(frame => frame.CodeAddress));
             Assert.Equal(2, result.Diagnostics.SegmentsProcessed);
             Assert.Equal(1, result.Diagnostics.IncompleteAsyncRootsNormalized);
-            Assert.Equal(StitchedFrameOrigin.IncompleteRoot, result.Frames[result.Frames.Count - 1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.IncompleteRoot, result.Frames[result.Frames.Count - 1].Origin);
         }
 
         [Theory]
@@ -1603,7 +1611,7 @@ namespace TraceEventTests
         public void V2_IncompleteRoot_CannotRecoverBeforeRecordedCompletionLowerBounds(bool exception)
         {
             var s = new Scenario();
-            AsyncCallStack seg = s.Segment(AsyncCallstackKind.RuntimeAsync,
+            AsyncProfilerCallStack seg = s.Segment(AsyncCallstackKind.RuntimeAsync,
                 frameCodeAddrs: Enumerable.Range(500, 41).ToArray(),
                 frameMethods: Enumerable.Range(30, 41).ToArray(),
                 exceptionCompletions: exception ? Unwound(5) : null,
@@ -1617,7 +1625,7 @@ namespace TraceEventTests
                 s.Sync(44, 99),
             };
 
-            StitchResult result = s.Run(sync, new[] { seg });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { seg });
 
             Assert.Equal(0, result.Diagnostics.IncompleteAsyncRootsNormalized);
             Assert.Equal(0, result.Diagnostics.V2TruncatedSuffixFallbackUsed);
@@ -1631,7 +1639,7 @@ namespace TraceEventTests
             // A recursive state machine produces the same method identity at every logical depth. The retained
             // physical sequence can align at several positions, so truncated-suffix recovery must not guess.
             var s = new Scenario();
-            AsyncCallStack seg = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack seg = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 frameCodeAddrs: new[] { 500, 501, 502, 503, 504 },
                 frameMethods: new[] { 30, 30, 30, 30, 30 });
 
@@ -1646,13 +1654,13 @@ namespace TraceEventTests
                 s.Sync(46, 99),
             };
 
-            StitchResult result = s.Run(sync, new[] { seg });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { seg });
 
             Assert.Equal(0, result.Diagnostics.V1TruncatedSuffixFallbackUsed);
             Assert.Equal(0, result.Diagnostics.IncompleteAsyncRootsNormalized);
-            Assert.DoesNotContain(result.Frames, frame => frame.Origin == StitchedFrameOrigin.IncompleteRoot);
+            Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.IncompleteRoot);
             Assert.Equal(1, result.Diagnostics.V1InlineFallbackUsed);
-            Assert.Contains(result.Frames, frame => frame.Origin == StitchedFrameOrigin.AsyncRemaining);
+            Assert.Contains(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncRemaining);
         }
 
         [Fact]
@@ -1663,7 +1671,7 @@ namespace TraceEventTests
             // C completed inline (on the sync stack) -> scan=1; B unwound exceptionally -> +1; completed=2 ->
             // current=frames[2]=A; ancestry=P1.
             var s = new Scenario();
-            AsyncCallStack seg = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack seg = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 frameCodeAddrs: new[] { 500, 501, 502, 503 },  // C, B, A, P1
                 frameMethods:   new[] {  30,  31,  32,  33 },
                 exceptionCompletions: Unwound(1));             // B unwound off the stack
@@ -1676,14 +1684,14 @@ namespace TraceEventTests
                 s.Sync(44, 99),
             };
 
-            StitchResult result = s.Run(sync, new[] { seg });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { seg });
 
             // Expected: [A(AsyncCurrent), P1(Async), root(Sync)]. C completed inline and B unwound, so both
             // physical transition frames are replaced by the logical ancestry.
             Assert.Equal(3, result.Frames.Count);
-            Assert.Equal(StitchedFrameOrigin.AsyncCurrent, result.Frames[0].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, result.Frames[0].Origin);
             Assert.Equal(Scenario.CA(40), result.Frames[0].CodeAddress);
-            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
             Assert.Equal(Scenario.CA(503), result.Frames[1].CodeAddress); // P1 ancestry
             Assert.Equal(Scenario.CA(44), result.Frames[2].CodeAddress);
             Assert.Equal(1, result.Diagnostics.V1InlineFallbackUsed);
@@ -1696,7 +1704,7 @@ namespace TraceEventTests
             // but not A, so the matcher must use the one exception as a bounded missing async frame before it can
             // match B and C in order.
             var s = new Scenario();
-            AsyncCallStack seg = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack seg = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 frameCodeAddrs: new[] { 500, 501, 502, 503 }, // A(unwound), B(completed), C(current), P
                 frameMethods: new[] { 30, 31, 32, 33 },
                 exceptionCompletions: Unwound(1));
@@ -1709,12 +1717,12 @@ namespace TraceEventTests
                 s.Sync(43, 99),
             };
 
-            StitchResult result = s.Run(sync, new[] { seg });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { seg });
 
             Assert.Equal(new[] { Scenario.CA(40), Scenario.CA(503), Scenario.CA(43) },
                 result.Frames.Select(frame => frame.CodeAddress));
-            Assert.Equal(StitchedFrameOrigin.AsyncCurrent, result.Frames[0].Origin);
-            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, result.Frames[0].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
             Assert.Equal(1, result.Diagnostics.V1InlineFallbackUsed);
         }
 
@@ -1724,7 +1732,7 @@ namespace TraceEventTests
             // The exceptionally unwound frame has no code-address identity. Its Unwind event still proves that one
             // leading async frame may be skipped before matching the normally completed B and current C frames.
             var s = new Scenario();
-            AsyncCallStack seg = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack seg = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 frameCodeAddrs: new[] { -1, 501, 502, 503 }, // A(unresolved/unwound), B(completed), C(current), P
                 frameMethods: new[] { 0, 31, 32, 33 },
                 exceptionCompletions: Unwound(1));
@@ -1737,12 +1745,12 @@ namespace TraceEventTests
                 s.Sync(43, 99),
             };
 
-            StitchResult result = s.Run(sync, new[] { seg });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { seg });
 
             Assert.Equal(new[] { Scenario.CA(40), Scenario.CA(503), Scenario.CA(43) },
                 result.Frames.Select(frame => frame.CodeAddress));
-            Assert.Equal(StitchedFrameOrigin.AsyncCurrent, result.Frames[0].Origin);
-            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, result.Frames[0].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
             Assert.Equal(1, result.Diagnostics.V1InlineFallbackUsed);
         }
 
@@ -1754,7 +1762,7 @@ namespace TraceEventTests
             // -> current=frames[2]=Mcur; ancestry=A1. The inline stack scan is not used.
             var s = new Scenario();
             s.MarkMethodCompletionObserved(AsyncCallstackKind.StateMachineAsync);
-            AsyncCallStack seg = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack seg = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 frameCodeAddrs: new[] { 500, 501, 502, 503 },  // C0, C1, Mcur, A1
                 frameMethods:   new[] {  30,  31,  32,  33 },
                 completions: Completed(1),                      // 1 normal completion via events
@@ -1767,11 +1775,11 @@ namespace TraceEventTests
                 s.Sync(44, 99),
             };
 
-            StitchResult result = s.Run(sync, new[] { seg });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { seg });
 
             Assert.Equal(3, result.Frames.Count);
             Assert.Equal(Scenario.CA(40), result.Frames[0].CodeAddress);
-            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
             Assert.Equal(Scenario.CA(503), result.Frames[1].CodeAddress); // A1 ancestry
             Assert.Equal(Scenario.CA(44), result.Frames[2].CodeAddress);
             Assert.Equal(0, result.Diagnostics.V1InlineFallbackUsed); // events used, not the scan
@@ -1784,7 +1792,7 @@ namespace TraceEventTests
             // exceptional unwinds. Any Unwind deltas on the segment must NOT be added again. Wrapper slot 1 ->
             // completed=1 even though the segment also carries an exception delta.
             var s = new Scenario();
-            AsyncCallStack seg = s.Segment(AsyncCallstackKind.RuntimeAsync,
+            AsyncProfilerCallStack seg = s.Segment(AsyncCallstackKind.RuntimeAsync,
                 frameCodeAddrs: new[] { 300, 301, 302 },
                 frameMethods:   new[] {  60,  61,  62 },
                 exceptionCompletions: Unwound(1));   // must be ignored on the wrapper path
@@ -1796,12 +1804,12 @@ namespace TraceEventTests
                 s.Sync(82, 99),
             };
 
-            StitchResult result = s.Run(sync, new[] { seg });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { seg });
 
             // completed=1 (wrapper slot only) -> current=frames[1]; splice frames[2]=302.
             Assert.Equal(3, result.Frames.Count);
             Assert.Equal(Scenario.CA(80), result.Frames[0].CodeAddress);
-            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
             Assert.Equal(Scenario.CA(302), result.Frames[1].CodeAddress);
             Assert.Equal(Scenario.CA(82), result.Frames[2].CodeAddress);
             Assert.Equal(1, result.Diagnostics.V2WrapperFallbackUsed);
@@ -1812,20 +1820,20 @@ namespace TraceEventTests
         {
             var s = new Scenario();
             s.MarkMethodCompletionObserved(AsyncCallstackKind.RuntimeAsync);
-            AsyncCallStack seg = s.Segment(AsyncCallstackKind.RuntimeAsync,
+            AsyncProfilerCallStack seg = s.Segment(AsyncCallstackKind.RuntimeAsync,
                 frameCodeAddrs: new[] { 600, 601 },
                 frameMethods:   new[] {  80,  81 },
                 completions: Completed(0)); // current=frames[0]; ancestry=frames[1]
 
             var sync = new[] { s.Sync(10, 1), s.Sync(11, 2) }; // no boundary frame present
 
-            StitchResult result = s.Run(sync, new[] { seg });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { seg });
 
             // All sync frames verbatim, then the remaining ancestry appended.
             Assert.Equal(3, result.Frames.Count);
-            Assert.Equal(StitchedFrameOrigin.Sync, result.Frames[0].Origin);
-            Assert.Equal(StitchedFrameOrigin.Sync, result.Frames[1].Origin);
-            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[2].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.Sync, result.Frames[0].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.Sync, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[2].Origin);
             Assert.Equal(Scenario.CA(601), result.Frames[2].CodeAddress);
             Assert.Equal(1, result.Diagnostics.BoundariesNotFound);
         }
@@ -1836,9 +1844,9 @@ namespace TraceEventTests
             // Two stacked V2 segments (each freshly resumed: completed=0, splice one ancestry frame).
             var s = new Scenario();
             s.MarkMethodCompletionObserved(AsyncCallstackKind.RuntimeAsync);
-            AsyncCallStack leaf = s.Segment(AsyncCallstackKind.RuntimeAsync,
+            AsyncProfilerCallStack leaf = s.Segment(AsyncCallstackKind.RuntimeAsync,
                 frameCodeAddrs: new[] { 700, 701 }, frameMethods: new[] { 10, 11 }, completions: Completed(0));
-            AsyncCallStack root = s.Segment(AsyncCallstackKind.RuntimeAsync,
+            AsyncProfilerCallStack root = s.Segment(AsyncCallstackKind.RuntimeAsync,
                 frameCodeAddrs: new[] { 800, 801 }, frameMethods: new[] { 20, 21 }, completions: Completed(0));
 
             var sync = new[]
@@ -1851,21 +1859,21 @@ namespace TraceEventTests
                 s.Sync(54, 99),                  // root frame
             };
 
-            // GetAsyncCallStacks returns depth-ascending (root -> leaf); Stitch reverses internally.
-            StitchResult result = s.Run(sync, new[] { root, leaf });
+            // GetCallStacks returns depth-ascending (root -> leaf); Stitch reverses internally.
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { root, leaf });
 
             // Expected: [L0(AsyncCurrent), L1(Async), bridge(Sync),
             // R0(AsyncCurrent), R1(Async), root(Sync)].
             Assert.Equal(6, result.Frames.Count);
             Assert.Equal(Scenario.CA(50), result.Frames[0].CodeAddress);
-            Assert.Equal(StitchedFrameOrigin.AsyncCurrent, result.Frames[0].Origin);
-            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, result.Frames[0].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
             Assert.Equal(Scenario.CA(701), result.Frames[1].CodeAddress);
             Assert.Equal(Scenario.CA(55), result.Frames[2].CodeAddress);
-            Assert.Equal(StitchedFrameOrigin.Sync, result.Frames[2].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.Sync, result.Frames[2].Origin);
             Assert.Equal(Scenario.CA(52), result.Frames[3].CodeAddress);
-            Assert.Equal(StitchedFrameOrigin.AsyncCurrent, result.Frames[3].Origin);
-            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[4].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, result.Frames[3].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[4].Origin);
             Assert.Equal(Scenario.CA(801), result.Frames[4].CodeAddress);
             Assert.Equal(Scenario.CA(54), result.Frames[5].CodeAddress);
             Assert.Equal(2, result.Diagnostics.SegmentsProcessed);
@@ -1899,10 +1907,10 @@ namespace TraceEventTests
                 s.MarkMethodCompletionObserved(AsyncCallstackKind.RuntimeAsync);
             }
             int outerMethod = sharedMethod ? 30 : 40;
-            AsyncCallStack outer = s.Segment(AsyncCallstackKind.RuntimeAsync,
+            AsyncProfilerCallStack outer = s.Segment(AsyncCallstackKind.RuntimeAsync,
                 new[] { 500, 501, 502, 503 }, new[] { 70, 71, outerMethod, 41 },
                 completions: methodEvents ? Completed(2) : null);
-            AsyncCallStack inner = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack inner = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { 600, 601, 602, 603 }, new[] { 30, 31, 32, 33 },
                 completions: methodEvents ? Completed(2) : null);
             var sync = new[]
@@ -1911,7 +1919,7 @@ namespace TraceEventTests
                 carrier ? s.BoxCarrier(11, 32) : s.Sync(11, 32),
                 s.Sync(12, 31),
                 s.Sync(13, 30),
-                new StitchSyncFrame(Scenario.CA(18), MethodIndex.Invalid),
+                new AsyncProfilerStitchSyncFrame(Scenario.CA(18), MethodIndex.Invalid),
                 s.Sync(19, 89),
                 s.Sync(14, outerMethod),
                 s.Boundary(15, Wrapper(methodEvents ? 0 : 2)),
@@ -1919,17 +1927,17 @@ namespace TraceEventTests
                 s.Sync(17, 99),
             };
 
-            StitchResult result = s.Run(sync, new[] { outer, inner });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { outer, inner });
 
             Assert.Equal(
                 new[] { 10, 11, 603, 18, 19, 14, 503, 17 }.Select(Scenario.CA),
                 result.Frames.Select(frame => frame.CodeAddress));
-            Assert.Equal(carrier ? StitchedFrameOrigin.AsyncDispatchTarget : StitchedFrameOrigin.AsyncCurrent,
+            Assert.Equal(carrier ? AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget : AsyncProfilerStitchedFrameOrigin.AsyncCurrent,
                 result.Frames[1].Origin);
             Assert.Equal(carrier, result.Frames[1].IsStateMachineBoxCarrier);
             Assert.Same(inner, result.Frames[1].Context);
             Assert.Equal(2, result.Frames[1].SegmentFrameIndex);
-            Assert.Equal(StitchedFrameOrigin.AsyncCurrent, result.Frames[5].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, result.Frames[5].Origin);
             Assert.Same(outer, result.Frames[5].Context);
             Assert.Equal(2, result.Frames[5].SegmentFrameIndex);
             Assert.Equal(2, result.Diagnostics.SegmentsProcessed);
@@ -1937,7 +1945,7 @@ namespace TraceEventTests
             Assert.Equal(methodEvents ? 0 : 1, result.Diagnostics.V1TruncatedSuffixFallbackUsed);
             Assert.Equal(1, result.Diagnostics.V2PlumbingFramesCollapsed);
             Assert.Equal(0, result.Diagnostics.IncompleteAsyncRootsNormalized);
-            Assert.DoesNotContain(result.Frames, frame => frame.Origin == StitchedFrameOrigin.IncompleteRoot);
+            Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.IncompleteRoot);
             Assert.Same(inner, result.SegmentPlacements[0].Activation);
             Assert.Equal(3, result.SegmentPlacements[0].RootIndexExclusive);
             Assert.Same(outer, result.SegmentPlacements[1].Activation);
@@ -1951,9 +1959,9 @@ namespace TraceEventTests
         public void MissingInnerV1Boundary_UnverifiedOuterAnchorDoesNotTrimThePhysicalSpan(bool unresolved)
         {
             var s = new Scenario();
-            AsyncCallStack outer = s.Segment(AsyncCallstackKind.RuntimeAsync,
+            AsyncProfilerCallStack outer = s.Segment(AsyncCallstackKind.RuntimeAsync,
                 new[] { 500, 501 }, new[] { 40, 41 });
-            AsyncCallStack inner = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack inner = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { 600, 601, 602, 603 }, new[] { 30, 31, 32, 33 });
             var sync = new[]
             {
@@ -1961,17 +1969,17 @@ namespace TraceEventTests
                 s.Sync(11, 32),
                 s.Sync(12, 31),
                 s.Sync(13, 30),
-                new StitchSyncFrame(Scenario.CA(14), unresolved ? MethodIndex.Invalid : Scenario.MI(89)),
+                new AsyncProfilerStitchSyncFrame(Scenario.CA(14), unresolved ? MethodIndex.Invalid : Scenario.MI(89)),
                 s.Boundary(15, Wrapper(0)),
                 s.Sync(17, 99),
             };
 
-            StitchResult result = s.Run(sync, new[] { outer, inner });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { outer, inner });
 
             Assert.Equal(sync.Select(frame => frame.CodeAddress),
                 result.Frames.Take(sync.Length).Select(frame => frame.CodeAddress));
             Assert.DoesNotContain(result.Frames, frame =>
-                frame.Origin == StitchedFrameOrigin.AsyncCurrent && ReferenceEquals(frame.Context, outer));
+                frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent && ReferenceEquals(frame.Context, outer));
             Assert.Equal(0, result.Diagnostics.IncompleteAsyncRootsNormalized);
         }
 
@@ -1979,22 +1987,22 @@ namespace TraceEventTests
         public void MissingInnerV1Boundaries_PreserveTheEnclosingV2AcrossMultipleActivations()
         {
             var s = new Scenario();
-            AsyncCallStack outer = s.Segment(AsyncCallstackKind.RuntimeAsync,
+            AsyncProfilerCallStack outer = s.Segment(AsyncCallstackKind.RuntimeAsync,
                 new[] { 500, 501 }, new[] { 40, 41 });
-            AsyncCallStack middle = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack middle = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { 600, 601, 602 }, new[] { 20, 21, 22 });
-            AsyncCallStack inner = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack inner = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { 700, 701, 702 }, new[] { 10, 11, 12 });
             var sync = new[]
             {
                 s.Sync(50, 90),
                 s.Sync(51, 11),
                 s.Sync(52, 10),
-                new StitchSyncFrame(Scenario.CA(53), MethodIndex.Invalid),
+                new AsyncProfilerStitchSyncFrame(Scenario.CA(53), MethodIndex.Invalid),
                 s.Sync(54, 91),
                 s.Sync(55, 21),
                 s.Sync(56, 20),
-                new StitchSyncFrame(Scenario.CA(57), MethodIndex.Invalid),
+                new AsyncProfilerStitchSyncFrame(Scenario.CA(57), MethodIndex.Invalid),
                 s.Sync(58, 92),
                 s.Sync(59, 40),
                 s.Boundary(60, Wrapper(0)),
@@ -2002,7 +2010,7 @@ namespace TraceEventTests
                 s.Sync(62, 99),
             };
 
-            StitchResult result = s.Run(sync, new[] { outer, middle, inner });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { outer, middle, inner });
 
             Assert.Equal(
                 new[] { 50, 51, 702, 53, 54, 55, 602, 57, 58, 59, 501, 62 }.Select(Scenario.CA),
@@ -2010,7 +2018,7 @@ namespace TraceEventTests
             Assert.Equal(3, result.Diagnostics.SegmentsProcessed);
             Assert.Equal(2, result.Diagnostics.BoundariesNotFound);
             Assert.Equal(2, result.Diagnostics.V1TruncatedSuffixFallbackUsed);
-            Assert.Equal(3, result.Frames.Count(frame => frame.Origin == StitchedFrameOrigin.AsyncCurrent));
+            Assert.Equal(3, result.Frames.Count(frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent));
             Assert.Equal(0, result.Diagnostics.IncompleteAsyncRootsNormalized);
         }
 
@@ -2018,28 +2026,28 @@ namespace TraceEventTests
         public void MissingInnerV1Boundary_CarrierStillRequiresUniquePhysicalAlignment()
         {
             var s = new Scenario();
-            AsyncCallStack outer = s.Segment(AsyncCallstackKind.RuntimeAsync,
+            AsyncProfilerCallStack outer = s.Segment(AsyncCallstackKind.RuntimeAsync,
                 new[] { 500, 501 }, new[] { 40, 41 });
-            AsyncCallStack inner = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack inner = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { 600, 601, 602 }, new[] { 30, 31, 32 });
             var sync = new[]
             {
                 s.Sync(10, 90),
                 s.BoxCarrier(11, 31),
                 s.Sync(12, 30),
-                new StitchSyncFrame(Scenario.CA(18), MethodIndex.Invalid),
+                new AsyncProfilerStitchSyncFrame(Scenario.CA(18), MethodIndex.Invalid),
                 s.Sync(14, 40),
                 s.Boundary(15, Wrapper(0)),
                 s.Sync(17, 99),
             };
 
-            StitchResult result = s.Run(sync, new[] { outer, inner });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { outer, inner });
 
             Assert.Equal(sync.Take(4).Select(frame => frame.CodeAddress),
                 result.Frames.Take(4).Select(frame => frame.CodeAddress));
             Assert.DoesNotContain(result.Frames, frame => frame.IsStateMachineBoxCarrier);
             Assert.Contains(result.Frames, frame =>
-                frame.Origin == StitchedFrameOrigin.AsyncCurrent && ReferenceEquals(frame.Context, outer));
+                frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent && ReferenceEquals(frame.Context, outer));
             Assert.Equal(0, result.Diagnostics.V1TruncatedSuffixFallbackUsed);
             Assert.Equal(1, result.Diagnostics.BoundariesNotFound);
         }
@@ -2049,33 +2057,33 @@ namespace TraceEventTests
         {
             var s = new Scenario();
             s.MarkMethodCompletionObserved(AsyncCallstackKind.RuntimeAsync);
-            var index = new AsyncCallStacksIndex();
+            var index = new AsyncProfilerCallStacksIndex();
             ProcessIndex process = (ProcessIndex)1;
-            var sampledThread = new AsyncThreadKey(process, 100);
-            var p3Thread = new AsyncThreadKey(process, 200);
-            var p2Thread = new AsyncThreadKey(process, 300);
-            var p1Thread = new AsyncThreadKey(process, 400);
+            var sampledThread = new AsyncProfilerThreadKey(process, 100);
+            var p3Thread = new AsyncProfilerThreadKey(process, 200);
+            var p2Thread = new AsyncProfilerThreadKey(process, 300);
+            var p1Thread = new AsyncProfilerThreadKey(process, 400);
 
-            AsyncCallStack outer = AddIndexedSegment(
+            AsyncProfilerCallStack outer = AddIndexedSegment(
                 s, index, sampledThread, dispatcherId: 40, depth: 0,
                 startQpc: 0, endQpc: 2000, firstCodeAddress: 400);
-            AsyncCallStack p3 = AddIndexedSegment(
+            AsyncProfilerCallStack p3 = AddIndexedSegment(
                 s, index, p3Thread, dispatcherId: 30, depth: 0,
                 startQpc: 200, endQpc: 800, firstCodeAddress: 300);
-            AsyncCallStack p2 = AddIndexedSegment(
+            AsyncProfilerCallStack p2 = AddIndexedSegment(
                 s, index, p2Thread, dispatcherId: 20, depth: 0,
                 startQpc: 400, endQpc: 900, firstCodeAddress: 200);
-            AsyncCallStack p1 = AddIndexedSegment(
+            AsyncProfilerCallStack p1 = AddIndexedSegment(
                 s, index, p1Thread, dispatcherId: 10, depth: 0,
                 startQpc: 600, endQpc: 950, firstCodeAddress: 100);
-            AsyncCallStack inner = AddIndexedSegment(
+            AsyncProfilerCallStack inner = AddIndexedSegment(
                 s, index, sampledThread, dispatcherId: 1, depth: 1,
                 startQpc: 1000, endQpc: 2000, firstCodeAddress: 10);
 
-            index.AddCreation(sampledThread, childDispatcherId: 30, parentDispatcherId: 40, createQpc: 100);
-            index.AddCreation(p3Thread, childDispatcherId: 20, parentDispatcherId: 30, createQpc: 300);
-            index.AddCreation(p2Thread, childDispatcherId: 10, parentDispatcherId: 20, createQpc: 500);
-            index.AddCreation(p1Thread, childDispatcherId: 1, parentDispatcherId: 10, createQpc: 800);
+            index.AddDispatcherInfo(sampledThread, dispatcherId: 30, parentDispatcherId: 40, creationQpc: 100);
+            index.AddDispatcherInfo(p3Thread, dispatcherId: 20, parentDispatcherId: 30, creationQpc: 300);
+            index.AddDispatcherInfo(p2Thread, dispatcherId: 10, parentDispatcherId: 20, creationQpc: 500);
+            index.AddDispatcherInfo(p1Thread, dispatcherId: 1, parentDispatcherId: 10, creationQpc: 800);
 
             var sync = new[]
             {
@@ -2086,48 +2094,48 @@ namespace TraceEventTests
                 s.Sync(54, 999),
             };
 
-            StitchResult structural = s.Run(sync, new[] { outer, inner });
+            AsyncProfilerStitchResult structural = s.Run(sync, new[] { outer, inner });
             var frames = structural.Frames.ToList();
-            var augmenter = new AsyncContextAncestryAugmenter();
+            var augmenter = new AsyncProfilerContextAncestryAugmenter();
 
             augmenter.Augment(
                 index,
                 new[] { outer, inner },
                 structural.SegmentPlacements,
                 frames,
-                AsyncContextAncestryAugmenter.DefaultMaximumDepth);
+                AsyncProfilerContextAncestryAugmenter.DefaultMaximumDepth);
 
             Assert.Equal(
                 new[]
                 {
-                    StitchedFrameOrigin.AsyncCurrent,
-                    StitchedFrameOrigin.AsyncRemaining,
-                    StitchedFrameOrigin.AsyncContextParent,
-                    StitchedFrameOrigin.AsyncContextParent,
-                    StitchedFrameOrigin.AsyncContextParent,
-                    StitchedFrameOrigin.AsyncContextParent,
-                    StitchedFrameOrigin.AsyncContextParent,
-                    StitchedFrameOrigin.AsyncContextParent,
-                    StitchedFrameOrigin.AsyncCurrent,
-                    StitchedFrameOrigin.AsyncRemaining,
-                    StitchedFrameOrigin.Sync,
+                    AsyncProfilerStitchedFrameOrigin.AsyncCurrent,
+                    AsyncProfilerStitchedFrameOrigin.AsyncRemaining,
+                    AsyncProfilerStitchedFrameOrigin.AsyncContextParent,
+                    AsyncProfilerStitchedFrameOrigin.AsyncContextParent,
+                    AsyncProfilerStitchedFrameOrigin.AsyncContextParent,
+                    AsyncProfilerStitchedFrameOrigin.AsyncContextParent,
+                    AsyncProfilerStitchedFrameOrigin.AsyncContextParent,
+                    AsyncProfilerStitchedFrameOrigin.AsyncContextParent,
+                    AsyncProfilerStitchedFrameOrigin.AsyncCurrent,
+                    AsyncProfilerStitchedFrameOrigin.AsyncRemaining,
+                    AsyncProfilerStitchedFrameOrigin.Sync,
                 },
                 frames.Select(frame => frame.Origin));
 
             Assert.Equal(
                 new[]
                 {
-                    StitchedFrameContextKind.Active,
-                    StitchedFrameContextKind.Active,
-                    StitchedFrameContextKind.HistoricalParent,
-                    StitchedFrameContextKind.HistoricalParent,
-                    StitchedFrameContextKind.HistoricalParent,
-                    StitchedFrameContextKind.HistoricalParent,
-                    StitchedFrameContextKind.HistoricalParent,
-                    StitchedFrameContextKind.HistoricalParent,
-                    StitchedFrameContextKind.Active,
-                    StitchedFrameContextKind.Active,
-                    StitchedFrameContextKind.None,
+                    AsyncProfilerStitchedFrameContextKind.Active,
+                    AsyncProfilerStitchedFrameContextKind.Active,
+                    AsyncProfilerStitchedFrameContextKind.HistoricalParent,
+                    AsyncProfilerStitchedFrameContextKind.HistoricalParent,
+                    AsyncProfilerStitchedFrameContextKind.HistoricalParent,
+                    AsyncProfilerStitchedFrameContextKind.HistoricalParent,
+                    AsyncProfilerStitchedFrameContextKind.HistoricalParent,
+                    AsyncProfilerStitchedFrameContextKind.HistoricalParent,
+                    AsyncProfilerStitchedFrameContextKind.Active,
+                    AsyncProfilerStitchedFrameContextKind.Active,
+                    AsyncProfilerStitchedFrameContextKind.None,
                 },
                 frames.Select(frame => frame.ContextKind));
             Assert.All(frames.Take(2), frame => Assert.Same(inner, frame.Context));
@@ -2144,7 +2152,7 @@ namespace TraceEventTests
                     Scenario.CA(300), Scenario.CA(301),
                 },
                 frames
-                    .Where(frame => frame.Origin == StitchedFrameOrigin.AsyncContextParent)
+                    .Where(frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncContextParent)
                     .Select(frame => frame.CodeAddress));
 
             var limitedFrames = structural.Frames.ToList();
@@ -2161,11 +2169,11 @@ namespace TraceEventTests
                     Scenario.CA(200), Scenario.CA(201),
                 },
                 limitedFrames
-                    .Where(frame => frame.Origin == StitchedFrameOrigin.AsyncContextParent)
+                    .Where(frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncContextParent)
                     .Select(frame => frame.CodeAddress));
             Assert.DoesNotContain(
                 limitedFrames,
-                frame => frame.ContextKind == StitchedFrameContextKind.HistoricalParent &&
+                frame => frame.ContextKind == AsyncProfilerStitchedFrameContextKind.HistoricalParent &&
                          ReferenceEquals(frame.Context, p3));
         }
 
@@ -2173,45 +2181,45 @@ namespace TraceEventTests
         public void ContextAncestry_PreservesOverlappingDistinctParentActivations()
         {
             var s = new Scenario();
-            var index = new AsyncCallStacksIndex();
+            var index = new AsyncProfilerCallStacksIndex();
             ProcessIndex process = (ProcessIndex)1;
-            var childThread = new AsyncThreadKey(process, 100);
-            var parentThread = new AsyncThreadKey(process, 200);
-            var grandparentThread = new AsyncThreadKey(process, 300);
-            AsyncCallStack child = AddIndexedSegment(
+            var childThread = new AsyncProfilerThreadKey(process, 100);
+            var parentThread = new AsyncProfilerThreadKey(process, 200);
+            var grandparentThread = new AsyncProfilerThreadKey(process, 300);
+            AsyncProfilerCallStack child = AddIndexedSegment(
                 s, index, childThread, dispatcherId: 1, depth: 0,
                 startQpc: 100, endQpc: 200, firstCodeAddress: 10, frameCount: 3);
-            AsyncCallStack parent = AddIndexedSegment(
+            AsyncProfilerCallStack parent = AddIndexedSegment(
                 s, index, parentThread, dispatcherId: 2, depth: 0,
                 startQpc: 50, endQpc: 99, firstCodeAddress: 11, frameCount: 3);
-            AsyncCallStack grandparent = AddIndexedSegment(
+            AsyncProfilerCallStack grandparent = AddIndexedSegment(
                 s, index, grandparentThread, dispatcherId: 3, depth: 0,
                 startQpc: 0, endQpc: 99, firstCodeAddress: 12, frameCount: 3);
-            index.AddCreation(
-                parentThread, childDispatcherId: 1, parentDispatcherId: 2, createQpc: 90);
-            index.AddCreation(
-                grandparentThread, childDispatcherId: 2, parentDispatcherId: 3, createQpc: 40);
+            index.AddDispatcherInfo(
+                parentThread, dispatcherId: 1, parentDispatcherId: 2, creationQpc: 90);
+            index.AddDispatcherInfo(
+                grandparentThread, dispatcherId: 2, parentDispatcherId: 3, creationQpc: 40);
 
-            var frames = new List<StitchedFrame>
+            var frames = new List<AsyncProfilerStitchedFrame>
             {
-                StitchedFrame.CreateAsync(child, 0),
-                StitchedFrame.CreateAsync(child, 1),
-                StitchedFrame.CreateAsync(child, 2),
+                AsyncProfilerStitchedFrame.CreateAsync(child, 0),
+                AsyncProfilerStitchedFrame.CreateAsync(child, 1),
+                AsyncProfilerStitchedFrame.CreateAsync(child, 2),
             };
             var placements = new[]
             {
-                new AsyncSegmentPlacement(child, leafIndex: 0, rootIndexExclusive: 3),
+                new AsyncProfilerSegmentPlacement(child, leafIndex: 0, rootIndexExclusive: 3),
             };
 
-            new AsyncContextAncestryAugmenter().Augment(
+            new AsyncProfilerContextAncestryAugmenter().Augment(
                 index,
                 new[] { child },
                 placements,
                 frames,
-                AsyncContextAncestryAugmenter.DefaultMaximumDepth);
+                AsyncProfilerContextAncestryAugmenter.DefaultMaximumDepth);
 
-            StitchedFrame[] historical = frames
-                .Where(frame => frame.Origin == StitchedFrameOrigin.AsyncContextParent)
+            AsyncProfilerStitchedFrame[] historical = frames
+                .Where(frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncContextParent)
                 .ToArray();
             Assert.Equal(
                 new[]
@@ -2228,43 +2236,43 @@ namespace TraceEventTests
         public void ContextAncestry_PreservesRecursiveV1ParentWithIdenticalFramesAndStates()
         {
             var s = new Scenario();
-            var index = new AsyncCallStacksIndex();
+            var index = new AsyncProfilerCallStacksIndex();
             ProcessIndex process = (ProcessIndex)1;
-            var childThread = new AsyncThreadKey(process, 100);
-            var parentThread = new AsyncThreadKey(process, 200);
-            AsyncCallStack child = AddIndexedSegment(
+            var childThread = new AsyncProfilerThreadKey(process, 100);
+            var parentThread = new AsyncProfilerThreadKey(process, 200);
+            AsyncProfilerCallStack child = AddIndexedSegment(
                 s, index, childThread, dispatcherId: 1, depth: 0,
                 startQpc: 100, endQpc: 200, firstCodeAddress: 10, frameCount: 2,
                 kind: AsyncCallstackKind.StateMachineAsync,
                 frameStates: new[] { 1, 2 });
-            AsyncCallStack parent = AddIndexedSegment(
+            AsyncProfilerCallStack parent = AddIndexedSegment(
                 s, index, parentThread, dispatcherId: 2, depth: 0,
                 startQpc: 0, endQpc: 90, firstCodeAddress: 10, frameCount: 2,
                 kind: AsyncCallstackKind.StateMachineAsync,
                 frameStates: new[] { 1, 2 });
-            index.AddCreation(
-                parentThread, childDispatcherId: 1, parentDispatcherId: 2, createQpc: 50);
+            index.AddDispatcherInfo(
+                parentThread, dispatcherId: 1, parentDispatcherId: 2, creationQpc: 50);
 
-            var frames = new List<StitchedFrame>
+            var frames = new List<AsyncProfilerStitchedFrame>
             {
-                StitchedFrame.CreateAsync(child, 0),
-                StitchedFrame.CreateAsync(child, 1),
+                AsyncProfilerStitchedFrame.CreateAsync(child, 0),
+                AsyncProfilerStitchedFrame.CreateAsync(child, 1),
             };
             var placements = new[]
             {
-                new AsyncSegmentPlacement(child, leafIndex: 0, rootIndexExclusive: 2),
+                new AsyncProfilerSegmentPlacement(child, leafIndex: 0, rootIndexExclusive: 2),
             };
 
-            new AsyncContextAncestryAugmenter().Augment(
+            new AsyncProfilerContextAncestryAugmenter().Augment(
                 index,
                 new[] { child },
                 placements,
                 frames,
-                AsyncContextAncestryAugmenter.DefaultMaximumDepth);
+                AsyncProfilerContextAncestryAugmenter.DefaultMaximumDepth);
 
-            StitchedFrame[] historical = frames
+            AsyncProfilerStitchedFrame[] historical = frames
                 .Where(frame =>
-                    frame.ContextKind == StitchedFrameContextKind.HistoricalParent)
+                    frame.ContextKind == AsyncProfilerStitchedFrameContextKind.HistoricalParent)
                 .ToArray();
             Assert.Equal(2, historical.Length);
             Assert.All(historical, frame => Assert.Same(parent, frame.Context));
@@ -2274,11 +2282,11 @@ namespace TraceEventTests
         public void ContextAncestry_DoesNotTrimAcrossAsyncKinds()
         {
             var s = new Scenario();
-            var index = new AsyncCallStacksIndex();
+            var index = new AsyncProfilerCallStacksIndex();
             ProcessIndex process = (ProcessIndex)1;
-            var childThread = new AsyncThreadKey(process, 100);
-            var parentThread = new AsyncThreadKey(process, 200);
-            AsyncCallStack child = AddIndexedSegment(
+            var childThread = new AsyncProfilerThreadKey(process, 100);
+            var parentThread = new AsyncProfilerThreadKey(process, 200);
+            AsyncProfilerCallStack child = AddIndexedSegment(
                 s, index, childThread, dispatcherId: 1, depth: 0,
                 startQpc: 100, endQpc: 200, firstCodeAddress: 10,
                 kind: AsyncCallstackKind.RuntimeAsync);
@@ -2286,41 +2294,41 @@ namespace TraceEventTests
                 s, index, parentThread, dispatcherId: 2, depth: 0,
                 startQpc: 0, endQpc: 90, firstCodeAddress: 10,
                 kind: AsyncCallstackKind.StateMachineAsync);
-            index.AddCreation(
-                parentThread, childDispatcherId: 1, parentDispatcherId: 2, createQpc: 50);
+            index.AddDispatcherInfo(
+                parentThread, dispatcherId: 1, parentDispatcherId: 2, creationQpc: 50);
 
-            var frames = new List<StitchedFrame>
+            var frames = new List<AsyncProfilerStitchedFrame>
             {
-                StitchedFrame.CreateAsync(child, 0),
-                StitchedFrame.CreateAsync(child, 1),
+                AsyncProfilerStitchedFrame.CreateAsync(child, 0),
+                AsyncProfilerStitchedFrame.CreateAsync(child, 1),
             };
             var placements = new[]
             {
-                new AsyncSegmentPlacement(child, leafIndex: 0, rootIndexExclusive: 2),
+                new AsyncProfilerSegmentPlacement(child, leafIndex: 0, rootIndexExclusive: 2),
             };
 
-            new AsyncContextAncestryAugmenter().Augment(
+            new AsyncProfilerContextAncestryAugmenter().Augment(
                 index,
                 new[] { child },
                 placements,
                 frames,
-                AsyncContextAncestryAugmenter.DefaultMaximumDepth);
+                AsyncProfilerContextAncestryAugmenter.DefaultMaximumDepth);
 
             Assert.Equal(
                 2,
                 frames.Count(frame =>
-                    frame.ContextKind == StitchedFrameContextKind.HistoricalParent));
+                    frame.ContextKind == AsyncProfilerStitchedFrameContextKind.HistoricalParent));
         }
 
         [Fact]
         public void ContextAncestry_DoesNotTrimDifferentV1States()
         {
             var s = new Scenario();
-            var index = new AsyncCallStacksIndex();
+            var index = new AsyncProfilerCallStacksIndex();
             ProcessIndex process = (ProcessIndex)1;
-            var childThread = new AsyncThreadKey(process, 100);
-            var parentThread = new AsyncThreadKey(process, 200);
-            AsyncCallStack child = AddIndexedSegment(
+            var childThread = new AsyncProfilerThreadKey(process, 100);
+            var parentThread = new AsyncProfilerThreadKey(process, 200);
+            AsyncProfilerCallStack child = AddIndexedSegment(
                 s, index, childThread, dispatcherId: 1, depth: 0,
                 startQpc: 100, endQpc: 200, firstCodeAddress: 10,
                 kind: AsyncCallstackKind.StateMachineAsync,
@@ -2330,61 +2338,61 @@ namespace TraceEventTests
                 startQpc: 0, endQpc: 90, firstCodeAddress: 10,
                 kind: AsyncCallstackKind.StateMachineAsync,
                 frameStates: new[] { 1, 3 });
-            index.AddCreation(
-                parentThread, childDispatcherId: 1, parentDispatcherId: 2, createQpc: 50);
+            index.AddDispatcherInfo(
+                parentThread, dispatcherId: 1, parentDispatcherId: 2, creationQpc: 50);
 
-            var frames = new List<StitchedFrame>
+            var frames = new List<AsyncProfilerStitchedFrame>
             {
-                StitchedFrame.CreateAsync(child, 0),
-                StitchedFrame.CreateAsync(child, 1),
+                AsyncProfilerStitchedFrame.CreateAsync(child, 0),
+                AsyncProfilerStitchedFrame.CreateAsync(child, 1),
             };
             var placements = new[]
             {
-                new AsyncSegmentPlacement(child, leafIndex: 0, rootIndexExclusive: 2),
+                new AsyncProfilerSegmentPlacement(child, leafIndex: 0, rootIndexExclusive: 2),
             };
 
-            new AsyncContextAncestryAugmenter().Augment(
+            new AsyncProfilerContextAncestryAugmenter().Augment(
                 index,
                 new[] { child },
                 placements,
                 frames,
-                AsyncContextAncestryAugmenter.DefaultMaximumDepth);
+                AsyncProfilerContextAncestryAugmenter.DefaultMaximumDepth);
 
             Assert.Equal(
                 2,
                 frames.Count(frame =>
-                    frame.ContextKind == StitchedFrameContextKind.HistoricalParent));
+                    frame.ContextKind == AsyncProfilerStitchedFrameContextKind.HistoricalParent));
         }
 
         [Fact]
         public void ContextAncestry_CycleStopsBeforeRepeatingAnActivation()
         {
             var s = new Scenario();
-            var index = new AsyncCallStacksIndex();
+            var index = new AsyncProfilerCallStacksIndex();
             ProcessIndex process = (ProcessIndex)1;
-            var aThread = new AsyncThreadKey(process, 100);
-            var bThread = new AsyncThreadKey(process, 200);
-            AsyncCallStack a = AddIndexedSegment(
+            var aThread = new AsyncProfilerThreadKey(process, 100);
+            var bThread = new AsyncProfilerThreadKey(process, 200);
+            AsyncProfilerCallStack a = AddIndexedSegment(
                 s, index, aThread, dispatcherId: 1, depth: 0,
                 startQpc: 0, endQpc: 100, firstCodeAddress: 10);
-            AsyncCallStack b = AddIndexedSegment(
+            AsyncProfilerCallStack b = AddIndexedSegment(
                 s, index, bThread, dispatcherId: 2, depth: 0,
                 startQpc: 0, endQpc: 100, firstCodeAddress: 20);
 
-            index.AddCreation(
-                bThread, childDispatcherId: 1, parentDispatcherId: 2, createQpc: 0);
-            index.AddCreation(
-                aThread, childDispatcherId: 2, parentDispatcherId: 1, createQpc: 0);
+            index.AddDispatcherInfo(
+                bThread, dispatcherId: 1, parentDispatcherId: 2, creationQpc: 0);
+            index.AddDispatcherInfo(
+                aThread, dispatcherId: 2, parentDispatcherId: 1, creationQpc: 0);
 
-            var frames = new List<StitchedFrame>
+            var frames = new List<AsyncProfilerStitchedFrame>
             {
-                StitchedFrame.CreateAsync(a, 0),
+                AsyncProfilerStitchedFrame.CreateAsync(a, 0),
             };
             var placements = new[]
             {
-                new AsyncSegmentPlacement(a, leafIndex: 0, rootIndexExclusive: 1),
+                new AsyncProfilerSegmentPlacement(a, leafIndex: 0, rootIndexExclusive: 1),
             };
-            var augmenter = new AsyncContextAncestryAugmenter();
+            var augmenter = new AsyncProfilerContextAncestryAugmenter();
 
             Assert.True(augmenter.Prepare(index, new[] { a }));
             augmenter.Augment(
@@ -2392,10 +2400,10 @@ namespace TraceEventTests
                 new[] { a },
                 placements,
                 frames,
-                AsyncContextAncestryAugmenter.DefaultMaximumDepth);
+                AsyncProfilerContextAncestryAugmenter.DefaultMaximumDepth);
 
-            StitchedFrame[] parents = frames
-                .Where(frame => frame.Origin == StitchedFrameOrigin.AsyncContextParent)
+            AsyncProfilerStitchedFrame[] parents = frames
+                .Where(frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncContextParent)
                 .ToArray();
             Assert.Equal(b.Frames.FrameCount, parents.Length);
             Assert.All(parents, frame => Assert.Same(b, frame.Context));
@@ -2406,39 +2414,39 @@ namespace TraceEventTests
         public void ContextAncestry_SharedParentIsInsertedForEachIndependentSample()
         {
             var s = new Scenario();
-            var index = new AsyncCallStacksIndex();
+            var index = new AsyncProfilerCallStacksIndex();
             ProcessIndex process = (ProcessIndex)1;
-            var parentThread = new AsyncThreadKey(process, 100);
-            var firstChildThread = new AsyncThreadKey(process, 200);
-            var secondChildThread = new AsyncThreadKey(process, 300);
-            AsyncCallStack parent = AddIndexedSegment(
+            var parentThread = new AsyncProfilerThreadKey(process, 100);
+            var firstChildThread = new AsyncProfilerThreadKey(process, 200);
+            var secondChildThread = new AsyncProfilerThreadKey(process, 300);
+            AsyncProfilerCallStack parent = AddIndexedSegment(
                 s, index, parentThread, dispatcherId: 10, depth: 0,
                 startQpc: 0, endQpc: 500, firstCodeAddress: 100);
-            AsyncCallStack firstChild = AddIndexedSegment(
+            AsyncProfilerCallStack firstChild = AddIndexedSegment(
                 s, index, firstChildThread, dispatcherId: 1, depth: 0,
                 startQpc: 100, endQpc: 200, firstCodeAddress: 10);
-            AsyncCallStack secondChild = AddIndexedSegment(
+            AsyncProfilerCallStack secondChild = AddIndexedSegment(
                 s, index, secondChildThread, dispatcherId: 2, depth: 0,
                 startQpc: 200, endQpc: 300, firstCodeAddress: 20);
 
-            index.AddCreation(
-                parentThread, childDispatcherId: 1, parentDispatcherId: 10, createQpc: 50);
-            index.AddCreation(
-                parentThread, childDispatcherId: 2, parentDispatcherId: 10, createQpc: 150);
+            index.AddDispatcherInfo(
+                parentThread, dispatcherId: 1, parentDispatcherId: 10, creationQpc: 50);
+            index.AddDispatcherInfo(
+                parentThread, dispatcherId: 2, parentDispatcherId: 10, creationQpc: 150);
 
-            var augmenter = new AsyncContextAncestryAugmenter();
+            var augmenter = new AsyncProfilerContextAncestryAugmenter();
             AssertSharedParent(firstChild);
             AssertSharedParent(secondChild);
 
-            void AssertSharedParent(AsyncCallStack child)
+            void AssertSharedParent(AsyncProfilerCallStack child)
             {
-                var frames = new List<StitchedFrame>
+                var frames = new List<AsyncProfilerStitchedFrame>
                 {
-                    StitchedFrame.CreateAsync(child, 0),
+                    AsyncProfilerStitchedFrame.CreateAsync(child, 0),
                 };
                 var placements = new[]
                 {
-                    new AsyncSegmentPlacement(child, leafIndex: 0, rootIndexExclusive: 1),
+                    new AsyncProfilerSegmentPlacement(child, leafIndex: 0, rootIndexExclusive: 1),
                 };
 
                 Assert.True(augmenter.Prepare(index, new[] { child }));
@@ -2447,10 +2455,10 @@ namespace TraceEventTests
                     new[] { child },
                     placements,
                     frames,
-                    AsyncContextAncestryAugmenter.DefaultMaximumDepth);
+                    AsyncProfilerContextAncestryAugmenter.DefaultMaximumDepth);
 
-                StitchedFrame[] parents = frames
-                    .Where(frame => frame.Origin == StitchedFrameOrigin.AsyncContextParent)
+                AsyncProfilerStitchedFrame[] parents = frames
+                    .Where(frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncContextParent)
                     .ToArray();
                 Assert.Equal(parent.Frames.FrameCount, parents.Length);
                 Assert.All(parents, frame => Assert.Same(parent, frame.Context));
@@ -2458,29 +2466,29 @@ namespace TraceEventTests
         }
 
         [Fact]
-        public void ContextParent_UsesExactCompletionAndUnwindHistoryAtChildCreation()
+        public void ContextParent_UsesExactCompletionAndUnwindHistoryAtDispatcherCreationQpc()
         {
             var s = new Scenario();
             s.MarkMethodCompletionObserved(AsyncCallstackKind.RuntimeAsync);
-            var index = new AsyncCallStacksIndex();
+            var index = new AsyncProfilerCallStacksIndex();
             ProcessIndex process = (ProcessIndex)1;
-            var parentThread = new AsyncThreadKey(process, 100);
-            var childThread = new AsyncThreadKey(process, 200);
+            var parentThread = new AsyncProfilerThreadKey(process, 100);
+            var childThread = new AsyncProfilerThreadKey(process, 200);
             index.StartCompletionAvailabilityEpoch(process, startQpc: 0);
             index.MarkMethodCompletionObserved(
                 process, AsyncCallstackKind.RuntimeAsync, qpc: 20);
 
-            AsyncCallStack parent = AddIndexedSegment(
+            AsyncProfilerCallStack parent = AddIndexedSegment(
                 s, index, parentThread, dispatcherId: 10, depth: 0,
                 startQpc: 0, endQpc: 90, firstCodeAddress: 100,
                 frameCount: 3,
-                methodCompletions: new[] { new AsyncCallStack.CompletionDelta(20, 1) },
-                exceptionCompletions: new[] { new AsyncCallStack.CompletionDelta(30, 1) });
-            AsyncCallStack child = AddIndexedSegment(
+                methodCompletions: new[] { new AsyncProfilerCallStack.CompletionDelta(20, 1) },
+                exceptionCompletions: new[] { new AsyncProfilerCallStack.CompletionDelta(30, 1) });
+            AsyncProfilerCallStack child = AddIndexedSegment(
                 s, index, childThread, dispatcherId: 1, depth: 0,
                 startQpc: 100, endQpc: 2000, firstCodeAddress: 10);
-            index.AddCreation(
-                parentThread, childDispatcherId: 1, parentDispatcherId: 10, createQpc: 50);
+            index.AddDispatcherInfo(
+                parentThread, dispatcherId: 1, parentDispatcherId: 10, creationQpc: 50);
 
             var sync = new[]
             {
@@ -2488,97 +2496,99 @@ namespace TraceEventTests
                 s.Boundary(51, Wrapper(0)),
                 s.Sync(52, 999),
             };
-            StitchResult structural = s.Run(sync, new[] { child });
+            AsyncProfilerStitchResult structural = s.Run(sync, new[] { child });
             var frames = structural.Frames.ToList();
 
-            new AsyncContextAncestryAugmenter().Augment(
+            new AsyncProfilerContextAncestryAugmenter().Augment(
                 index,
                 new[] { child },
                 structural.SegmentPlacements,
                 frames,
-                AsyncContextAncestryAugmenter.DefaultMaximumDepth);
+                AsyncProfilerContextAncestryAugmenter.DefaultMaximumDepth);
 
             Assert.Equal(
                 new[] { Scenario.CA(102) },
                 frames
-                    .Where(frame => frame.Origin == StitchedFrameOrigin.AsyncContextParent)
+                    .Where(frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncContextParent)
                     .Select(frame => frame.CodeAddress));
             Assert.All(
-                frames.Where(frame => frame.Origin == StitchedFrameOrigin.AsyncContextParent),
+                frames.Where(frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncContextParent),
                 frame =>
                 {
                     Assert.Same(parent, frame.Context);
-                    Assert.Equal(StitchedFrameContextKind.HistoricalParent, frame.ContextKind);
+                    Assert.Equal(AsyncProfilerStitchedFrameContextKind.HistoricalParent, frame.ContextKind);
                 });
         }
 
         [Theory]
-        [InlineData(AsyncCallstackKind.RuntimeAsync, AsyncCallstackKind.RuntimeAsync)]
-        [InlineData(AsyncCallstackKind.RuntimeAsync, AsyncCallstackKind.StateMachineAsync)]
-        [InlineData(AsyncCallstackKind.StateMachineAsync, AsyncCallstackKind.RuntimeAsync)]
-        [InlineData(AsyncCallstackKind.StateMachineAsync, AsyncCallstackKind.StateMachineAsync)]
+        [InlineData((int)AsyncCallstackKind.RuntimeAsync, (int)AsyncCallstackKind.RuntimeAsync)]
+        [InlineData((int)AsyncCallstackKind.RuntimeAsync, (int)AsyncCallstackKind.StateMachineAsync)]
+        [InlineData((int)AsyncCallstackKind.StateMachineAsync, (int)AsyncCallstackKind.RuntimeAsync)]
+        [InlineData((int)AsyncCallstackKind.StateMachineAsync, (int)AsyncCallstackKind.StateMachineAsync)]
         public void ContextAncestry_PreservesParentKindAcrossMixedKinds(
-            AsyncCallstackKind childKind,
-            AsyncCallstackKind parentKind)
+            int childKindValue,
+            int parentKindValue)
         {
+            var childKind = (AsyncCallstackKind)childKindValue;
+            var parentKind = (AsyncCallstackKind)parentKindValue;
             var s = new Scenario();
-            var index = new AsyncCallStacksIndex();
+            var index = new AsyncProfilerCallStacksIndex();
             ProcessIndex process = (ProcessIndex)1;
-            var parentThread = new AsyncThreadKey(process, 100);
-            var childThread = new AsyncThreadKey(process, 200);
-            AsyncCallStack parent = AddIndexedSegment(
+            var parentThread = new AsyncProfilerThreadKey(process, 100);
+            var childThread = new AsyncProfilerThreadKey(process, 200);
+            AsyncProfilerCallStack parent = AddIndexedSegment(
                 s, index, parentThread, dispatcherId: 10, depth: 0,
                 startQpc: 0, endQpc: 90, firstCodeAddress: 100,
                 kind: parentKind);
-            AsyncCallStack child = AddIndexedSegment(
+            AsyncProfilerCallStack child = AddIndexedSegment(
                 s, index, childThread, dispatcherId: 1, depth: 0,
                 startQpc: 100, endQpc: 2000, firstCodeAddress: 10,
                 kind: childKind);
-            index.AddCreation(
-                parentThread, childDispatcherId: 1, parentDispatcherId: 10, createQpc: 50);
+            index.AddDispatcherInfo(
+                parentThread, dispatcherId: 1, parentDispatcherId: 10, creationQpc: 50);
 
-            var frames = new List<StitchedFrame>
+            var frames = new List<AsyncProfilerStitchedFrame>
             {
-                StitchedFrame.CreateAsync(child, 0),
+                AsyncProfilerStitchedFrame.CreateAsync(child, 0),
             };
             var placements = new[]
             {
-                new AsyncSegmentPlacement(child, leafIndex: 0, rootIndexExclusive: 1),
+                new AsyncProfilerSegmentPlacement(child, leafIndex: 0, rootIndexExclusive: 1),
             };
 
-            new AsyncContextAncestryAugmenter().Augment(
+            new AsyncProfilerContextAncestryAugmenter().Augment(
                 index,
                 new[] { child },
                 placements,
                 frames,
-                AsyncContextAncestryAugmenter.DefaultMaximumDepth);
+                AsyncProfilerContextAncestryAugmenter.DefaultMaximumDepth);
 
-            StitchedFrame[] parentContextFrames =
-                frames.Where(frame => frame.Origin == StitchedFrameOrigin.AsyncContextParent).ToArray();
+            AsyncProfilerStitchedFrame[] parentContextFrames =
+                frames.Where(frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncContextParent).ToArray();
             Assert.Equal(parent.Frames.FrameCount, parentContextFrames.Length);
             Assert.All(parentContextFrames, frame =>
             {
                 Assert.Same(parent.Frames, frame.Segment);
                 Assert.Equal(
                     parentKind == AsyncCallstackKind.StateMachineAsync
-                        ? StitchedFramePresentation.LogicalStateMachineMethod
-                        : StitchedFramePresentation.Native,
+                        ? AsyncProfilerStitchedFramePresentation.LogicalStateMachineMethod
+                        : AsyncProfilerStitchedFramePresentation.Native,
                     frame.Presentation);
             });
         }
 
-        private static AsyncCallStack AddIndexedSegment(
+        private static AsyncProfilerCallStack AddIndexedSegment(
             Scenario scenario,
-            AsyncCallStacksIndex index,
-            AsyncThreadKey thread,
+            AsyncProfilerCallStacksIndex index,
+            AsyncProfilerThreadKey thread,
             ulong dispatcherId,
             int depth,
             long startQpc,
             long endQpc,
             int firstCodeAddress,
             int frameCount = 2,
-            AsyncCallStack.CompletionDelta[] methodCompletions = null,
-            AsyncCallStack.CompletionDelta[] exceptionCompletions = null,
+            AsyncProfilerCallStack.CompletionDelta[] methodCompletions = null,
+            AsyncProfilerCallStack.CompletionDelta[] exceptionCompletions = null,
             AsyncCallstackKind kind = AsyncCallstackKind.RuntimeAsync,
             int[] frameStates = null)
         {
@@ -2600,12 +2610,12 @@ namespace TraceEventTests
                 wrapperCount: 32,
                 startQpc,
                 endQpc,
-                methodCompletions: methodCompletions ?? Array.Empty<AsyncCallStack.CompletionDelta>(),
-                exceptionCompletions: exceptionCompletions ?? Array.Empty<AsyncCallStack.CompletionDelta>(),
+                methodCompletions: methodCompletions ?? Array.Empty<AsyncProfilerCallStack.CompletionDelta>(),
+                exceptionCompletions: exceptionCompletions ?? Array.Empty<AsyncProfilerCallStack.CompletionDelta>(),
                 wrapperResets: Array.Empty<long>());
 
-            AsyncCallStack segment =
-                index.GetAsyncCallStack(thread, dispatcherId, startQpc);
+            AsyncProfilerCallStack segment =
+                index.GetCallStack(thread, dispatcherId, startQpc);
             for (int i = 0; i < frameCount; i++)
             {
                 segment.Frames.SetCodeAddressAt(i, Scenario.CA(firstCodeAddress + i));
@@ -2619,9 +2629,9 @@ namespace TraceEventTests
         {
             var s = new Scenario();
             s.MarkMethodCompletionObserved(AsyncCallstackKind.RuntimeAsync);
-            AsyncCallStack outer = s.Segment(AsyncCallstackKind.RuntimeAsync,
+            AsyncProfilerCallStack outer = s.Segment(AsyncCallstackKind.RuntimeAsync,
                 frameCodeAddrs: new[] { 800, 801 }, frameMethods: new[] { 20, 21 }, completions: Completed(0));
-            AsyncCallStack inner = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack inner = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 frameCodeAddrs: new[] { 500, 501 }, frameMethods: new[] { 10, 11 });
 
             var sync = new[]
@@ -2646,7 +2656,7 @@ namespace TraceEventTests
             };
 
             // Index order is outer/root -> inner/leaf.
-            StitchResult result = s.Run(sync, new[] { outer, inner });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { outer, inner });
 
             Assert.Equal(10, result.Frames.Count);
             Assert.Equal(new[]
@@ -2655,9 +2665,9 @@ namespace TraceEventTests
                 Scenario.CA(58), Scenario.CA(59), Scenario.CA(60), Scenario.CA(61), Scenario.CA(801),
                 Scenario.CA(65), Scenario.CA(66),
             }, result.Frames.Select(frame => frame.CodeAddress));
-            Assert.Equal(StitchedFrameOrigin.AsyncCurrent, result.Frames[1].Origin);
-            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[2].Origin);
-            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[7].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[2].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[7].Origin);
             Assert.Equal(2, result.Diagnostics.SegmentsProcessed);
             Assert.Equal(2, result.Diagnostics.V2PlumbingFramesCollapsed);
             Assert.Equal(2, result.Diagnostics.V1InfrastructureFramesCollapsed);
@@ -2677,9 +2687,9 @@ namespace TraceEventTests
         public void MixedV2InnerAndV1Outer_PreservesUnclassifiedBridge()
         {
             var s = new Scenario();
-            AsyncCallStack outer = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack outer = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 frameCodeAddrs: new[] { 800, 801 }, frameMethods: new[] { 20, 21 });
-            AsyncCallStack inner = s.Segment(AsyncCallstackKind.RuntimeAsync,
+            AsyncProfilerCallStack inner = s.Segment(AsyncCallstackKind.RuntimeAsync,
                 frameCodeAddrs: new[] { 700, 701 }, frameMethods: new[] { 10, 11 });
 
             var sync = new[]
@@ -2700,7 +2710,7 @@ namespace TraceEventTests
                 s.Sync(63, 96),
             };
 
-            StitchResult result = s.Run(sync, new[] { outer, inner });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { outer, inner });
 
             Assert.Equal(new[]
             {
@@ -2719,10 +2729,10 @@ namespace TraceEventTests
         {
             var s = new Scenario();
             s.MarkMethodCompletionObserved(AsyncCallstackKind.StateMachineAsync);
-            AsyncCallStack outer = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack outer = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 frameCodeAddrs: new[] { 800, 801 }, frameMethods: new[] { 20, 21 },
                 completions: Completed(2));
-            AsyncCallStack inner = s.Segment(AsyncCallstackKind.RuntimeAsync,
+            AsyncProfilerCallStack inner = s.Segment(AsyncCallstackKind.RuntimeAsync,
                 frameCodeAddrs: new[] { -1, 700 }, frameMethods: new[] { 0, 10 });
 
             var sync = new[]
@@ -2740,7 +2750,7 @@ namespace TraceEventTests
                 s.Sync(60, 99),                       // ThreadPool dispatch anchor
             };
 
-            StitchResult result = s.Run(sync, new[] { outer, inner });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { outer, inner });
 
             Assert.Equal(new[] { Scenario.CA(50), Scenario.CA(51), Scenario.CA(60) },
                 result.Frames.Select(frame => frame.CodeAddress));
@@ -2753,9 +2763,9 @@ namespace TraceEventTests
         public void MixedV2InnerAndV1Outer_CompletionMarkerRemovesFinalV1Frame()
         {
             var s = new Scenario();
-            AsyncCallStack outer = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack outer = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 frameCodeAddrs: new[] { 800, 801 }, frameMethods: new[] { 20, 21 });
-            AsyncCallStack inner = s.Segment(AsyncCallstackKind.RuntimeAsync,
+            AsyncProfilerCallStack inner = s.Segment(AsyncCallstackKind.RuntimeAsync,
                 frameCodeAddrs: new[] { -1, 700 }, frameMethods: new[] { 0, 10 });
 
             var sync = new[]
@@ -2765,7 +2775,7 @@ namespace TraceEventTests
                 s.Boundary(52, Wrapper(1)),
                 s.Boundary(53, DispatchContinuation),
                 s.Boundary(54, DispatchContinuation),
-                s.Sync(55, 91, StitchSyncFrameKind.V1MethodBuilderCompletion),
+                s.Sync(55, 91, AsyncProfilerStitchSyncFrameKind.V1MethodBuilderCompletion),
                 s.Sync(56, 21),
                 s.Sync(57, 92),
                 s.Sync(58, 20),
@@ -2773,24 +2783,24 @@ namespace TraceEventTests
                 s.Sync(60, 99),
             };
 
-            StitchResult result = s.Run(sync, new[] { outer, inner });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { outer, inner });
 
             Assert.Equal(new[] { Scenario.CA(50), Scenario.CA(51), Scenario.CA(60) },
                 result.Frames.Select(frame => frame.CodeAddress));
             Assert.Equal(1, result.Diagnostics.V1InlineFallbackUsed);
             Assert.Equal(0, result.Diagnostics.BoundariesNotFound);
 
-            StitchResult withoutCompletionProof = s.Run(sync, new[] { outer, inner },
+            AsyncProfilerStitchResult withoutCompletionProof = s.Run(sync, new[] { outer, inner },
                 new StructuralRulesProfile(0, allowCompletion: false));
             Assert.Contains(withoutCompletionProof.Frames, frame =>
-                frame.CodeAddress == Scenario.CA(56) && frame.Origin == StitchedFrameOrigin.AsyncCurrent);
+                frame.CodeAddress == Scenario.CA(56) && frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent);
         }
 
         [Fact]
         public void V1ResumedInlineAfterV2ContextCompleted_PreservesPhysicalV2CompletionChain()
         {
             var s = new Scenario();
-            AsyncCallStack activeV1 = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack activeV1 = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 frameCodeAddrs: new[] { 500, 501 }, frameMethods: new[] { 10, 11 });
 
             var sync = new[]
@@ -2808,7 +2818,7 @@ namespace TraceEventTests
             // The V2 context emits CompleteRuntimeAsyncContext before TrySetResult resumes the
             // V1 continuation inline. Its physical dispatcher is still on the stack, but its
             // interval is already closed and therefore must not be supplied as an active segment.
-            StitchResult result = s.Run(sync, new[] { activeV1 });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { activeV1 });
 
             Assert.Equal(new[]
             {
@@ -2828,9 +2838,9 @@ namespace TraceEventTests
         public void NestedV1Segments_PreserveUnclassifiedBridge()
         {
             var s = new Scenario();
-            AsyncCallStack outer = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack outer = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 frameCodeAddrs: new[] { 800, 801 }, frameMethods: new[] { 20, 21 });
-            AsyncCallStack inner = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack inner = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 frameCodeAddrs: new[] { 500, 501 }, frameMethods: new[] { 10, 11 });
 
             var sync = new[]
@@ -2850,7 +2860,7 @@ namespace TraceEventTests
                 s.Sync(62, 96),
             };
 
-            StitchResult result = s.Run(sync, new[] { outer, inner });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { outer, inner });
 
             Assert.Equal(new[]
             {
@@ -2867,9 +2877,9 @@ namespace TraceEventTests
         public void MixedV1AndV2Segments_ApplyCompletionHistoryIndependently()
         {
             var s = new Scenario();
-            AsyncCallStack outer = s.Segment(AsyncCallstackKind.RuntimeAsync,
+            AsyncProfilerCallStack outer = s.Segment(AsyncCallstackKind.RuntimeAsync,
                 frameCodeAddrs: new[] { 800, 801, 802 }, frameMethods: new[] { 20, 21, 22 });
-            AsyncCallStack inner = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack inner = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 frameCodeAddrs: new[] { 500, 501, 502 }, frameMethods: new[] { 10, 11, 12 });
 
             var sync = new[]
@@ -2893,7 +2903,7 @@ namespace TraceEventTests
                 s.Sync(66, 97),                       // root
             };
 
-            StitchResult result = s.Run(sync, new[] { outer, inner });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { outer, inner });
 
             Assert.Equal(new[]
             {
@@ -2901,9 +2911,9 @@ namespace TraceEventTests
                 Scenario.CA(58), Scenario.CA(59), Scenario.CA(60), Scenario.CA(61), Scenario.CA(802),
                 Scenario.CA(65), Scenario.CA(66),
             }, result.Frames.Select(frame => frame.CodeAddress));
-            Assert.Equal(StitchedFrameOrigin.AsyncCurrent, result.Frames[1].Origin);
-            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[2].Origin);
-            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[7].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[2].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[7].Origin);
             Assert.Equal(2, result.Diagnostics.SegmentsProcessed);
             Assert.Equal(1, result.Diagnostics.V1InlineFallbackUsed);
             Assert.Equal(2, result.Diagnostics.V2PlumbingFramesCollapsed);
@@ -2920,7 +2930,7 @@ namespace TraceEventTests
             // leaving the physical anchor (ThreadPoolWorkQueue.Dispatch) directly below the logical stack.
             var s = new Scenario();
             s.MarkMethodCompletionObserved(AsyncCallstackKind.RuntimeAsync);
-            AsyncCallStack seg = s.Segment(AsyncCallstackKind.RuntimeAsync,
+            AsyncProfilerCallStack seg = s.Segment(AsyncCallstackKind.RuntimeAsync,
                 frameCodeAddrs: new[] { 200, 201 },   // current (leaf), suspended ancestry
                 frameMethods:   new[] {  50,  51 },
                 completions: Completed(0));           // current = frames[0]; splice frames[1]=201
@@ -2935,13 +2945,13 @@ namespace TraceEventTests
                 s.Sync(95, 98),                       // root
             };
 
-            StitchResult result = s.Run(sync, new[] { seg });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { seg });
 
             // Expected: [current(AsyncCurrent,90), ancestry(Async,201), Dispatch(Sync,94), root(Sync,95)].
             Assert.Equal(4, result.Frames.Count);
             Assert.Equal(Scenario.CA(90), result.Frames[0].CodeAddress);
-            Assert.Equal(StitchedFrameOrigin.AsyncCurrent, result.Frames[0].Origin);
-            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, result.Frames[0].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
             Assert.Equal(Scenario.CA(201), result.Frames[1].CodeAddress);
             Assert.Equal(Scenario.CA(94), result.Frames[2].CodeAddress);
             Assert.Equal(Scenario.CA(95), result.Frames[3].CodeAddress);
@@ -2960,7 +2970,7 @@ namespace TraceEventTests
             {
                 s.MarkMethodCompletionObserved(AsyncCallstackKind.RuntimeAsync);
             }
-            AsyncCallStack seg = s.Segment(AsyncCallstackKind.RuntimeAsync,
+            AsyncProfilerCallStack seg = s.Segment(AsyncCallstackKind.RuntimeAsync,
                 frameCodeAddrs: new[] { 300, 301 }, frameMethods: new[] { 60, 61 },
                 completions: methodEvents ? Completed(0) : null);
 
@@ -2972,26 +2982,26 @@ namespace TraceEventTests
                 s.Sync(83, 98),                       // root
             };
 
-            StitchResult result = s.Run(sync, new[] { seg });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { seg });
 
             Assert.Equal(
                 new[] { Scenario.CA(300), Scenario.CA(301), Scenario.CA(82), Scenario.CA(83) },
                 result.Frames.Select(f => f.CodeAddress));
-            Assert.Equal(StitchedFrameOrigin.AsyncDispatchTarget, result.Frames[0].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget, result.Frames[0].Origin);
             Assert.Same(seg, result.Frames[0].Context);
-            Assert.Equal(StitchedFramePresentation.Native, result.Frames[0].Presentation);
-            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
-            Assert.DoesNotContain(result.Frames, frame => frame.Origin == StitchedFrameOrigin.AsyncCurrent);
+            Assert.Equal(AsyncProfilerStitchedFramePresentation.Native, result.Frames[0].Presentation);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
+            Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent);
             Assert.Equal(0, result.Diagnostics.V2SyncLayoutUsed);
             Assert.Equal(1, result.Diagnostics.V2LeafWrapperDropped);
             Assert.Equal(1, result.Diagnostics.SegmentsProcessed);
             Assert.Equal(1, result.Diagnostics.V2PlumbingFramesCollapsed);
-            AsyncSegmentPlacement placement = Assert.Single(result.SegmentPlacements);
+            AsyncProfilerSegmentPlacement placement = Assert.Single(result.SegmentPlacements);
             Assert.Same(seg, placement.Activation);
             Assert.Equal(0, placement.LeafIndex);
             Assert.Equal(2, placement.RootIndexExclusive);
 
-            StitchResult presented = new AsyncStackTransformPipeline().Transform(result, new[] { seg }, Qpc, s.Classify);
+            AsyncProfilerStitchResult presented = new AsyncProfilerCallStackTransformPipeline().Transform(result, new[] { seg }, Qpc, s.Classify);
             Assert.Equal(result.Frames, presented.Frames);
             Assert.Equal(1, presented.Diagnostics.V2LeafWrapperDropped);
         }
@@ -3018,7 +3028,7 @@ namespace TraceEventTests
             {
                 addresses[expectedIndex] = -1;
             }
-            AsyncCallStack segment = s.Segment(AsyncCallstackKind.RuntimeAsync,
+            AsyncProfilerCallStack segment = s.Segment(AsyncCallstackKind.RuntimeAsync,
                 addresses, Enumerable.Range(60, addresses.Length).ToArray(),
                 completions: methodEvents ? Completed(1) : null,
                 exceptionCompletions: evidence.EndsWith("-and-unwind", StringComparison.Ordinal) ? Unwound(2) : null,
@@ -3033,12 +3043,12 @@ namespace TraceEventTests
                 s.Sync(999, 99),
             };
 
-            StitchResult result = s.Run(sync, new[] { segment });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { segment });
 
-            StitchedFrame target = Assert.Single(result.Frames.Where(frame =>
-                frame.Origin == StitchedFrameOrigin.AsyncDispatchTarget));
+            AsyncProfilerStitchedFrame target = Assert.Single(result.Frames.Where(frame =>
+                frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget));
             Assert.Equal(expectedIndex, target.SegmentFrameIndex);
-            Assert.Equal(StitchedFramePresentation.Native, target.Presentation);
+            Assert.Equal(AsyncProfilerStitchedFramePresentation.Native, target.Presentation);
             Assert.Equal(MethodIndex.Invalid, target.Method);
             Assert.False(target.IsStateMachineBoxCarrier);
             Assert.Same(segment, target.Context);
@@ -3048,8 +3058,8 @@ namespace TraceEventTests
                     .Concat(new[] { Scenario.CA(999) }),
                 result.Frames.Select(frame => frame.CodeAddress));
             Assert.All(result.Frames.Skip(1).Take(addresses.Length - expectedIndex - 1),
-                frame => Assert.Equal(StitchedFrameOrigin.AsyncRemaining, frame.Origin));
-            Assert.DoesNotContain(result.Frames, frame => frame.Origin == StitchedFrameOrigin.AsyncCurrent);
+                frame => Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, frame.Origin));
+            Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent);
             Assert.Equal(1, result.Diagnostics.SegmentsProcessed);
             Assert.Equal(methodEvents ? 0 : 1, result.Diagnostics.V2WrapperFallbackUsed);
             Assert.Equal(0, result.Diagnostics.AdjacencyMismatches);
@@ -3079,7 +3089,7 @@ namespace TraceEventTests
             {
                 addresses[0] = -1;
             }
-            AsyncCallStack segment = s.Segment(AsyncCallstackKind.RuntimeAsync,
+            AsyncProfilerCallStack segment = s.Segment(AsyncCallstackKind.RuntimeAsync,
                 addresses, Enumerable.Range(60, addresses.Length).ToArray(),
                 completions: methodEvents ? Completed(obstruction == "completed" ? 2 : 3) : null,
                 continuationIndexBase: obstruction == "before-base" ? (byte)1 : (byte)0,
@@ -3091,12 +3101,12 @@ namespace TraceEventTests
                 s.Sync(999, 99),
             };
 
-            StitchResult result = s.Run(sync, new[] { segment });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { segment });
 
             Assert.Equal(sync.Select(frame => frame.CodeAddress), result.Frames.Select(frame => frame.CodeAddress));
             Assert.All(result.Frames, frame =>
             {
-                Assert.Equal(StitchedFrameOrigin.Sync, frame.Origin);
+                Assert.Equal(AsyncProfilerStitchedFrameOrigin.Sync, frame.Origin);
                 Assert.Null(frame.Context);
             });
             Assert.Empty(result.SegmentPlacements);
@@ -3111,7 +3121,7 @@ namespace TraceEventTests
             // emit the sync layout unchanged (dispatch machinery kept); splice no ancestry.
             var s = new Scenario();
             s.MarkMethodCompletionObserved(AsyncCallstackKind.RuntimeAsync);
-            AsyncCallStack seg = s.Segment(AsyncCallstackKind.RuntimeAsync,
+            AsyncProfilerCallStack seg = s.Segment(AsyncCallstackKind.RuntimeAsync,
                 frameCodeAddrs: new[] { 400, 401 }, frameMethods: new[] { 70, 71 }, completions: Completed(0));
 
             var sync = new[]
@@ -3122,10 +3132,10 @@ namespace TraceEventTests
                 s.Sync(87, 98),                       // root
             };
 
-            StitchResult result = s.Run(sync, new[] { seg });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { seg });
 
             Assert.Equal(4, result.Frames.Count);
-            Assert.All(result.Frames, f => Assert.Equal(StitchedFrameOrigin.Sync, f.Origin));
+            Assert.All(result.Frames, f => Assert.Equal(AsyncProfilerStitchedFrameOrigin.Sync, f.Origin));
             Assert.Equal(new[] { Scenario.CA(84), Scenario.CA(85), Scenario.CA(86), Scenario.CA(87) },
                 result.Frames.Select(f => f.CodeAddress));
             Assert.Equal(1, result.Diagnostics.V2SyncLayoutUsed);
@@ -3134,24 +3144,25 @@ namespace TraceEventTests
         }
 
         [Theory]
-        [InlineData(AsyncCallstackKind.RuntimeAsync, false)]
-        [InlineData(AsyncCallstackKind.RuntimeAsync, true)]
-        [InlineData(AsyncCallstackKind.StateMachineAsync, false)]
-        [InlineData(AsyncCallstackKind.StateMachineAsync, true)]
+        [InlineData((int)AsyncCallstackKind.RuntimeAsync, false)]
+        [InlineData((int)AsyncCallstackKind.RuntimeAsync, true)]
+        [InlineData((int)AsyncCallstackKind.StateMachineAsync, false)]
+        [InlineData((int)AsyncCallstackKind.StateMachineAsync, true)]
         public void V2_InnerWrapperIsLeaf_PreservesEntryAndBridgeWhileStitchingOuterActivation(
-            AsyncCallstackKind outerKind, bool methodEvents)
+            int outerKindValue, bool methodEvents)
         {
+            var outerKind = (AsyncCallstackKind)outerKindValue;
             var s = new Scenario();
             if (methodEvents)
             {
                 s.MarkMethodCompletionObserved(outerKind);
             }
-            AsyncCallStack outer = s.Segment(outerKind,
+            AsyncProfilerCallStack outer = s.Segment(outerKind,
                 new[] { 500, 501, 502 }, new[] { 20, 21, 22 },
                 completions: methodEvents ? Completed(1) : null);
-            AsyncCallStack inner = s.Segment(AsyncCallstackKind.RuntimeAsync,
+            AsyncProfilerCallStack inner = s.Segment(AsyncCallstackKind.RuntimeAsync,
                 new[] { -1, -1, 602 }, new[] { -1, -1, 32 });
-            var sync = new List<StitchSyncFrame>
+            var sync = new List<AsyncProfilerStitchSyncFrame>
             {
                 s.Boundary(80, Wrapper(1)),
                 s.Boundary(81, DispatchContinuation),
@@ -3174,7 +3185,7 @@ namespace TraceEventTests
             }
             sync.Add(s.Sync(91, 99));
 
-            StitchResult result = s.Run(sync, new[] { outer, inner }, trace: true);
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { outer, inner }, trace: true);
 
             Assert.Equal(
                 new[] { 80, 81, 82, 83, 84, 85, 86, 502, 91 }.Select(Scenario.CA),
@@ -3182,10 +3193,10 @@ namespace TraceEventTests
             Assert.All(result.Frames.Take(3), frame => Assert.Null(frame.Context));
             Assert.All(result.Frames.Skip(3).Take(3), frame =>
             {
-                Assert.Equal(StitchedFrameOrigin.Sync, frame.Origin);
+                Assert.Equal(AsyncProfilerStitchedFrameOrigin.Sync, frame.Origin);
                 Assert.Same(outer, frame.Context);
             });
-            Assert.Equal(StitchedFrameOrigin.AsyncCurrent, result.Frames[6].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, result.Frames[6].Origin);
             Assert.Equal(1, result.Frames[6].SegmentFrameIndex);
             Assert.Same(outer, result.Frames[6].Context);
             Assert.DoesNotContain(result.Frames, frame => ReferenceEquals(frame.Context, inner));
@@ -3194,13 +3205,13 @@ namespace TraceEventTests
             Assert.Equal(outerKind == AsyncCallstackKind.RuntimeAsync ? 2 : 0,
                 result.Diagnostics.V2PlumbingFramesCollapsed);
             Assert.Equal(0, result.Diagnostics.BoundariesNotFound);
-            AsyncSegmentPlacement placement = Assert.Single(result.SegmentPlacements);
+            AsyncProfilerSegmentPlacement placement = Assert.Single(result.SegmentPlacements);
             Assert.Same(outer, placement.Activation);
             Assert.Equal(3, placement.LeafIndex);
             Assert.Equal(8, placement.RootIndexExclusive);
 
-            var pipeline = new AsyncStackTransformPipeline();
-            StitchResult presented = pipeline.Transform(result, new[] { outer, inner }, Qpc, s.Classify);
+            var pipeline = new AsyncProfilerCallStackTransformPipeline();
+            AsyncProfilerStitchResult presented = pipeline.Transform(result, new[] { outer, inner }, Qpc, s.Classify);
             Assert.Equal(result.Frames.Skip(1), presented.Frames);
             Assert.Equal(1, presented.Diagnostics.V2LeafWrapperDropped);
         }
@@ -3225,7 +3236,7 @@ namespace TraceEventTests
         public void V2_InnerWrapperIsLeaf_StitchesMultipleMixedOuterActivations(int protocols, bool methodEvents)
         {
             var s = new Scenario();
-            var segments = new AsyncCallStack[4];
+            var segments = new AsyncProfilerCallStack[4];
             if (methodEvents)
             {
                 s.MarkMethodCompletionObserved(AsyncCallstackKind.RuntimeAsync);
@@ -3252,7 +3263,7 @@ namespace TraceEventTests
             segments[3] = s.Segment(AsyncCallstackKind.RuntimeAsync,
                 new[] { -1, 901, 902 }, new[] { -1, 200, 201 },
                 completions: methodEvents ? Completed(1) : null);
-            var sync = new List<StitchSyncFrame>
+            var sync = new List<AsyncProfilerStitchSyncFrame>
             {
                 s.Boundary(80, Wrapper(methodEvents ? 0 : 1)),
                 s.Boundary(81, DispatchContinuation),
@@ -3283,7 +3294,7 @@ namespace TraceEventTests
             sync.Add(s.Sync(999, 400));
             expected.Add(Scenario.CA(999));
 
-            StitchResult result = s.Run(sync, segments);
+            AsyncProfilerStitchResult result = s.Run(sync, segments);
 
             Assert.Equal(expected, result.Frames.Select(frame => frame.CodeAddress));
             Assert.Equal(4, result.Diagnostics.SegmentsProcessed);
@@ -3293,22 +3304,22 @@ namespace TraceEventTests
             Assert.Equal(0, result.Diagnostics.BoundariesNotFound);
             Assert.Equal(0, result.Diagnostics.AdjacencyMismatches);
             Assert.Equal(0, result.Diagnostics.IncompleteAsyncRootsNormalized);
-            Assert.Equal(StitchedFrameOrigin.AsyncDispatchTarget, result.Frames[0].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget, result.Frames[0].Origin);
             Assert.Equal(1, result.Frames[0].SegmentFrameIndex);
             Assert.Same(segments[3], result.Frames[0].Context);
-            Assert.Equal(StitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
             Assert.Equal(4, result.SegmentPlacements.Count);
             Assert.Same(segments[3], result.SegmentPlacements[0].Activation);
             Assert.Equal(0, result.SegmentPlacements[0].LeafIndex);
             Assert.Equal(2, result.SegmentPlacements[0].RootIndexExclusive);
             for (int i = 0; i < 3; i++)
             {
-                AsyncCallStack activation = segments[2 - i];
-                StitchedFrame current = result.Frames[3 + i * 3];
-                Assert.Equal(StitchedFrameOrigin.AsyncCurrent, current.Origin);
+                AsyncProfilerCallStack activation = segments[2 - i];
+                AsyncProfilerStitchedFrame current = result.Frames[3 + i * 3];
+                Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, current.Origin);
                 Assert.Equal(1, current.SegmentFrameIndex);
                 Assert.Same(activation, current.Context);
-                AsyncSegmentPlacement placement = result.SegmentPlacements[i + 1];
+                AsyncProfilerSegmentPlacement placement = result.SegmentPlacements[i + 1];
                 Assert.Same(activation, placement.Activation);
                 Assert.Equal(2 + i * 3, placement.LeafIndex);
                 Assert.Equal(5 + i * 3, placement.RootIndexExclusive);
@@ -3328,17 +3339,17 @@ namespace TraceEventTests
             {
                 s.MarkMethodCompletionObserved(AsyncCallstackKind.RuntimeAsync);
             }
-            AsyncCallStack outer = s.Segment(AsyncCallstackKind.RuntimeAsync,
+            AsyncProfilerCallStack outer = s.Segment(AsyncCallstackKind.RuntimeAsync,
                 new[] { 500, 501 }, new[] { 20, 21 },
                 completions: completed ? Completed(2) : null);
-            AsyncCallStack inner = s.Segment(AsyncCallstackKind.RuntimeAsync,
+            AsyncProfilerCallStack inner = s.Segment(AsyncCallstackKind.RuntimeAsync,
                 new[] { -1, -1 }, new[] { -1, -1 });
-            var sync = new List<StitchSyncFrame>
+            var sync = new List<AsyncProfilerStitchSyncFrame>
             {
                 s.Boundary(80, Wrapper(1)),
                 s.Boundary(81, DispatchContinuation),
                 s.Sync(82, 90),
-                new StitchSyncFrame(Scenario.CA(83), obstruction == "unresolved-current"
+                new AsyncProfilerStitchSyncFrame(Scenario.CA(83), obstruction == "unresolved-current"
                     ? MethodIndex.Invalid : Scenario.MI(obstruction == "mismatched-current" ? 99 : 20)),
             };
             if (obstruction != "missing-wrapper")
@@ -3347,10 +3358,10 @@ namespace TraceEventTests
             }
             sync.Add(s.Sync(85, 98));
 
-            StitchResult result = s.Run(sync, new[] { outer, inner });
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { outer, inner });
 
             Assert.Equal(sync.Select(frame => frame.CodeAddress), result.Frames.Select(frame => frame.CodeAddress));
-            Assert.All(result.Frames, frame => Assert.Equal(StitchedFrameOrigin.Sync, frame.Origin));
+            Assert.All(result.Frames, frame => Assert.Equal(AsyncProfilerStitchedFrameOrigin.Sync, frame.Origin));
             Assert.Equal(1, result.Diagnostics.V2SyncLayoutUsed);
             Assert.Equal(0, result.Diagnostics.SegmentsProcessed);
         }
@@ -3361,13 +3372,13 @@ namespace TraceEventTests
             // A clean V2 segment (boundary found, no anomalies) must not add any Messages when trace is off.
             var s = new Scenario();
             s.MarkMethodCompletionObserved(AsyncCallstackKind.RuntimeAsync);
-            AsyncCallStack seg = s.Segment(AsyncCallstackKind.RuntimeAsync,
+            AsyncProfilerCallStack seg = s.Segment(AsyncCallstackKind.RuntimeAsync,
                 frameCodeAddrs: new[] { 200, 201, 202, 203, 204 },
                 frameMethods:   new[] {  50,  51,  52,  53,  54 },
                 completions: Completed(2));
             var sync = new[] { s.Sync(90, 52), s.Boundary(91, Wrapper(3)), s.Sync(92, 99) };
 
-            StitchResult result = s.Run(sync, new[] { seg }); // trace defaults to off
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { seg }); // trace defaults to off
 
             Assert.Empty(result.Diagnostics.Messages);
         }
@@ -3377,18 +3388,18 @@ namespace TraceEventTests
         {
             var s = new Scenario();
             s.MarkMethodCompletionObserved(AsyncCallstackKind.RuntimeAsync);
-            AsyncCallStack seg = s.Segment(AsyncCallstackKind.RuntimeAsync,
+            AsyncProfilerCallStack seg = s.Segment(AsyncCallstackKind.RuntimeAsync,
                 frameCodeAddrs: new[] { 200, 201, 202, 203, 204 },
                 frameMethods:   new[] {  50,  51,  52,  53,  54 },
                 completions: Completed(2));
             var sync = new[] { s.Sync(90, 52), s.Boundary(91, Wrapper(3)), s.Sync(92, 99) };
 
-            StitchResult result = s.Run(sync, new[] { seg }, trace: true);
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { seg }, trace: true);
 
             string note = Assert.Single(result.Diagnostics.Messages);
             Assert.Contains("segment[0]", note);
             Assert.Contains($"kind={AsyncCallstackKind.RuntimeAsync}", note);
-            Assert.Contains($"{AsyncStitchBoundaryKind.V2ContinuationWrapper}[3]", note); // boundary + wrapper index
+            Assert.Contains($"{AsyncProfilerCallStackStitchBoundaryKind.V2ContinuationWrapper}[3]", note); // boundary + wrapper index
             Assert.Contains("completed=2", note);
             Assert.Contains("spliced=[3..5)", note);                                       // ancestry A1,A2
         }
@@ -3399,11 +3410,11 @@ namespace TraceEventTests
             // When no boundary is found the happy-path note still fires (alongside the anomaly note) and reflects it.
             var s = new Scenario();
             s.MarkMethodCompletionObserved(AsyncCallstackKind.RuntimeAsync);
-            AsyncCallStack seg = s.Segment(AsyncCallstackKind.RuntimeAsync,
+            AsyncProfilerCallStack seg = s.Segment(AsyncCallstackKind.RuntimeAsync,
                 frameCodeAddrs: new[] { 600, 601 }, frameMethods: new[] { 70, 71 }, completions: Completed(0));
             var sync = new[] { s.Sync(10, 1), s.Sync(11, 2) }; // no boundary frame at all
 
-            StitchResult result = s.Run(sync, new[] { seg }, trace: true);
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { seg }, trace: true);
 
             Assert.Equal(1, result.Diagnostics.BoundariesNotFound);
             Assert.Contains(result.Diagnostics.Messages, m => m.Contains("segment[0]") && m.Contains("boundary=no-boundary"));
@@ -3412,7 +3423,7 @@ namespace TraceEventTests
         [Fact]
         public void Diagnostics_BoundsRetainedMessages()
         {
-            var diagnostics = new StitchDiagnostics();
+            var diagnostics = new AsyncProfilerCallStackDiagnostics();
 
             for (int i = 0; i < 1_100; i++)
             {
@@ -3426,16 +3437,16 @@ namespace TraceEventTests
         [Fact]
         public void Diagnostics_ClearAndAddToCoverEveryCounter()
         {
-            System.Reflection.FieldInfo[] counters = typeof(StitchDiagnostics).GetFields()
+            System.Reflection.FieldInfo[] counters = typeof(AsyncProfilerCallStackDiagnostics).GetFields()
                 .Where(field => field.IsPublic && !field.IsStatic && field.FieldType == typeof(int))
                 .ToArray();
-            var source = new StitchDiagnostics();
+            var source = new AsyncProfilerCallStackDiagnostics();
             foreach (System.Reflection.FieldInfo counter in counters)
             {
                 counter.SetValue(source, 1);
             }
 
-            var target = new StitchDiagnostics();
+            var target = new AsyncProfilerCallStackDiagnostics();
             source.AddTo(target);
             Assert.All(counters, counter => Assert.Equal(1, counter.GetValue(target)));
 

@@ -10,58 +10,58 @@ using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
 namespace TraceEventBenchmarks
 {
     [MemoryDiagnoser]
-    public class AsyncCpuStackStitcherBenchmarks
+    public class AsyncProfilerCallStackStitcherBenchmarks
     {
         private const long Qpc = 1_000;
 
-        private IReadOnlyList<StitchSyncFrame> _sync;
-        private IReadOnlyList<AsyncCallStack> _segments;
-        private Dictionary<CodeAddressIndex, AsyncStitchBoundaryInfo> _boundaries;
+        private IReadOnlyList<AsyncProfilerStitchSyncFrame> _sync;
+        private IReadOnlyList<AsyncProfilerCallStack> _segments;
+        private Dictionary<CodeAddressIndex, AsyncProfilerCallStackStitchBoundaryInfo> _boundaries;
         private Dictionary<CodeAddressIndex, MethodIndex> _methods;
-        private List<StitchedFrame> _output;
-        private StitchDiagnostics _diagnostics;
-        private Func<CodeAddressIndex, AsyncStitchBoundaryInfo> _classify;
+        private List<AsyncProfilerStitchedFrame> _output;
+        private AsyncProfilerCallStackDiagnostics _diagnostics;
+        private Func<CodeAddressIndex, AsyncProfilerCallStackStitchBoundaryInfo> _classify;
         private Func<ProcessIndex, AsyncCallstackKind, long, bool> _methodCompletionObservedByProcess;
         private Func<CodeAddressIndex, MethodIndex> _methodOf;
 
         [Params(
-            StitchBenchmarkScenario.NoAsync,
-            StitchBenchmarkScenario.RuntimeAsync,
-            StitchBenchmarkScenario.StateMachineAsync,
-            StitchBenchmarkScenario.MixedNested,
-            StitchBenchmarkScenario.BoundaryNotFound)]
-        public StitchBenchmarkScenario Scenario { get; set; }
+            AsyncProfilerStitchBenchmarkScenario.NoAsync,
+            AsyncProfilerStitchBenchmarkScenario.RuntimeAsync,
+            AsyncProfilerStitchBenchmarkScenario.StateMachineAsync,
+            AsyncProfilerStitchBenchmarkScenario.MixedNested,
+            AsyncProfilerStitchBenchmarkScenario.BoundaryNotFound)]
+        public AsyncProfilerStitchBenchmarkScenario Scenario { get; set; }
 
         [GlobalSetup]
         public void Setup()
         {
-            _boundaries = new Dictionary<CodeAddressIndex, AsyncStitchBoundaryInfo>();
+            _boundaries = new Dictionary<CodeAddressIndex, AsyncProfilerCallStackStitchBoundaryInfo>();
             _methods = new Dictionary<CodeAddressIndex, MethodIndex>();
-            _output = new List<StitchedFrame>(32);
-            _diagnostics = new StitchDiagnostics();
+            _output = new List<AsyncProfilerStitchedFrame>(32);
+            _diagnostics = new AsyncProfilerCallStackDiagnostics();
             _classify = Classify;
             _methodCompletionObservedByProcess = MethodCompletionObservedByProcess;
             _methodOf = MethodOf;
 
             switch (Scenario)
             {
-                case StitchBenchmarkScenario.NoAsync:
+                case AsyncProfilerStitchBenchmarkScenario.NoAsync:
                     _sync = SyncFrames(16, 100);
-                    _segments = Array.Empty<AsyncCallStack>();
+                    _segments = Array.Empty<AsyncProfilerCallStack>();
                     break;
 
-                case StitchBenchmarkScenario.RuntimeAsync:
+                case AsyncProfilerStitchBenchmarkScenario.RuntimeAsync:
                     _sync = RuntimeSync(100, firstAsyncMethod: 200, wrapperIndex: 3);
                     _segments = new[] { Segment(AsyncCallstackKind.RuntimeAsync, 200, 6, depth: 0) };
                     break;
 
-                case StitchBenchmarkScenario.StateMachineAsync:
+                case AsyncProfilerStitchBenchmarkScenario.StateMachineAsync:
                     _sync = StateMachineSync(100, 200);
                     _segments = new[] { Segment(AsyncCallstackKind.StateMachineAsync, 200, 6, depth: 0) };
                     break;
 
-                case StitchBenchmarkScenario.MixedNested:
-                    var sync = new List<StitchSyncFrame>();
+                case AsyncProfilerStitchBenchmarkScenario.MixedNested:
+                    var sync = new List<AsyncProfilerStitchSyncFrame>();
                     sync.AddRange(StateMachineSync(100, 200));
                     sync.Add(Sync(130, 90));
                     sync.AddRange(RuntimeSync(140, firstAsyncMethod: 300, wrapperIndex: 0));
@@ -73,7 +73,7 @@ namespace TraceEventBenchmarks
                     };
                     break;
 
-                case StitchBenchmarkScenario.BoundaryNotFound:
+                case AsyncProfilerStitchBenchmarkScenario.BoundaryNotFound:
                     _sync = SyncFrames(16, 100);
                     _segments = new[] { Segment(AsyncCallstackKind.RuntimeAsync, 200, 6, depth: 0) };
                     break;
@@ -84,8 +84,8 @@ namespace TraceEventBenchmarks
         }
 
         [Benchmark]
-        public StitchResult Stitch() =>
-            AsyncCpuStackStitcher.Stitch(
+        public object Stitch() =>
+            AsyncProfilerCallStackStitcher.Stitch(
                 _sync,
                 _segments,
                 Qpc,
@@ -96,7 +96,7 @@ namespace TraceEventBenchmarks
         [Benchmark]
         public int StitchIntoReusableBuffers()
         {
-            AsyncCpuStackStitcher.StitchInto(
+            AsyncProfilerCallStackStitcher.StitchInto(
                 _sync,
                 _segments,
                 Qpc,
@@ -110,10 +110,10 @@ namespace TraceEventBenchmarks
             return _output.Count;
         }
 
-        private AsyncCallStack Segment(AsyncCallstackKind kind, int firstCodeAddress, int frameCount, int depth)
+        private AsyncProfilerCallStack Segment(AsyncCallstackKind kind, int firstCodeAddress, int frameCount, int depth)
         {
             var methodIds = new ulong[frameCount];
-            var frames = new AsyncCallStackFrames(kind, methodIds, kind == AsyncCallstackKind.StateMachineAsync ? new int[frameCount] : null);
+            var frames = new AsyncProfilerCallStackFrames(kind, methodIds, kind == AsyncCallstackKind.StateMachineAsync ? new int[frameCount] : null);
             for (int i = 0; i < frameCount; i++)
             {
                 CodeAddressIndex codeAddress = CodeAddress(firstCodeAddress + i);
@@ -122,50 +122,50 @@ namespace TraceEventBenchmarks
                 _methods[codeAddress] = Method(firstCodeAddress + i);
             }
 
-            return new AsyncCallStack(
+            return new AsyncProfilerCallStack(
                 depth,
-                (AsyncCallStackFramesIndex)depth,
+                (AsyncProfilerCallStackFramesIndex)depth,
                 frames,
                 continuationIndexBase: 0,
                 wrapperCount: 32,
                 startQpc: 900,
                 endQpc: 1_100,
-                methodCompletions: Array.Empty<AsyncCallStack.CompletionDelta>(),
-                exceptionCompletions: Array.Empty<AsyncCallStack.CompletionDelta>(),
+                methodCompletions: Array.Empty<AsyncProfilerCallStack.CompletionDelta>(),
+                exceptionCompletions: Array.Empty<AsyncProfilerCallStack.CompletionDelta>(),
                 wrapperResets: Array.Empty<long>());
         }
 
-        private StitchSyncFrame[] RuntimeSync(int firstCodeAddress, int firstAsyncMethod, int wrapperIndex)
+        private AsyncProfilerStitchSyncFrame[] RuntimeSync(int firstCodeAddress, int firstAsyncMethod, int wrapperIndex)
         {
             var result = new[]
             {
                 Sync(firstCodeAddress, firstAsyncMethod + 10),
                 Sync(firstCodeAddress + 1, firstAsyncMethod + wrapperIndex),
-                Boundary(firstCodeAddress + 2, AsyncStitchBoundaryKind.V2ContinuationWrapper, wrapperIndex),
-                Boundary(firstCodeAddress + 3, AsyncStitchBoundaryKind.V2DispatchContinuation),
-                Boundary(firstCodeAddress + 4, AsyncStitchBoundaryKind.V2DispatchContinuation),
+                Boundary(firstCodeAddress + 2, AsyncProfilerCallStackStitchBoundaryKind.V2ContinuationWrapper, wrapperIndex),
+                Boundary(firstCodeAddress + 3, AsyncProfilerCallStackStitchBoundaryKind.V2DispatchContinuation),
+                Boundary(firstCodeAddress + 4, AsyncProfilerCallStackStitchBoundaryKind.V2DispatchContinuation),
                 Sync(firstCodeAddress + 5, 95),
                 Sync(firstCodeAddress + 6, 96),
             };
             return result;
         }
 
-        private StitchSyncFrame[] StateMachineSync(int firstCodeAddress, int firstAsyncMethod)
+        private AsyncProfilerStitchSyncFrame[] StateMachineSync(int firstCodeAddress, int firstAsyncMethod)
         {
             return new[]
             {
                 Sync(firstCodeAddress, 90),
                 Sync(firstCodeAddress + 1, firstAsyncMethod + 1),
                 Sync(firstCodeAddress + 2, firstAsyncMethod),
-                Boundary(firstCodeAddress + 3, AsyncStitchBoundaryKind.V1Dispatcher),
-                Boundary(firstCodeAddress + 4, AsyncStitchBoundaryKind.V1DispatcherInfrastructure),
-                Boundary(firstCodeAddress + 5, AsyncStitchBoundaryKind.V1DispatcherInfrastructure),
+                Boundary(firstCodeAddress + 3, AsyncProfilerCallStackStitchBoundaryKind.V1Dispatcher),
+                Boundary(firstCodeAddress + 4, AsyncProfilerCallStackStitchBoundaryKind.V1DispatcherInfrastructure),
+                Boundary(firstCodeAddress + 5, AsyncProfilerCallStackStitchBoundaryKind.V1DispatcherInfrastructure),
             };
         }
 
-        private StitchSyncFrame[] SyncFrames(int count, int firstCodeAddress)
+        private AsyncProfilerStitchSyncFrame[] SyncFrames(int count, int firstCodeAddress)
         {
-            var result = new StitchSyncFrame[count];
+            var result = new AsyncProfilerStitchSyncFrame[count];
             for (int i = 0; i < count; i++)
             {
                 result[i] = Sync(firstCodeAddress + i, firstCodeAddress + i);
@@ -173,26 +173,26 @@ namespace TraceEventBenchmarks
             return result;
         }
 
-        private StitchSyncFrame Sync(int codeAddress, int method)
+        private AsyncProfilerStitchSyncFrame Sync(int codeAddress, int method)
         {
             CodeAddressIndex ca = CodeAddress(codeAddress);
             MethodIndex mi = Method(method);
             _methods[ca] = mi;
-            return new StitchSyncFrame(ca, mi);
+            return new AsyncProfilerStitchSyncFrame(ca, mi);
         }
 
-        private StitchSyncFrame Boundary(
-            int codeAddress, AsyncStitchBoundaryKind kind, int wrapperIndex = -1)
+        private AsyncProfilerStitchSyncFrame Boundary(
+            int codeAddress, AsyncProfilerCallStackStitchBoundaryKind kind, int wrapperIndex = -1)
         {
             CodeAddressIndex ca = CodeAddress(codeAddress);
-            _boundaries[ca] = new AsyncStitchBoundaryInfo(kind, wrapperIndex);
-            return new StitchSyncFrame(ca, MethodIndex.Invalid);
+            _boundaries[ca] = new AsyncProfilerCallStackStitchBoundaryInfo(kind, wrapperIndex);
+            return new AsyncProfilerStitchSyncFrame(ca, MethodIndex.Invalid);
         }
 
-        private AsyncStitchBoundaryInfo Classify(CodeAddressIndex codeAddress) =>
-            _boundaries.TryGetValue(codeAddress, out AsyncStitchBoundaryInfo boundary)
+        private AsyncProfilerCallStackStitchBoundaryInfo Classify(CodeAddressIndex codeAddress) =>
+            _boundaries.TryGetValue(codeAddress, out AsyncProfilerCallStackStitchBoundaryInfo boundary)
                 ? boundary
-                : AsyncStitchBoundaryInfo.None;
+                : AsyncProfilerCallStackStitchBoundaryInfo.None;
 
         private MethodIndex MethodOf(CodeAddressIndex codeAddress) =>
             _methods.TryGetValue(codeAddress, out MethodIndex method) ? method : MethodIndex.Invalid;
@@ -209,7 +209,7 @@ namespace TraceEventBenchmarks
         private static MethodIndex Method(int value) => (MethodIndex)value;
     }
 
-    public enum StitchBenchmarkScenario
+    public enum AsyncProfilerStitchBenchmarkScenario
     {
         NoAsync,
         RuntimeAsync,

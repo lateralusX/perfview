@@ -83,10 +83,10 @@ namespace TraceEventTests
         private const ProcessIndex ProcessA = (ProcessIndex)1;
         private const ProcessIndex ProcessB = (ProcessIndex)2;
 
-        private static AsyncThreadKey Key(ulong osThreadId) => Key((ProcessIndex)0, osThreadId);
+        private static AsyncProfilerThreadKey Key(ulong osThreadId) => Key((ProcessIndex)0, osThreadId);
 
-        private static AsyncThreadKey Key(ProcessIndex processIndex, ulong osThreadId) =>
-            new AsyncThreadKey(processIndex, osThreadId);
+        private static AsyncProfilerThreadKey Key(ProcessIndex processIndex, ulong osThreadId) =>
+            new AsyncProfilerThreadKey(processIndex, osThreadId);
 
         private static AsyncProfilerComputer Compute(AsyncProfilerBufferBuilder builder)
         {
@@ -99,21 +99,23 @@ namespace TraceEventTests
             computer.Process(builder.Build(), processIndex);
 
         [Theory]
-        [InlineData(AsyncCallstackKind.RuntimeAsync, AsyncEventID.ResumeRuntimeAsyncCallstack)]
-        [InlineData(AsyncCallstackKind.RuntimeAsync, AsyncEventID.UnwindRuntimeAsyncException)]
-        [InlineData(AsyncCallstackKind.StateMachineAsync, AsyncEventID.ResumeStateMachineAsyncCallstack)]
-        [InlineData(AsyncCallstackKind.StateMachineAsync, AsyncEventID.AppendStateMachineAsyncCallstack)]
-        [InlineData(AsyncCallstackKind.StateMachineAsync, AsyncEventID.UnwindStateMachineAsyncException)]
+        [InlineData((int)AsyncCallstackKind.RuntimeAsync, (int)AsyncEventID.ResumeRuntimeAsyncCallstack)]
+        [InlineData((int)AsyncCallstackKind.RuntimeAsync, (int)AsyncEventID.UnwindRuntimeAsyncException)]
+        [InlineData((int)AsyncCallstackKind.StateMachineAsync, (int)AsyncEventID.ResumeStateMachineAsyncCallstack)]
+        [InlineData((int)AsyncCallstackKind.StateMachineAsync, (int)AsyncEventID.AppendStateMachineAsyncCallstack)]
+        [InlineData((int)AsyncCallstackKind.StateMachineAsync, (int)AsyncEventID.UnwindStateMachineAsyncException)]
         public void MalformedPayload_PreservesNestedPrefixAndRecoversOnlyAtReset(
-            AsyncCallstackKind kind, AsyncEventID malformedEvent)
+            int kindValue, int malformedEventValue)
         {
+            var kind = (AsyncCallstackKind)kindValue;
+            var malformedEvent = (AsyncEventID)malformedEventValue;
             bool v1 = kind == AsyncCallstackKind.StateMachineAsync;
             AsyncEventID resume = v1 ? AsyncEventID.ResumeStateMachineAsyncCallstack : AsyncEventID.ResumeRuntimeAsyncCallstack;
             AsyncEventID suspend = v1 ? AsyncEventID.SuspendStateMachineAsyncContext : AsyncEventID.SuspendRuntimeAsyncContext;
             AsyncEventID completeMethod = v1 ? AsyncEventID.CompleteStateMachineAsyncMethod : AsyncEventID.CompleteRuntimeAsyncMethod;
             int[] states = v1 ? new[] { 1 } : null;
             var computer = new AsyncProfilerComputer();
-            var errors = new List<AsyncProfilerParseError>();
+            var errors = new List<ParseError>();
             computer.ParseError += (process, error) =>
             {
                 Assert.Equal(ProcessA, process);
@@ -133,21 +135,21 @@ namespace TraceEventTests
             computer.Finish();
 
             Assert.Equal(1, computer.ParseErrorCount);
-            AsyncProfilerParseError error = Assert.Single(errors);
+            ParseError error = Assert.Single(errors);
             Assert.Equal(ThreadA, error.BufferHeader.Value.OsThreadId);
             Assert.Equal(Start + 15, error.TimestampQpc);
             Assert.Equal(malformedEvent, error.EventId);
-            Assert.True(error.ByteOffset >= AsyncProfilerBufferHeader.Size);
-            IReadOnlyList<AsyncCallStack> prefix = computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 14);
+            Assert.True(error.ByteOffset >= BufferHeader.Size);
+            IReadOnlyList<AsyncProfilerCallStack> prefix = computer.GetCallStacks(Key(ProcessA, ThreadA), Start + 14);
             Assert.Equal(2, prefix.Count);
             Assert.All(prefix, stack => Assert.Equal(Start + 15, stack.EndQpc));
-            Assert.Empty(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 15));
-            Assert.Empty(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 19));
-            AsyncCallStack recovered = Assert.Single(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 23));
+            Assert.Empty(computer.GetCallStacks(Key(ProcessA, ThreadA), Start + 15));
+            Assert.Empty(computer.GetCallStacks(Key(ProcessA, ThreadA), Start + 19));
+            AsyncProfilerCallStack recovered = Assert.Single(computer.GetCallStacks(Key(ProcessA, ThreadA), Start + 23));
             Assert.Equal(0, recovered.Depth);
             Assert.Equal(0xBEEFUL, recovered.Frames.MethodIdAt(0));
             Assert.Equal(kind, recovered.Frames.Kind);
-            Assert.Empty(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 26));
+            Assert.Empty(computer.GetCallStacks(Key(ProcessA, ThreadA), Start + 26));
         }
 
         [Fact]
@@ -165,11 +167,11 @@ namespace TraceEventTests
                 .ResumeStack(Start + 20, 4, new ulong[] { 0xDEAD }));
             computer.Finish();
 
-            Assert.Equal(Start + 15, Assert.Single(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 14)).EndQpc);
-            Assert.Empty(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 15));
-            Assert.Empty(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 100));
-            Assert.Equal(long.MaxValue, Assert.Single(computer.GetAsyncCallStacks(Key(ProcessA, ThreadB), Start + 100)).EndQpc);
-            Assert.Equal(long.MaxValue, Assert.Single(computer.GetAsyncCallStacks(Key(ProcessB, ThreadA), Start + 100)).EndQpc);
+            Assert.Equal(Start + 15, Assert.Single(computer.GetCallStacks(Key(ProcessA, ThreadA), Start + 14)).EndQpc);
+            Assert.Empty(computer.GetCallStacks(Key(ProcessA, ThreadA), Start + 15));
+            Assert.Empty(computer.GetCallStacks(Key(ProcessA, ThreadA), Start + 100));
+            Assert.Equal(long.MaxValue, Assert.Single(computer.GetCallStacks(Key(ProcessA, ThreadB), Start + 100)).EndQpc);
+            Assert.Equal(long.MaxValue, Assert.Single(computer.GetCallStacks(Key(ProcessB, ThreadA), Start + 100)).EndQpc);
         }
 
         [Theory]
@@ -188,7 +190,7 @@ namespace TraceEventTests
                 .Armed(Start).ResumeStack(Start + 10, 4, new ulong[] { 0xD }));
             byte[] damaged = unsupportedVersion ? new AsyncProfilerBufferBuilder(ThreadA).Build() : new byte[8];
             damaged[0] = 2;
-            AsyncProfilerParseError diagnostic = default;
+            ParseError diagnostic = default;
             computer.ParseError += (process, error) =>
             {
                 Assert.Equal(ProcessA, process);
@@ -206,12 +208,12 @@ namespace TraceEventTests
             Assert.Equal(1, computer.ParseErrorCount);
             Assert.Null(diagnostic.BufferHeader);
             Assert.Null(diagnostic.TimestampQpc);
-            Assert.Equal(0xAUL, Assert.Single(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 11)).Frames.MethodIdAt(0));
-            Assert.Empty(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 15));
-            Assert.Empty(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 21));
-            Assert.Empty(computer.GetAsyncCallStacks(Key(ProcessA, ThreadB), Start + 100));
-            Assert.Equal(0xBEEFUL, Assert.Single(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 32)).Frames.MethodIdAt(0));
-            Assert.Equal(0xDUL, Assert.Single(computer.GetAsyncCallStacks(Key(ProcessB, ThreadA), Start + 100)).Frames.MethodIdAt(0));
+            Assert.Equal(0xAUL, Assert.Single(computer.GetCallStacks(Key(ProcessA, ThreadA), Start + 11)).Frames.MethodIdAt(0));
+            Assert.Empty(computer.GetCallStacks(Key(ProcessA, ThreadA), Start + 15));
+            Assert.Empty(computer.GetCallStacks(Key(ProcessA, ThreadA), Start + 21));
+            Assert.Empty(computer.GetCallStacks(Key(ProcessA, ThreadB), Start + 100));
+            Assert.Equal(0xBEEFUL, Assert.Single(computer.GetCallStacks(Key(ProcessA, ThreadA), Start + 32)).Frames.MethodIdAt(0));
+            Assert.Equal(0xDUL, Assert.Single(computer.GetCallStacks(Key(ProcessB, ThreadA), Start + 100)).Frames.MethodIdAt(0));
         }
 
         [Fact]
@@ -236,13 +238,13 @@ namespace TraceEventTests
             computer.Finish();
 
             Assert.Equal(1, computer.ParseErrorCount);
-            Assert.Equal(Start + 20, Assert.Single(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 15)).EndQpc);
-            Assert.Empty(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 20));
-            Assert.Empty(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 22));
-            Assert.Empty(computer.GetAsyncCallStacks(Key(ProcessA, ThreadB), Start + 42));
-            Assert.Equal(0xBEEFUL, Assert.Single(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 32)).Frames.MethodIdAt(0));
-            Assert.Equal(0xCAFEUL, Assert.Single(computer.GetAsyncCallStacks(Key(ProcessA, ThreadB), Start + 47)).Frames.MethodIdAt(0));
-            Assert.Equal(0xCUL, Assert.Single(computer.GetAsyncCallStacks(Key(ProcessB, ThreadA), Start + 100)).Frames.MethodIdAt(0));
+            Assert.Equal(Start + 20, Assert.Single(computer.GetCallStacks(Key(ProcessA, ThreadA), Start + 15)).EndQpc);
+            Assert.Empty(computer.GetCallStacks(Key(ProcessA, ThreadA), Start + 20));
+            Assert.Empty(computer.GetCallStacks(Key(ProcessA, ThreadA), Start + 22));
+            Assert.Empty(computer.GetCallStacks(Key(ProcessA, ThreadB), Start + 42));
+            Assert.Equal(0xBEEFUL, Assert.Single(computer.GetCallStacks(Key(ProcessA, ThreadA), Start + 32)).Frames.MethodIdAt(0));
+            Assert.Equal(0xCAFEUL, Assert.Single(computer.GetCallStacks(Key(ProcessA, ThreadB), Start + 47)).Frames.MethodIdAt(0));
+            Assert.Equal(0xCUL, Assert.Single(computer.GetCallStacks(Key(ProcessB, ThreadA), Start + 100)).Frames.MethodIdAt(0));
         }
 
         [Theory]
@@ -260,14 +262,14 @@ namespace TraceEventTests
             }
             else
             {
-                damaged[AsyncProfilerBufferHeader.Size + 1] = 0x80;
+                damaged[BufferHeader.Size + 1] = 0x80;
             }
             computer.Process(damaged);
             computer.Finish();
 
             Assert.Equal(1, computer.ParseErrorCount);
-            Assert.Equal(Start + 15, Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 14)).EndQpc);
-            Assert.Empty(computer.GetAsyncCallStacks(Key(ThreadA), Start + 15));
+            Assert.Equal(Start + 15, Assert.Single(computer.GetCallStacks(Key(ThreadA), Start + 14)).EndQpc);
+            Assert.Empty(computer.GetCallStacks(Key(ThreadA), Start + 15));
         }
 
         [Theory]
@@ -284,8 +286,8 @@ namespace TraceEventTests
             computer.Finish();
 
             Assert.Equal(1, computer.ParseErrorCount);
-            Assert.Equal(Start + endOffset, Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 11)).EndQpc);
-            Assert.Empty(computer.GetAsyncCallStacks(Key(ThreadA), Start + endOffset));
+            Assert.Equal(Start + endOffset, Assert.Single(computer.GetCallStacks(Key(ThreadA), Start + 11)).EndQpc);
+            Assert.Empty(computer.GetCallStacks(Key(ThreadA), Start + endOffset));
         }
 
         [Fact]
@@ -298,7 +300,7 @@ namespace TraceEventTests
                 .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0x100 })
                 .Suspend(Start + 20));
 
-            Assert.Empty(computer.GetAsyncCallStacks(Key(ThreadA), Start + 15));
+            Assert.Empty(computer.GetCallStacks(Key(ThreadA), Start + 15));
             Assert.Equal(0, computer.DistinctFramesCount);
         }
 
@@ -317,9 +319,9 @@ namespace TraceEventTests
                 .Suspend(Start + 50));
 
             // The pre-metadata episode is not indexed.
-            Assert.Empty(computer.GetAsyncCallStacks(Key(ThreadA), Start + 15));
+            Assert.Empty(computer.GetCallStacks(Key(ThreadA), Start + 15));
             // The post-metadata episode is.
-            Assert.Equal(0xBEEFUL, Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 45)).Frames.MethodIdAt(0));
+            Assert.Equal(0xBEEFUL, Assert.Single(computer.GetCallStacks(Key(ThreadA), Start + 45)).Frames.MethodIdAt(0));
             Assert.Equal(1, computer.DistinctFramesCount);
         }
 
@@ -348,7 +350,7 @@ namespace TraceEventTests
                 .Suspend(Start - 80)
                 .Build());
 
-            Assert.Empty(computer.GetAsyncCallStacks(Key(ThreadB), Start - 85));
+            Assert.Empty(computer.GetCallStacks(Key(ThreadB), Start - 85));
 
             // A valid ThreadB reset at/after the metadata QPC arms normally (the gate is purely QPC-based, not a
             // permanent per-thread block).
@@ -358,7 +360,7 @@ namespace TraceEventTests
                 .Suspend(Start + 50)
                 .Build());
 
-            Assert.Equal(0xBEEFUL, Assert.Single(computer.GetAsyncCallStacks(Key(ThreadB), Start + 45)).Frames.MethodIdAt(0));
+            Assert.Equal(0xBEEFUL, Assert.Single(computer.GetCallStacks(Key(ThreadB), Start + 45)).Frames.MethodIdAt(0));
         }
 
         [Fact]
@@ -369,12 +371,12 @@ namespace TraceEventTests
                 .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0x100, 0x200 })
                 .Suspend(Start + 20));
 
-            Assert.Empty(computer.GetAsyncCallStacks(Key(ThreadA), Start + 5));   // before start
-            Assert.Empty(computer.GetAsyncCallStacks(Key(ThreadA), Start + 20));  // end is exclusive
-            Assert.Empty(computer.GetAsyncCallStacks(Key(ThreadA), Start + 25));  // after end
+            Assert.Empty(computer.GetCallStacks(Key(ThreadA), Start + 5));   // before start
+            Assert.Empty(computer.GetCallStacks(Key(ThreadA), Start + 20));  // end is exclusive
+            Assert.Empty(computer.GetCallStacks(Key(ThreadA), Start + 25));  // after end
 
-            IReadOnlyList<AsyncCallStack> active = computer.GetAsyncCallStacks(Key(ThreadA), Start + 15);
-            AsyncCallStack cs = Assert.Single(active);
+            IReadOnlyList<AsyncProfilerCallStack> active = computer.GetCallStacks(Key(ThreadA), Start + 15);
+            AsyncProfilerCallStack cs = Assert.Single(active);
             Assert.Equal(0, cs.Depth);
             Assert.Equal(Start + 10, cs.StartQpc);
             Assert.Equal(Start + 20, cs.EndQpc);
@@ -392,7 +394,7 @@ namespace TraceEventTests
                 .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0x100 })
                 .Complete(Start + 20));
 
-            Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 15));
+            Assert.Single(computer.GetCallStacks(Key(ThreadA), Start + 15));
         }
 
         [Fact]
@@ -407,7 +409,7 @@ namespace TraceEventTests
                 .Suspend(Start + 40)); // pops D1
 
             // Inside the nested window: both are active, ordered bottom-to-top.
-            IReadOnlyList<AsyncCallStack> nested = computer.GetAsyncCallStacks(Key(ThreadA), Start + 25);
+            IReadOnlyList<AsyncProfilerCallStack> nested = computer.GetCallStacks(Key(ThreadA), Start + 25);
             Assert.Equal(2, nested.Count);
             Assert.Equal(0, nested[0].Depth);
             Assert.Equal(0xAUL, nested[0].Frames.MethodIdAt(0));
@@ -415,8 +417,8 @@ namespace TraceEventTests
             Assert.Equal(0xBUL, nested[1].Frames.MethodIdAt(0));
 
             // Before and after the nested child: only D1 is active.
-            Assert.Equal(0xAUL, Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 15)).Frames.MethodIdAt(0));
-            Assert.Equal(0xAUL, Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 35)).Frames.MethodIdAt(0));
+            Assert.Equal(0xAUL, Assert.Single(computer.GetCallStacks(Key(ThreadA), Start + 15)).Frames.MethodIdAt(0));
+            Assert.Equal(0xAUL, Assert.Single(computer.GetCallStacks(Key(ThreadA), Start + 35)).Frames.MethodIdAt(0));
         }
 
         [Fact]
@@ -429,9 +431,9 @@ namespace TraceEventTests
                 .Suspend(Start + 30)
                 .Suspend(Start + 40));
 
-            AsyncCallStack outer = computer.Index.GetAsyncCallStack(
+            AsyncProfilerCallStack outer = computer.Index.GetCallStack(
                 Key(ThreadA), dispatcherId: 1, qpc: Start + 25);
-            AsyncCallStack inner = computer.Index.GetAsyncCallStack(
+            AsyncProfilerCallStack inner = computer.Index.GetCallStack(
                 Key(ThreadA), dispatcherId: 2, qpc: Start + 25);
 
             Assert.NotNull(outer);
@@ -442,12 +444,12 @@ namespace TraceEventTests
             Assert.Equal(Key(ThreadA), inner.Thread);
             Assert.Equal(2UL, inner.DispatcherId);
             Assert.Equal(0xBUL, inner.Frames.MethodIdAt(0));
-            Assert.Null(computer.Index.GetAsyncCallStack(
+            Assert.Null(computer.Index.GetCallStack(
                 Key(ThreadA), dispatcherId: 3, qpc: Start + 25));
         }
 
         [Fact]
-        public void FireAndForgetCreation_ResolvesParentCallStackAndCreationQpc()
+        public void DispatcherInfo_ResolvesFireAndForgetParentCallStackAndCreationQpc()
         {
             var computer = new AsyncProfilerComputer();
             computer.Process(new AsyncProfilerBufferBuilder(ThreadA)
@@ -467,20 +469,20 @@ namespace TraceEventTests
                 .Suspend(Start + 40)
                 .Build());
 
-            AsyncCallStack child = computer.Index.GetAsyncCallStack(
+            AsyncProfilerCallStack child = computer.Index.GetCallStack(
                 Key(ThreadB), dispatcherId: 2, qpc: Start + 35);
             Assert.NotNull(child);
 
-            AsyncDispatcherCreation creation = computer.Index.GetCreation(child);
-            Assert.NotNull(creation);
-            Assert.Equal(Key(ThreadA), creation.Thread);
-            Assert.Equal(2UL, creation.ChildDispatcherId);
-            Assert.Equal(1UL, creation.ParentDispatcherId);
-            Assert.Equal(Start + 20, creation.CreateQpc);
+            AsyncProfilerDispatcherInfo dispatcher = computer.Index.GetDispatcherInfo(child);
+            Assert.NotNull(dispatcher);
+            Assert.Equal(Key(ThreadA), dispatcher.CreationThread);
+            Assert.Equal(2UL, dispatcher.DispatcherId);
+            Assert.Equal(1UL, dispatcher.ParentDispatcherId);
+            Assert.Equal(Start + 20, dispatcher.CreationQpc);
 
-            Assert.True(computer.Index.TryGetParentAsyncCallStack(
+            Assert.True(computer.Index.TryGetParentCallStack(
                 child,
-                out AsyncCallStack parent,
+                out AsyncProfilerCallStack parent,
                 out long parentQpc));
             Assert.Equal(Start + 20, parentQpc);
             Assert.Equal(1UL, parent.DispatcherId);
@@ -488,22 +490,22 @@ namespace TraceEventTests
             Assert.True(computer.Index.MethodCompletionObserved(parent));
             Assert.Equal(1, parent.GetCompletedFrameCount(parentQpc));
             Assert.Equal(0xBUL, parent.Frames.MethodIdAt(parent.GetCompletedFrameCount(parentQpc)));
-            Assert.Same(parent, computer.Index.GetParentAsyncCallStack(child));
+            Assert.Same(parent, computer.Index.GetParentCallStack(child));
 
-            AsyncDispatcherCreation childCreation = Assert.Single(
-                computer.Index.GetChildCreations(parent));
-            Assert.Equal(creation.Thread, childCreation.Thread);
-            Assert.Equal(creation.ChildDispatcherId, childCreation.ChildDispatcherId);
-            Assert.Equal(creation.ParentDispatcherId, childCreation.ParentDispatcherId);
-            Assert.Equal(creation.CreateQpc, childCreation.CreateQpc);
+            AsyncProfilerDispatcherInfo childDispatcher = Assert.Single(
+                computer.Index.GetChildDispatcherInfos(parent));
+            Assert.Equal(dispatcher.CreationThread, childDispatcher.CreationThread);
+            Assert.Equal(dispatcher.DispatcherId, childDispatcher.DispatcherId);
+            Assert.Equal(dispatcher.ParentDispatcherId, childDispatcher.ParentDispatcherId);
+            Assert.Equal(dispatcher.CreationQpc, childDispatcher.CreationQpc);
 
-            AsyncCallStacksIndex reloaded = RoundTrip(computer.Index);
-            AsyncCallStack reloadedChild = reloaded.GetAsyncCallStack(
+            AsyncProfilerCallStacksIndex reloaded = RoundTrip(computer.Index);
+            AsyncProfilerCallStack reloadedChild = reloaded.GetCallStack(
                 Key(ThreadB), dispatcherId: 2, qpc: Start + 35);
             Assert.NotNull(reloadedChild);
-            Assert.True(reloaded.TryGetParentAsyncCallStack(
+            Assert.True(reloaded.TryGetParentCallStack(
                 reloadedChild,
-                out AsyncCallStack reloadedParent,
+                out AsyncProfilerCallStack reloadedParent,
                 out long reloadedParentQpc));
             Assert.Equal(Start + 20, reloadedParentQpc);
             Assert.Equal(1UL, reloadedParent.DispatcherId);
@@ -513,7 +515,7 @@ namespace TraceEventTests
         }
 
         [Fact]
-        public void CreationWithoutParent_IsKnownRoot()
+        public void DispatcherInfoWithoutParent_IsKnownRoot()
         {
             var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
                 .Armed(Start)
@@ -525,16 +527,16 @@ namespace TraceEventTests
                 .ResumeStack(Start + 20, dispatcher: 2, new ulong[] { 0xA })
                 .Suspend(Start + 30));
 
-            AsyncCallStack child = Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 25));
-            AsyncDispatcherCreation creation = computer.Index.GetCreation(child);
-            Assert.NotNull(creation);
-            Assert.Equal(0UL, creation.ParentDispatcherId);
+            AsyncProfilerCallStack child = Assert.Single(computer.GetCallStacks(Key(ThreadA), Start + 25));
+            AsyncProfilerDispatcherInfo dispatcher = computer.Index.GetDispatcherInfo(child);
+            Assert.NotNull(dispatcher);
+            Assert.Equal(0UL, dispatcher.ParentDispatcherId);
             Assert.False(computer.Index.MethodCompletionObserved(child));
-            Assert.False(computer.Index.TryGetParentAsyncCallStack(child, out _, out _));
+            Assert.False(computer.Index.TryGetParentCallStack(child, out _, out _));
         }
 
         [Fact]
-        public void CreationBeforeThreadIsArmed_IsIgnored()
+        public void DispatcherInfoBeforeThreadIsArmed_IsIgnored()
         {
             var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
                 .Metadata(Start, qpcFrequency: 10_000_000, qpcSync: 1, utcSync: 1, eventBufferSize: 0, wrapperCount: 32, new AsyncManifestEntry[0])
@@ -547,9 +549,9 @@ namespace TraceEventTests
                 .ResumeStack(Start + 20, dispatcher: 2, new ulong[] { 0xA })
                 .Suspend(Start + 30));
 
-            AsyncCallStack child = Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 25));
-            Assert.Null(computer.Index.GetCreation(child));
-            Assert.False(computer.Index.TryGetParentAsyncCallStack(child, out _, out _));
+            AsyncProfilerCallStack child = Assert.Single(computer.GetCallStacks(Key(ThreadA), Start + 25));
+            Assert.Null(computer.Index.GetDispatcherInfo(child));
+            Assert.False(computer.Index.TryGetParentCallStack(child, out _, out _));
         }
 
         [Fact]
@@ -561,7 +563,7 @@ namespace TraceEventTests
                 .AppendStack(Start + 15, dispatcher: 1, new ulong[] { 0xB, 0xC }, new[] { 1, 2 })
                 .Suspend(Start + 20));
 
-            AsyncCallStack cs = Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 18));
+            AsyncProfilerCallStack cs = Assert.Single(computer.GetCallStacks(Key(ThreadA), Start + 18));
             Assert.Equal(3, cs.Frames.FrameCount);
             Assert.Equal(new ulong[] { 0xA, 0xB, 0xC }, new[] { cs.Frames.MethodIdAt(0), cs.Frames.MethodIdAt(1), cs.Frames.MethodIdAt(2) });
             Assert.Equal(new[] { 0, 1, 2 }, new[] { cs.Frames.FrameStateAt(0), cs.Frames.FrameStateAt(1), cs.Frames.FrameStateAt(2) });
@@ -582,7 +584,7 @@ namespace TraceEventTests
                 .ResumeStack(Start + 20, dispatcher: 2, new ulong[] { 0xC }, new[] { 3 })
                 .Suspend(Start + 25));
 
-            AsyncCallStack second = Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 22));
+            AsyncProfilerCallStack second = Assert.Single(computer.GetCallStacks(Key(ThreadA), Start + 22));
             Assert.Equal(1, second.Frames.FrameCount);
             Assert.Equal(0xCUL, second.Frames.MethodIdAt(0));
             Assert.Equal(3, second.Frames.FrameStateAt(0));
@@ -603,8 +605,8 @@ namespace TraceEventTests
 
             Assert.Equal(1, computer.DistinctFramesCount);
 
-            AsyncCallStack first = Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 15));
-            AsyncCallStack second = Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 35));
+            AsyncProfilerCallStack first = Assert.Single(computer.GetCallStacks(Key(ThreadA), Start + 15));
+            AsyncProfilerCallStack second = Assert.Single(computer.GetCallStacks(Key(ThreadA), Start + 35));
             Assert.Equal(first.FramesIndex, second.FramesIndex);
             Assert.Same(first.Frames, second.Frames);
         }
@@ -648,12 +650,12 @@ namespace TraceEventTests
 
             Assert.Equal(2, computer.DistinctFramesCount);
 
-            AsyncCallStack original = Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 15));
+            AsyncProfilerCallStack original = Assert.Single(computer.GetCallStacks(Key(ThreadA), Start + 15));
             Assert.Equal(1, original.Frames.FrameCount);
             Assert.Equal(0xAUL, original.Frames.MethodIdAt(0));
 
-            AsyncCallStack atResume = Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 30));
-            AsyncCallStack afterAppend = Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 35));
+            AsyncProfilerCallStack atResume = Assert.Single(computer.GetCallStacks(Key(ThreadA), Start + 30));
+            AsyncProfilerCallStack afterAppend = Assert.Single(computer.GetCallStacks(Key(ThreadA), Start + 35));
             Assert.Same(atResume, afterAppend);
             Assert.Same(atResume.Frames, afterAppend.Frames);
             Assert.Equal(new ulong[] { 0xA, 0xB }, new[] { atResume.Frames.MethodIdAt(0), atResume.Frames.MethodIdAt(1) });
@@ -675,12 +677,12 @@ namespace TraceEventTests
                 .Suspend(Start + 30)
                 .Build());
 
-            Assert.Equal(0xAAAUL, Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 25)).Frames.MethodIdAt(0));
-            Assert.Equal(0xBBBUL, Assert.Single(computer.GetAsyncCallStacks(Key(ThreadB), Start + 25)).Frames.MethodIdAt(0));
+            Assert.Equal(0xAAAUL, Assert.Single(computer.GetCallStacks(Key(ThreadA), Start + 25)).Frames.MethodIdAt(0));
+            Assert.Equal(0xBBBUL, Assert.Single(computer.GetCallStacks(Key(ThreadB), Start + 25)).Frames.MethodIdAt(0));
 
             // Thread B is idle at t40; thread A is still active.
-            Assert.Empty(computer.GetAsyncCallStacks(Key(ThreadB), Start + 40));
-            Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 40));
+            Assert.Empty(computer.GetCallStacks(Key(ThreadB), Start + 40));
+            Assert.Single(computer.GetCallStacks(Key(ThreadA), Start + 40));
         }
 
         [Fact]
@@ -705,8 +707,8 @@ namespace TraceEventTests
                 .ResumeStack(Start + 10, dispatcher: 2, new ulong[] { 0x2B })
                 .Suspend(Start + 20));
 
-            Assert.Equal(0x2AUL, Assert.Single(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 15)).Frames.MethodIdAt(0));
-            Assert.Equal(0x2BUL, Assert.Single(computer.GetAsyncCallStacks(Key(ProcessB, ThreadA), Start + 15)).Frames.MethodIdAt(0));
+            Assert.Equal(0x2AUL, Assert.Single(computer.GetCallStacks(Key(ProcessA, ThreadA), Start + 15)).Frames.MethodIdAt(0));
+            Assert.Equal(0x2BUL, Assert.Single(computer.GetCallStacks(Key(ProcessB, ThreadA), Start + 15)).Frames.MethodIdAt(0));
         }
 
         [Fact]
@@ -727,7 +729,7 @@ namespace TraceEventTests
                 .Reset(Start)
                 .ResumeStack(Start + 10, dispatcher: 2, new ulong[] { 0xDEAD })
                 .Suspend(Start + 20));
-            Assert.Empty(computer.GetAsyncCallStacks(Key(ProcessB, ThreadA), Start + 15));
+            Assert.Empty(computer.GetCallStacks(Key(ProcessB, ThreadA), Start + 15));
 
             Process(computer, ProcessB, new AsyncProfilerBufferBuilder(ThreadA)
                 .Metadata(Start + 30, qpcFrequency: 5_000_000, qpcSync: (ulong)(Start + 30), utcSync: (ulong)utcB, eventBufferSize: 0, wrapperCount: 32, new AsyncManifestEntry[0])
@@ -760,8 +762,8 @@ namespace TraceEventTests
             Assert.False(computer.Index.MethodCompletionObserved(ProcessB, AsyncCallstackKind.StateMachineAsync));
             Assert.Equal(2, computer.DistinctFramesCount);
 
-            AsyncCallStack processAStack = Assert.Single(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 15));
-            AsyncCallStack processBStack = Assert.Single(computer.GetAsyncCallStacks(Key(ProcessB, ThreadA), Start + 15));
+            AsyncProfilerCallStack processAStack = Assert.Single(computer.GetCallStacks(Key(ProcessA, ThreadA), Start + 15));
+            AsyncProfilerCallStack processBStack = Assert.Single(computer.GetCallStacks(Key(ProcessB, ThreadA), Start + 15));
             Assert.NotEqual(processAStack.FramesIndex, processBStack.FramesIndex);
             Assert.NotSame(processAStack.Frames, processBStack.Frames);
         }
@@ -777,7 +779,7 @@ namespace TraceEventTests
                 .Metadata(Start + 15, qpcFrequency: 10_000_000, qpcSync: 1, utcSync: 1, eventBufferSize: 0, wrapperCount: 32, new AsyncManifestEntry[0])
                 .Reset(Start + 20));
 
-            AsyncCallStack stack = Assert.Single(computer.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 15));
+            AsyncProfilerCallStack stack = Assert.Single(computer.GetCallStacks(Key(ProcessA, ThreadA), Start + 15));
             Assert.Equal((byte)16, stack.WrapperCount);
         }
 
@@ -795,10 +797,10 @@ namespace TraceEventTests
                 .ResumeStack(Start + 10, dispatcher: 2, new ulong[] { 0xA })
                 .Suspend(Start + 20));
 
-            AsyncCallStacksIndex reloaded = RoundTrip(computer.Index);
+            AsyncProfilerCallStacksIndex reloaded = RoundTrip(computer.Index);
 
-            Assert.Single(reloaded.GetAsyncCallStacks(Key(ProcessA, ThreadA), Start + 15));
-            Assert.Single(reloaded.GetAsyncCallStacks(Key(ProcessB, ThreadA), Start + 15));
+            Assert.Single(reloaded.GetCallStacks(Key(ProcessA, ThreadA), Start + 15));
+            Assert.Single(reloaded.GetCallStacks(Key(ProcessB, ThreadA), Start + 15));
             Assert.True(reloaded.MethodCompletionObserved(ProcessA, AsyncCallstackKind.StateMachineAsync));
             Assert.False(reloaded.MethodCompletionObserved(ProcessB, AsyncCallstackKind.StateMachineAsync));
             Assert.Equal(2, reloaded.DistinctFramesCount);
@@ -814,10 +816,10 @@ namespace TraceEventTests
                 .Suspend(Start + 20));  // nothing to pop
 
             // Inside the pre-reset window the activation is queryable (committed at the reset timestamp).
-            Assert.Equal(0xAUL, Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 12)).Frames.MethodIdAt(0));
+            Assert.Equal(0xAUL, Assert.Single(computer.GetCallStacks(Key(ThreadA), Start + 12)).Frames.MethodIdAt(0));
             // The interval is half-open [Start+10, Start+15): at/after the reset it is no longer active.
-            Assert.Empty(computer.GetAsyncCallStacks(Key(ThreadA), Start + 15));
-            Assert.Empty(computer.GetAsyncCallStacks(Key(ThreadA), Start + 18));
+            Assert.Empty(computer.GetCallStacks(Key(ThreadA), Start + 15));
+            Assert.Empty(computer.GetCallStacks(Key(ThreadA), Start + 18));
         }
 
         [Fact]
@@ -834,11 +836,11 @@ namespace TraceEventTests
                 .ResumeStack(Start + 45, dispatcher: 3, new ulong[] { 0xC })
                 .Suspend(Start + 50));  // commits [45,50)
 
-            Assert.Equal(0xAUL, Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 12)).Frames.MethodIdAt(0));
-            Assert.Equal(0xBUL, Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 30)).Frames.MethodIdAt(0));
-            Assert.Equal(0xCUL, Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 48)).Frames.MethodIdAt(0));
+            Assert.Equal(0xAUL, Assert.Single(computer.GetCallStacks(Key(ThreadA), Start + 12)).Frames.MethodIdAt(0));
+            Assert.Equal(0xBUL, Assert.Single(computer.GetCallStacks(Key(ThreadA), Start + 30)).Frames.MethodIdAt(0));
+            Assert.Equal(0xCUL, Assert.Single(computer.GetCallStacks(Key(ThreadA), Start + 48)).Frames.MethodIdAt(0));
             // Between a reset and the next resume nothing is active.
-            Assert.Empty(computer.GetAsyncCallStacks(Key(ThreadA), Start + 22));
+            Assert.Empty(computer.GetCallStacks(Key(ThreadA), Start + 22));
         }
 
         [Fact]
@@ -851,7 +853,7 @@ namespace TraceEventTests
                 .UnwindException(Start + 18, frames: 2) // +2
                 .Suspend(Start + 30));
 
-            AsyncCallStack cs = Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 20));
+            AsyncProfilerCallStack cs = Assert.Single(computer.GetCallStacks(Key(ThreadA), Start + 20));
             Assert.Equal(0, cs.GetCompletedFrameCount(Start + 12));
             Assert.Equal(1, cs.GetCompletedFrameCount(Start + 16));
             Assert.Equal(3, cs.GetCompletedFrameCount(Start + 20));
@@ -868,7 +870,7 @@ namespace TraceEventTests
                 .WrapperReset(Start + 18)
                 .Suspend(Start + 30));
 
-            AsyncCallStack cs = Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 20));
+            AsyncProfilerCallStack cs = Assert.Single(computer.GetCallStacks(Key(ThreadA), Start + 20));
             Assert.Equal((byte)5, cs.ContinuationIndexBase);
             Assert.Equal((byte)32, cs.WrapperCount);
 
@@ -888,7 +890,7 @@ namespace TraceEventTests
                 .Armed(Start)
                 .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA }, continuationIndex: 0)
                 .Suspend(Start + 30));
-            AsyncCallStack ce = Assert.Single(early.GetAsyncCallStacks(Key(ThreadA), Start + 20));
+            AsyncProfilerCallStack ce = Assert.Single(early.GetCallStacks(Key(ThreadA), Start + 20));
             Assert.Equal((byte)0, ce.ContinuationIndexBase);
             Assert.Equal(8, ce.GetCompletedFrameCount(Start + 20, currentMethodIndex: 8));
 
@@ -898,7 +900,7 @@ namespace TraceEventTests
                 .Armed(Start)
                 .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA }, continuationIndex: 5)
                 .Suspend(Start + 30));
-            AsyncCallStack cl = Assert.Single(late.GetAsyncCallStacks(Key(ThreadB), Start + 20));
+            AsyncProfilerCallStack cl = Assert.Single(late.GetCallStacks(Key(ThreadB), Start + 20));
             Assert.Equal((byte)5, cl.ContinuationIndexBase);
             Assert.Equal(3, cl.GetCompletedFrameCount(Start + 20, currentMethodIndex: 8)); // 8 - 5
             Assert.Equal(0, cl.GetCompletedFrameCount(Start + 20, currentMethodIndex: 5)); // 5 - 5
@@ -964,7 +966,7 @@ namespace TraceEventTests
                 0, AsyncCallstackKind.RuntimeAsync, Start + 70));
             Assert.True(computer.Index.MethodCompletionObserved(AsyncCallstackKind.RuntimeAsync));
 
-            AsyncCallStacksIndex reloaded = RoundTrip(computer.Index);
+            AsyncProfilerCallStacksIndex reloaded = RoundTrip(computer.Index);
             Assert.False(reloaded.MethodCompletionObserved(
                 0, AsyncCallstackKind.RuntimeAsync, Start + 10));
             Assert.True(reloaded.MethodCompletionObserved(
@@ -980,9 +982,9 @@ namespace TraceEventTests
                 .Armed(Start)
                 .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA, 0xB })
                 .Suspend(Start + 20));
-            AsyncCallStacksIndex reloaded = RoundTrip(computer.Index);
-            AsyncThreadKey thread = Key(ThreadA);
-            var results = new AsyncCallStack[32];
+            AsyncProfilerCallStacksIndex reloaded = RoundTrip(computer.Index);
+            AsyncProfilerThreadKey thread = Key(ThreadA);
+            var results = new AsyncProfilerCallStack[32];
             var tasks = new Task[results.Length];
 
             for (int i = 0; i < tasks.Length; i++)
@@ -993,9 +995,9 @@ namespace TraceEventTests
                     for (int iteration = 0; iteration < 100; iteration++)
                     {
                         results[resultIndex] = Assert.Single(
-                            reloaded.GetAsyncCallStacks(thread, Start + 15));
+                            reloaded.GetCallStacks(thread, Start + 15));
                         Assert.Same(results[resultIndex], Assert.Single(
-                            reloaded.GetAsyncCallStacks(thread)));
+                            reloaded.GetCallStacks(thread)));
                     }
                 });
             }
@@ -1056,7 +1058,7 @@ namespace TraceEventTests
                 .AppendStack(Start + 15, dispatcher: 2, new ulong[] { 0xB })
                 .Suspend(Start + 20));
 
-            AsyncCallStack stack = Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 18));
+            AsyncProfilerCallStack stack = Assert.Single(computer.GetCallStacks(Key(ThreadA), Start + 18));
             Assert.Equal(1, stack.Frames.FrameCount);
             Assert.Equal(0xAUL, stack.Frames.MethodIdAt(0));
         }
@@ -1100,7 +1102,7 @@ namespace TraceEventTests
         {
             var computer = new AsyncProfilerComputer();
             computer.Process(new AsyncProfilerBufferBuilder(ThreadA).Reset(Start).Build());
-            Assert.Empty(computer.GetAsyncCallStacks(Key(ThreadA), Start + 5));
+            Assert.Empty(computer.GetCallStacks(Key(ThreadA), Start + 5));
         }
 
         [Fact]
@@ -1115,7 +1117,7 @@ namespace TraceEventTests
                 .Suspend(Start + 20)   // pops D2 -> [10,20)
                 .Suspend(Start + 30)); // pops D1 -> [10,30)
 
-            IReadOnlyList<AsyncCallStack> nested = computer.GetAsyncCallStacks(Key(ThreadA), Start + 15);
+            IReadOnlyList<AsyncProfilerCallStack> nested = computer.GetCallStacks(Key(ThreadA), Start + 15);
             Assert.Equal(2, nested.Count);
             Assert.Equal(0, nested[0].Depth);
             Assert.Equal(0xAUL, nested[0].Frames.MethodIdAt(0)); // outer, emitted first
@@ -1135,7 +1137,7 @@ namespace TraceEventTests
                 .CompleteMethod(Start + 15) // same timestamp
                 .Suspend(Start + 30));
 
-            AsyncCallStack cs = Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 20));
+            AsyncProfilerCallStack cs = Assert.Single(computer.GetCallStacks(Key(ThreadA), Start + 20));
             Assert.Equal(0, cs.GetCompletedFrameCount(Start + 14));
             Assert.Equal(2, cs.GetCompletedFrameCount(Start + 15));
             Assert.Equal(2, cs.GetCompletedFrameCount(Start + 16));
@@ -1154,9 +1156,9 @@ namespace TraceEventTests
                 .Suspend(Start + 10)   // pops D2 -> zero-width [10,10)
                 .Suspend(Start + 20)); // pops D1 -> [10,20)
 
-            AsyncCallStack atTen = Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 10));
+            AsyncProfilerCallStack atTen = Assert.Single(computer.GetCallStacks(Key(ThreadA), Start + 10));
             Assert.Equal(0xAUL, atTen.Frames.MethodIdAt(0)); // only the outer D1
-            Assert.Equal(0xAUL, Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 15)).Frames.MethodIdAt(0));
+            Assert.Equal(0xAUL, Assert.Single(computer.GetCallStacks(Key(ThreadA), Start + 15)).Frames.MethodIdAt(0));
 
             // Both activations were recorded/interned even though the inner one is zero-width.
             Assert.Equal(2, computer.DistinctFramesCount);
@@ -1177,7 +1179,7 @@ namespace TraceEventTests
                 .Suspend(Start + 10)   // pop D3 (zero-width, depth 1)
                 .Suspend(Start + 20)); // pop D1 -> [10,20)
 
-            AsyncCallStack only = Assert.Single(computer.GetAsyncCallStacks(Key(ThreadA), Start + 10));
+            AsyncProfilerCallStack only = Assert.Single(computer.GetCallStacks(Key(ThreadA), Start + 10));
             Assert.Equal(0, only.Depth);
             Assert.Equal(0xAUL, only.Frames.MethodIdAt(0));
             Assert.Equal(3, computer.DistinctFramesCount); // A, B, C all recorded
@@ -1199,26 +1201,26 @@ namespace TraceEventTests
                 .ResumeStack(Start + 40, dispatcher: 3, new ulong[] { 0xA, 0xB }, new[] { 1, 2 }) // dedups with D1
                 .Suspend(Start + 50));
 
-            AsyncCallStacksIndex original = computer.Index;
+            AsyncProfilerCallStacksIndex original = computer.Index;
 
             // Assign each frame a fake CodeAddressIndex (== methodId) so the per-frame CodeAddressIndex is
             // exercised through serialization.
             for (int fi = 0; fi < original.DistinctFramesCount; fi++)
             {
-                AsyncCallStackFrames f = original.GetFrames((AsyncCallStackFramesIndex)fi);
+                AsyncProfilerCallStackFrames f = original.GetFrames((AsyncProfilerCallStackFramesIndex)fi);
                 for (int s = 0; s < f.FrameCount; s++)
                 {
                     f.SetCodeAddressAt(s, (CodeAddressIndex)(int)f.MethodIdAt(s));
                 }
             }
 
-            AsyncCallStacksIndex reloaded = RoundTrip(original);
+            AsyncProfilerCallStacksIndex reloaded = RoundTrip(original);
 
             Assert.Equal(original.DistinctFramesCount, reloaded.DistinctFramesCount);
             Assert.Equal(2, reloaded.DistinctFramesCount); // {A,B} shared by D1 & D3, and {C}
 
             // The resolved code addresses round-trip (and are the ones the fake resolver assigned).
-            AsyncCallStack d1 = reloaded.GetAsyncCallStacks(Key(ThreadA), Start + 12)[0];
+            AsyncProfilerCallStack d1 = reloaded.GetCallStacks(Key(ThreadA), Start + 12)[0];
             Assert.Equal((CodeAddressIndex)0xA, d1.Frames.CodeAddressAt(0));
             Assert.Equal((CodeAddressIndex)0xB, d1.Frames.CodeAddressAt(1));
 
@@ -1228,10 +1230,10 @@ namespace TraceEventTests
             }
         }
 
-        private static void AssertSameStacks(AsyncCallStacksIndex expected, AsyncCallStacksIndex actual, AsyncThreadKey thread, long qpc)
+        private static void AssertSameStacks(AsyncProfilerCallStacksIndex expected, AsyncProfilerCallStacksIndex actual, AsyncProfilerThreadKey thread, long qpc)
         {
-            IReadOnlyList<AsyncCallStack> e = expected.GetAsyncCallStacks(thread, qpc);
-            IReadOnlyList<AsyncCallStack> a = actual.GetAsyncCallStacks(thread, qpc);
+            IReadOnlyList<AsyncProfilerCallStack> e = expected.GetCallStacks(thread, qpc);
+            IReadOnlyList<AsyncProfilerCallStack> a = actual.GetCallStacks(thread, qpc);
             Assert.Equal(e.Count, a.Count);
             for (int i = 0; i < e.Count; i++)
             {
@@ -1244,7 +1246,7 @@ namespace TraceEventTests
                 Assert.Equal(e[i].GetCompletedFrameCount(qpc), a[i].GetCompletedFrameCount(qpc));
                 Assert.Equal(e[i].GetWrapperResetCount(qpc), a[i].GetWrapperResetCount(qpc));
 
-                AsyncCallStackFrames ef = e[i].Frames, af = a[i].Frames;
+                AsyncProfilerCallStackFrames ef = e[i].Frames, af = a[i].Frames;
                 Assert.Equal(ef.Kind, af.Kind);
                 Assert.Equal(ef.FrameCount, af.FrameCount);
                 for (int f = 0; f < ef.FrameCount; f++)
@@ -1256,7 +1258,7 @@ namespace TraceEventTests
             }
         }
 
-        private static AsyncCallStacksIndex RoundTrip(AsyncCallStacksIndex index)
+        private static AsyncProfilerCallStacksIndex RoundTrip(AsyncProfilerCallStacksIndex index)
         {
             SerializationSettings settings = SerializationSettings.Default.WithStreamLabelWidth(StreamLabelWidth.EightBytes);
             var stream = new MemoryStream();
@@ -1265,9 +1267,9 @@ namespace TraceEventTests
             }
 
             stream.Position = 0;
-            var deserializer = new Deserializer(new PinnedStreamReader(stream, settings), "AsyncCallStacksIndexRoundTrip");
-            deserializer.RegisterType(typeof(AsyncCallStacksIndex));
-            return (AsyncCallStacksIndex)deserializer.ReadObject();
+            var deserializer = new Deserializer(new PinnedStreamReader(stream, settings), "AsyncProfilerCallStacksIndexRoundTrip");
+            deserializer.RegisterType(typeof(AsyncProfilerCallStacksIndex));
+            return (AsyncProfilerCallStacksIndex)deserializer.ReadObject();
         }
     }
 }

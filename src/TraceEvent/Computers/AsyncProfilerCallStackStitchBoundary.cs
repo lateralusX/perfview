@@ -11,11 +11,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 {
     /// <summary>
     /// The kind of async dispatch boundary a synchronous (CPU-sample) frame represents. When stitching an
-    /// async call stack (from <see cref="AsyncCallStacksIndex"/>) into a native sync stack, the stitcher walks
+    /// async call stack (from <see cref="AsyncProfilerCallStacksIndex"/>) into a native sync stack, the stitcher walks
     /// the sync stack top-down (leaf to root) and consumes one async segment each time it crosses one of these
     /// boundaries. See the design note (callstack-stitching) for the full algorithm.
     /// </summary>
-    public enum AsyncStitchBoundaryKind
+    internal enum AsyncProfilerCallStackStitchBoundaryKind
     {
         /// <summary>Not an async dispatch boundary; an ordinary frame.</summary>
         None = 0,
@@ -51,32 +51,32 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     }
 
     /// <summary>
-    /// The boundary classification of a single method: its <see cref="AsyncStitchBoundaryKind"/> plus, for a
-    /// <see cref="AsyncStitchBoundaryKind.V2ContinuationWrapper"/>, the wrapper index it encodes.
+    /// The boundary classification of a single method: its <see cref="AsyncProfilerCallStackStitchBoundaryKind"/> plus, for a
+    /// <see cref="AsyncProfilerCallStackStitchBoundaryKind.V2ContinuationWrapper"/>, the wrapper index it encodes.
     /// </summary>
-    public readonly struct AsyncStitchBoundaryInfo
+    internal readonly struct AsyncProfilerCallStackStitchBoundaryInfo
     {
         /// <summary>The classification of the method.</summary>
-        public readonly AsyncStitchBoundaryKind Kind;
+        public readonly AsyncProfilerCallStackStitchBoundaryKind Kind;
 
-        /// <summary>For <see cref="AsyncStitchBoundaryKind.V2ContinuationWrapper"/>, the wrapper index
-        /// (0..<see cref="AsyncStitchBoundary.WrapperPoolCount"/>-1); otherwise -1.</summary>
+        /// <summary>For <see cref="AsyncProfilerCallStackStitchBoundaryKind.V2ContinuationWrapper"/>, the wrapper index
+        /// (0..<see cref="AsyncProfilerCallStackStitchBoundary.WrapperPoolCount"/>-1); otherwise -1.</summary>
         public readonly int WrapperIndex;
 
-        public AsyncStitchBoundaryInfo(AsyncStitchBoundaryKind kind, int wrapperIndex)
+        public AsyncProfilerCallStackStitchBoundaryInfo(AsyncProfilerCallStackStitchBoundaryKind kind, int wrapperIndex)
         {
             Kind = kind;
             WrapperIndex = wrapperIndex;
         }
 
         /// <summary>The "ordinary frame" classification (not a boundary).</summary>
-        public static readonly AsyncStitchBoundaryInfo None = new AsyncStitchBoundaryInfo(AsyncStitchBoundaryKind.None, -1);
+        public static readonly AsyncProfilerCallStackStitchBoundaryInfo None = new AsyncProfilerCallStackStitchBoundaryInfo(AsyncProfilerCallStackStitchBoundaryKind.None, -1);
 
         /// <summary>True if this method is an async dispatch boundary.</summary>
         public bool IsBoundary =>
-            Kind == AsyncStitchBoundaryKind.V2ContinuationWrapper ||
-            Kind == AsyncStitchBoundaryKind.V2DispatchContinuation ||
-            Kind == AsyncStitchBoundaryKind.V1Dispatcher;
+            Kind == AsyncProfilerCallStackStitchBoundaryKind.V2ContinuationWrapper ||
+            Kind == AsyncProfilerCallStackStitchBoundaryKind.V2DispatchContinuation ||
+            Kind == AsyncProfilerCallStackStitchBoundaryKind.V1Dispatcher;
     }
 
     /// <summary>
@@ -86,13 +86,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// appears as its own frame with a stable name) and documents that external tools depend on the name.
     /// A reflection guard test in dotnet/runtime asserts these names and the NoInlining attribute hold.
     /// <para>
-    /// This type does the (string-based) recognition; a per-trace <see cref="AsyncStitchBoundaryCache"/>
+    /// This type does the (string-based) recognition; a per-trace <see cref="AsyncProfilerCallStackStitchBoundaryCache"/>
     /// resolves the names to <c>MethodIndex</c> values once so the per-frame stitch hot path avoids string
     /// compares entirely.
     /// </para>
     /// <para>
     /// Compiler-generated state-machine names are decoded here independently of captured runtime versions.
-    /// CoreLib implementation-specific recognition belongs to <see cref="AsyncRuntimeRuleProfile"/>;
+    /// CoreLib implementation-specific recognition belongs to <see cref="AsyncProfilerRuntimeRuleProfile"/>;
     /// the public classification APIs also expose its common rules for metadata-free callers.
     /// </para>
     /// <para>
@@ -116,7 +116,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// capture them, which is what this recognizer keys on.
     /// </para>
     /// </summary>
-    public static class AsyncStitchBoundary
+    internal static class AsyncProfilerCallStackStitchBoundary
     {
         /// <summary>The V2 continuation-wrapper method-name prefix; the numeric suffix is the wrapper index.
         /// Mirrors the runtime contract const <c>ContinuationWrapper.NameTemplate = "Continuation_Wrapper_{0}"</c>.</summary>
@@ -159,7 +159,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// A method name, optionally including parameters. CoreLib infrastructure requires the
         /// <c>System.Private.CoreLib!</c> module prefix; generated V1 <c>MoveNext</c> methods do not.
         /// </param>
-        public static StitchSyncFrameKind ClassifySynchronousFrame(string frameName) =>
+        public static AsyncProfilerStitchSyncFrameKind ClassifySynchronousFrame(string frameName) =>
             ClassifySynchronousFrame(frameName, IsHostModuleQualifiedFrame(frameName));
 
         /// <summary>
@@ -172,8 +172,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// True when the method belongs to <see cref="HostModuleName"/>. Required for known runtime infrastructure,
         /// but not for generated application state-machine methods.
         /// </param>
-        public static StitchSyncFrameKind ClassifySynchronousFrame(string frameName, bool isHostModule) =>
-            AsyncRuntimeRuleProfile.Common.ClassifySynchronousFrame(frameName, isHostModule);
+        public static AsyncProfilerStitchSyncFrameKind ClassifySynchronousFrame(string frameName, bool isHostModule) =>
+            AsyncProfilerRuntimeRuleProfile.Common.ClassifySynchronousFrame(frameName, isHostModule);
 
         /// <summary>Recognizes a compiler-generated state machine using its frame and bare method names.</summary>
         internal static bool IsStateMachineMoveNext(string frameName, string method)
@@ -196,40 +196,40 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// uses the common runtime rules; production caches select these rules from captured runtime metadata.
         /// </summary>
         /// <param name="frameName">The frame/method name to classify. Null/empty yields
-        /// <see cref="AsyncStitchBoundaryKind.None"/>.</param>
-        /// <param name="wrapperIndex">On a <see cref="AsyncStitchBoundaryKind.V2ContinuationWrapper"/> result,
+        /// <see cref="AsyncProfilerCallStackStitchBoundaryKind.None"/>.</param>
+        /// <param name="wrapperIndex">On a <see cref="AsyncProfilerCallStackStitchBoundaryKind.V2ContinuationWrapper"/> result,
         /// the wrapper index (0..<see cref="WrapperPoolCount"/>-1); otherwise -1.</param>
-        /// <returns>The boundary kind, or <see cref="AsyncStitchBoundaryKind.None"/>.</returns>
-        public static AsyncStitchBoundaryKind Classify(string frameName, out int wrapperIndex)
+        /// <returns>The boundary kind, or <see cref="AsyncProfilerCallStackStitchBoundaryKind.None"/>.</returns>
+        public static AsyncProfilerCallStackStitchBoundaryKind Classify(string frameName, out int wrapperIndex)
         {
-            AsyncStitchBoundaryInfo info = AsyncRuntimeRuleProfile.Common.ClassifyBoundary(frameName);
+            AsyncProfilerCallStackStitchBoundaryInfo info = AsyncProfilerRuntimeRuleProfile.Common.ClassifyBoundary(frameName);
             wrapperIndex = info.WrapperIndex;
             return info.Kind;
         }
 
         // Only these names are profiler contracts. Box/helper recognition belongs to a runtime rule profile.
-        internal static AsyncStitchBoundaryKind ClassifyContractBoundary(string frameName, out int wrapperIndex)
+        internal static AsyncProfilerCallStackStitchBoundaryKind ClassifyContractBoundary(string frameName, out int wrapperIndex)
         {
             wrapperIndex = -1;
             string method = GetBareMethodName(frameName);
             if (method is null || method.Length == 0)
             {
-                return AsyncStitchBoundaryKind.None;
+                return AsyncProfilerCallStackStitchBoundaryKind.None;
             }
 
             if (TryGetWrapperIndex(method, out wrapperIndex))
             {
-                return AsyncStitchBoundaryKind.V2ContinuationWrapper;
+                return AsyncProfilerCallStackStitchBoundaryKind.V2ContinuationWrapper;
             }
 
             if (method == DispatchContinuationsName || method == InstrumentedDispatchContinuationsName)
             {
-                return AsyncStitchBoundaryKind.V2DispatchContinuation;
+                return AsyncProfilerCallStackStitchBoundaryKind.V2DispatchContinuation;
             }
 
             if (method == MoveNextAsDispatcherName)
             {
-                return AsyncStitchBoundaryKind.V1Dispatcher;
+                return AsyncProfilerCallStackStitchBoundaryKind.V1Dispatcher;
             }
 
             // The non-merged (standalone) V1 dispatcher is AsyncStateMachineDispatcher.MoveNext. Its bare method
@@ -238,10 +238,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             if (method == AsyncStateMachineDispatcherMethodName &&
                 GetDeclaringTypeName(frameName) == AsyncStateMachineDispatcherTypeName)
             {
-                return AsyncStitchBoundaryKind.V1Dispatcher;
+                return AsyncProfilerCallStackStitchBoundaryKind.V1Dispatcher;
             }
 
-            return AsyncStitchBoundaryKind.None;
+            return AsyncProfilerCallStackStitchBoundaryKind.None;
         }
 
         internal static bool IsHostModuleQualifiedFrame(string frameName)
@@ -475,8 +475,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
     /// <summary>
     /// A per-trace cache that maps a method (by <c>MethodIndex</c>, i.e. TraceEvent's per-method "IP range"
-    /// bucket) to its <see cref="AsyncStitchBoundaryInfo"/>. The runtime async boundary methods are found once,
-    /// by name, over the symbolized methods table (<see cref="AsyncStitchBoundary"/> is applied a single time
+    /// bucket) to its <see cref="AsyncProfilerCallStackStitchBoundaryInfo"/>. The runtime async boundary methods are found once,
+    /// by name, over the symbolized methods table (<see cref="AsyncProfilerCallStackStitchBoundary"/> is applied a single time
     /// per candidate method); the per-frame stitch hot path is then an O(1) <c>MethodIndex</c> dictionary
     /// lookup with no string work.
     /// <para>
@@ -489,26 +489,26 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// pass). The scan is lazy: it runs on the first classify call.
     /// </para>
     /// </summary>
-    public sealed class AsyncStitchBoundaryCache
+    internal sealed class AsyncProfilerCallStackStitchBoundaryCache
     {
         /// <summary>Creates a cache over the methods of <paramref name="codeAddresses"/> (typically
         /// <c>traceLog.CodeAddresses</c>).</summary>
-        public AsyncStitchBoundaryCache(TraceCodeAddresses codeAddresses)
-            : this(codeAddresses, new AsyncRuntimeRuleProfileCache(
+        public AsyncProfilerCallStackStitchBoundaryCache(TraceCodeAddresses codeAddresses)
+            : this(codeAddresses, new AsyncProfilerRuntimeRuleProfileCache(
                 (codeAddresses ?? throw new ArgumentNullException(nameof(codeAddresses))).ModuleFiles))
         {
         }
 
-        internal AsyncStitchBoundaryCache(TraceCodeAddresses codeAddresses, AsyncRuntimeRuleProfileCache runtimeProfiles)
+        internal AsyncProfilerCallStackStitchBoundaryCache(TraceCodeAddresses codeAddresses, AsyncProfilerRuntimeRuleProfileCache runtimeProfiles)
         {
             _codeAddresses = codeAddresses ?? throw new ArgumentNullException(nameof(codeAddresses));
             _runtimeProfiles = runtimeProfiles ?? throw new ArgumentNullException(nameof(runtimeProfiles));
         }
 
-        internal AsyncRuntimeRuleProfileCache RuntimeProfiles => _runtimeProfiles;
+        internal AsyncProfilerRuntimeRuleProfileCache RuntimeProfiles => _runtimeProfiles;
         internal TraceLog TraceLog => _codeAddresses.ModuleFiles.Log;
-        internal AsyncRuntimeRuleProfile GetRuntimeProfile(CodeAddressIndex codeAddress) =>
-            codeAddress == CodeAddressIndex.Invalid ? AsyncRuntimeRuleProfile.Common :
+        internal AsyncProfilerRuntimeRuleProfile GetRuntimeProfile(CodeAddressIndex codeAddress) =>
+            codeAddress == CodeAddressIndex.Invalid ? AsyncProfilerRuntimeRuleProfile.Common :
                 _runtimeProfiles.GetProfile(_codeAddresses.ModuleFileIndex(codeAddress));
 
         /// <summary>The number of distinct methods classified as async boundaries or dispatcher infrastructure
@@ -523,28 +523,28 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         /// <summary>Classifies the method containing <paramref name="codeAddressIndex"/>. Returns
-        /// <see cref="AsyncStitchBoundaryInfo.None"/> for an invalid or unresolved code address.</summary>
-        public AsyncStitchBoundaryInfo Classify(CodeAddressIndex codeAddressIndex)
+        /// <see cref="AsyncProfilerCallStackStitchBoundaryInfo.None"/> for an invalid or unresolved code address.</summary>
+        public AsyncProfilerCallStackStitchBoundaryInfo Classify(CodeAddressIndex codeAddressIndex)
         {
             if (codeAddressIndex == CodeAddressIndex.Invalid)
             {
-                return AsyncStitchBoundaryInfo.None;
+                return AsyncProfilerCallStackStitchBoundaryInfo.None;
             }
 
             return Classify(_codeAddresses.MethodIndex(codeAddressIndex));
         }
 
         /// <summary>Classifies method <paramref name="methodIndex"/>. Returns
-        /// <see cref="AsyncStitchBoundaryInfo.None"/> for an invalid method.</summary>
-        public AsyncStitchBoundaryInfo Classify(MethodIndex methodIndex)
+        /// <see cref="AsyncProfilerCallStackStitchBoundaryInfo.None"/> for an invalid method.</summary>
+        public AsyncProfilerCallStackStitchBoundaryInfo Classify(MethodIndex methodIndex)
         {
             if (methodIndex == MethodIndex.Invalid)
             {
-                return AsyncStitchBoundaryInfo.None;
+                return AsyncProfilerCallStackStitchBoundaryInfo.None;
             }
 
             EnsureBuilt();
-            return _boundaries.TryGetValue(methodIndex, out AsyncStitchBoundaryInfo info) ? info : AsyncStitchBoundaryInfo.None;
+            return _boundaries.TryGetValue(methodIndex, out AsyncProfilerCallStackStitchBoundaryInfo info) ? info : AsyncProfilerCallStackStitchBoundaryInfo.None;
         }
 
         #region private
@@ -562,7 +562,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 return;
             }
 
-            Dictionary<ModuleFileIndex, AsyncRuntimeRuleProfile> hostModules = GetHostModules();
+            Dictionary<ModuleFileIndex, AsyncProfilerRuntimeRuleProfile> hostModules = GetHostModules();
             if (hostModules.Count != 0)
             {
                 TraceMethods methods = _codeAddresses.Methods;
@@ -571,14 +571,14 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 {
                     var methodIndex = (MethodIndex)i;
                     ModuleFileIndex moduleIndex = methods.MethodModuleFileIndex(methodIndex);
-                    if (!hostModules.TryGetValue(moduleIndex, out AsyncRuntimeRuleProfile profile))
+                    if (!hostModules.TryGetValue(moduleIndex, out AsyncProfilerRuntimeRuleProfile profile))
                     {
                         continue; // not System.Private.CoreLib; skip before any string work
                     }
 
-                    string name = AsyncStitchBoundary.NormalizeMethodName(methods.FullMethodName(methodIndex));
-                    AsyncStitchBoundaryInfo info = profile.ClassifyBoundary(name);
-                    if (info.Kind != AsyncStitchBoundaryKind.None)
+                    string name = AsyncProfilerCallStackStitchBoundary.NormalizeMethodName(methods.FullMethodName(methodIndex));
+                    AsyncProfilerCallStackStitchBoundaryInfo info = profile.ClassifyBoundary(name);
+                    if (info.Kind != AsyncProfilerCallStackStitchBoundaryKind.None)
                     {
                         _boundaries[methodIndex] = info;
                     }
@@ -590,13 +590,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         /// <summary>Profiles for captured <c>System.Private.CoreLib</c> modules
         /// (there may be more than one, e.g. the IL image plus an R2R native image).</summary>
-        private Dictionary<ModuleFileIndex, AsyncRuntimeRuleProfile> GetHostModules()
+        private Dictionary<ModuleFileIndex, AsyncProfilerRuntimeRuleProfile> GetHostModules()
         {
-            var result = new Dictionary<ModuleFileIndex, AsyncRuntimeRuleProfile>();
+            var result = new Dictionary<ModuleFileIndex, AsyncProfilerRuntimeRuleProfile>();
             TraceModuleFiles moduleFiles = _codeAddresses.ModuleFiles;
             foreach (TraceModuleFile moduleFile in moduleFiles)
             {
-                if (AsyncRuntimeRuleProfileCache.IsHostModule(moduleFile))
+                if (AsyncProfilerRuntimeRuleProfileCache.IsHostModule(moduleFile))
                 {
                     result.Add(moduleFile.ModuleFileIndex, _runtimeProfiles.GetProfile(moduleFile.ModuleFileIndex));
                 }
@@ -606,10 +606,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         private readonly TraceCodeAddresses _codeAddresses;
-        private readonly AsyncRuntimeRuleProfileCache _runtimeProfiles;
+        private readonly AsyncProfilerRuntimeRuleProfileCache _runtimeProfiles;
         // Only recognized boundary/infrastructure methods are stored; any absent MethodIndex is None.
-        private readonly Dictionary<MethodIndex, AsyncStitchBoundaryInfo> _boundaries =
-            new Dictionary<MethodIndex, AsyncStitchBoundaryInfo>();
+        private readonly Dictionary<MethodIndex, AsyncProfilerCallStackStitchBoundaryInfo> _boundaries =
+            new Dictionary<MethodIndex, AsyncProfilerCallStackStitchBoundaryInfo>();
         private bool _built;
 
         #endregion

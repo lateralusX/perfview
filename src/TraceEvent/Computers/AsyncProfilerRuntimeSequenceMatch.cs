@@ -6,19 +6,19 @@ using System;
 namespace Microsoft.Diagnostics.Tracing.Computers
 {
     /// <summary>Implementation-dependent layouts recognized by captured-runtime profiles.</summary>
-    internal enum AsyncRuntimeSequenceKind
+    internal enum AsyncProfilerRuntimeSequenceKind
     {
         TaskCompletionPair,
         TaskCompletionChain,
         V2CompletionHandoff,
         V1Startup,
         V1AwaitRegistration,
-        AsyncProfilerEntry,
+        ProfilerEntry,
         RuntimeResumptionBridge,
     }
 
     /// <summary>Replaceable presentation stages; flags and execution order remain pipeline policy.</summary>
-    internal enum AsyncRuntimeTransformKind
+    internal enum AsyncProfilerRuntimeTransformKind
     {
         SampledV2Wrapper,
         ReentrantHandoff,
@@ -30,11 +30,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// A match consumes Length frames; a rejection protects Length frames from later individual cleanup.
     /// The default value means no candidate and leaves existing per-frame cleanup policy unchanged.
     /// </summary>
-    internal readonly struct AsyncRuntimeSequenceMatch
+    internal readonly struct AsyncProfilerRuntimeSequenceMatch
     {
-        public static AsyncRuntimeSequenceMatch Match(int length) => new AsyncRuntimeSequenceMatch(length, true);
+        public static AsyncProfilerRuntimeSequenceMatch Match(int length) => new AsyncProfilerRuntimeSequenceMatch(length, true);
 
-        public static AsyncRuntimeSequenceMatch Reject(int length) => new AsyncRuntimeSequenceMatch(length, false);
+        public static AsyncProfilerRuntimeSequenceMatch Reject(int length) => new AsyncProfilerRuntimeSequenceMatch(length, false);
 
         public int Length { get; }
         public bool IsMatch { get; }
@@ -42,7 +42,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         #region private
 
-        private AsyncRuntimeSequenceMatch(int length, bool isMatch)
+        private AsyncProfilerRuntimeSequenceMatch(int length, bool isMatch)
         {
             if (length <= 0)
             {

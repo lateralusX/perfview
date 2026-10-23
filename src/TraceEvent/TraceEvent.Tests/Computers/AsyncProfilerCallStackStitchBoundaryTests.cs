@@ -8,14 +8,14 @@ using Xunit;
 namespace TraceEventTests
 {
     /// <summary>
-    /// Unit tests for the pure (dependency-free) boundary recognizer <see cref="AsyncStitchBoundary"/>: name
-    /// parsing (<see cref="AsyncStitchBoundary.GetBareMethodName"/>), continuation-wrapper index extraction
-    /// (<see cref="AsyncStitchBoundary.TryGetWrapperIndex"/>) and full classification
-    /// (<see cref="AsyncStitchBoundary.Classify"/>). These are the string-based contract with the runtime async
-    /// profiler; the per-trace <c>AsyncStitchBoundaryCache</c> (which needs a real symbol table) is exercised
+    /// Unit tests for the pure (dependency-free) boundary recognizer <see cref="AsyncProfilerCallStackStitchBoundary"/>: name
+    /// parsing (<see cref="AsyncProfilerCallStackStitchBoundary.GetBareMethodName"/>), continuation-wrapper index extraction
+    /// (<see cref="AsyncProfilerCallStackStitchBoundary.TryGetWrapperIndex"/>) and full classification
+    /// (<see cref="AsyncProfilerCallStackStitchBoundary.Classify"/>). These are the string-based contract with the runtime async
+    /// profiler; the per-trace <c>AsyncProfilerCallStackStitchBoundaryCache</c> (which needs a real symbol table) is exercised
     /// separately by the TraceLog integration tests.
     /// </summary>
-    public class AsyncStitchBoundaryTests
+    public class AsyncProfilerCallStackStitchBoundaryTests
     {
         [Theory]
         [InlineData(null, null)]
@@ -36,9 +36,9 @@ namespace TraceEventTests
                     "System.Private.CoreLib!System.Runtime.CompilerServices.AsyncProfiler+ContinuationWrapper.Continuation_Wrapper_1(class System.Runtime.CompilerServices.Continuation,uint8&)")]
         public void NormalizeMethodName_ChangesOnlyTheTypeMethodSeparator(string name, string expected)
         {
-            string normalized = AsyncStitchBoundary.NormalizeMethodName(name);
+            string normalized = AsyncProfilerCallStackStitchBoundary.NormalizeMethodName(name);
             Assert.Equal(expected, normalized);
-            Assert.Same(normalized, AsyncStitchBoundary.NormalizeMethodName(normalized));
+            Assert.Same(normalized, AsyncProfilerCallStackStitchBoundary.NormalizeMethodName(normalized));
             if (name == expected)
             {
                 Assert.Same(name, normalized);
@@ -51,9 +51,9 @@ namespace TraceEventTests
                     "Namespace.Type`1+<RunAsync>d__1`1[System.Int64,System.String]")]
         public void NormalizeMethodName_SupportsExistingV1CompilerNameDecoding(string name, string expectedType)
         {
-            string normalized = AsyncStitchBoundary.NormalizeMethodName(name);
-            Assert.Equal(expectedType, AsyncStitchBoundary.GetStateMachineTypeName(normalized));
-            Assert.True(AsyncStitchBoundary.TryGetLogicalStateMachineMethodName(
+            string normalized = AsyncProfilerCallStackStitchBoundary.NormalizeMethodName(name);
+            Assert.Equal(expectedType, AsyncProfilerCallStackStitchBoundary.GetStateMachineTypeName(normalized));
+            Assert.True(AsyncProfilerCallStackStitchBoundary.TryGetLogicalStateMachineMethodName(
                 normalized, out string logicalName, out string suffix));
             Assert.StartsWith("Namespace.Type", logicalName);
             Assert.EndsWith(".RunAsync", logicalName);
@@ -64,14 +64,14 @@ namespace TraceEventTests
         public void NormalizeMethodName_PreservesV1CarrierTypeIdentity()
         {
             const string stateMachineType = "Namespace.Type`1+<RunAsync>d__1`1[System.Int64,System.String]";
-            string box = AsyncStitchBoundary.NormalizeMethodName(
+            string box = AsyncProfilerCallStackStitchBoundary.NormalizeMethodName(
                 "System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1+AsyncProfilerAsyncStateMachineBox`1[" +
                 "System.Int64," + stateMachineType + "]::InstrumentedMoveNext(class System.Threading.Thread)");
-            string moveNext = AsyncStitchBoundary.NormalizeMethodName(stateMachineType + "::MoveNext()");
-            foreach (AsyncRuntimeRuleProfile profile in new[] { AsyncRuntimeRuleProfile.Common, AsyncRuntimeRuleProfile.CoreClr11 })
+            string moveNext = AsyncProfilerCallStackStitchBoundary.NormalizeMethodName(stateMachineType + "::MoveNext()");
+            foreach (AsyncProfilerRuntimeRuleProfile profile in new[] { AsyncProfilerRuntimeRuleProfile.Common, AsyncProfilerRuntimeRuleProfile.CoreClr11 })
             {
                 Assert.True(profile.TryGetBoxedStateMachineTypeName(box, true, out string boxedType));
-                Assert.Equal(AsyncStitchBoundary.GetStateMachineTypeName(moveNext), boxedType);
+                Assert.Equal(AsyncProfilerCallStackStitchBoundary.GetStateMachineTypeName(moveNext), boxedType);
                 Assert.False(profile.TryGetBoxedStateMachineTypeName(box, false, out _));
             }
         }
@@ -85,7 +85,7 @@ namespace TraceEventTests
         [InlineData("BareToken", "BareToken")]                                                                // unqualified
         public void GetBareMethodName_ExtractsMethodComponent(string frameName, string expected)
         {
-            Assert.Equal(expected, AsyncStitchBoundary.GetBareMethodName(frameName));
+            Assert.Equal(expected, AsyncProfilerCallStackStitchBoundary.GetBareMethodName(frameName));
         }
 
         [Theory]
@@ -93,7 +93,7 @@ namespace TraceEventTests
         [InlineData("")]
         public void GetBareMethodName_NullOrEmpty_ReturnedUnchanged(string frameName)
         {
-            Assert.Equal(frameName, AsyncStitchBoundary.GetBareMethodName(frameName));
+            Assert.Equal(frameName, AsyncProfilerCallStackStitchBoundary.GetBareMethodName(frameName));
         }
 
         [Theory]
@@ -111,7 +111,7 @@ namespace TraceEventTests
             string expectedStateMachineSuffix)
         {
             Assert.True(
-                AsyncStitchBoundary.TryGetLogicalStateMachineMethodName(
+                AsyncProfilerCallStackStitchBoundary.TryGetLogicalStateMachineMethodName(
                     methodName,
                     out string logicalName,
                     out string stateMachineSuffix));
@@ -126,7 +126,7 @@ namespace TraceEventTests
         [InlineData(null, null)]
         public void GetStateMachineTypeName_ExtractsQualifiedStateMachineMethodTypes(string name, string expected)
         {
-            Assert.Equal(expected, AsyncStitchBoundary.GetStateMachineTypeName(name));
+            Assert.Equal(expected, AsyncProfilerCallStackStitchBoundary.GetStateMachineTypeName(name));
         }
 
         [Theory]
@@ -141,41 +141,42 @@ namespace TraceEventTests
         [InlineData(null, false, -1)]
         public void TryGetWrapperIndex_ParsesPoolSlot(string method, bool expectedResult, int expectedIndex)
         {
-            bool result = AsyncStitchBoundary.TryGetWrapperIndex(method, out int wrapperIndex);
+            bool result = AsyncProfilerCallStackStitchBoundary.TryGetWrapperIndex(method, out int wrapperIndex);
             Assert.Equal(expectedResult, result);
             Assert.Equal(expectedIndex, wrapperIndex);
         }
 
         [Theory]
         // V2 continuation wrapper (carries an index)
-        [InlineData("System.Private.CoreLib!AsyncProfiler+ContinuationWrapper.Continuation_Wrapper_0", AsyncStitchBoundaryKind.V2ContinuationWrapper, 0)]
-        [InlineData("System.Private.CoreLib!AsyncProfiler+ContinuationWrapper.Continuation_Wrapper_31", AsyncStitchBoundaryKind.V2ContinuationWrapper, 31)]
+        [InlineData("System.Private.CoreLib!AsyncProfiler+ContinuationWrapper.Continuation_Wrapper_0", (int)AsyncProfilerCallStackStitchBoundaryKind.V2ContinuationWrapper, 0)]
+        [InlineData("System.Private.CoreLib!AsyncProfiler+ContinuationWrapper.Continuation_Wrapper_31", (int)AsyncProfilerCallStackStitchBoundaryKind.V2ContinuationWrapper, 31)]
         // V2 dispatch continuations (no wrapper -> index -1)
-        [InlineData("System.Private.CoreLib!System.Runtime.CompilerServices.RuntimeAsyncTask`1.DispatchContinuations()", AsyncStitchBoundaryKind.V2DispatchContinuation, -1)]
-        [InlineData("System.Private.CoreLib!System.Runtime.CompilerServices.RuntimeAsyncTask`1.InstrumentedDispatchContinuations()", AsyncStitchBoundaryKind.V2DispatchContinuation, -1)]
+        [InlineData("System.Private.CoreLib!System.Runtime.CompilerServices.RuntimeAsyncTask`1.DispatchContinuations()", (int)AsyncProfilerCallStackStitchBoundaryKind.V2DispatchContinuation, -1)]
+        [InlineData("System.Private.CoreLib!System.Runtime.CompilerServices.RuntimeAsyncTask`1.InstrumentedDispatchContinuations()", (int)AsyncProfilerCallStackStitchBoundaryKind.V2DispatchContinuation, -1)]
         // V1 dispatcher (merged box)
-        [InlineData("System.Private.CoreLib!...AsyncProfilerAsyncStateMachineBox`1.MoveNextAsDispatcher()", AsyncStitchBoundaryKind.V1Dispatcher, -1)]
+        [InlineData("System.Private.CoreLib!...AsyncProfilerAsyncStateMachineBox`1.MoveNextAsDispatcher()", (int)AsyncProfilerCallStackStitchBoundaryKind.V1Dispatcher, -1)]
         // V1 dispatcher (non-merged/standalone wrapper) -- recognized type-qualified
-        [InlineData("System.Private.CoreLib!System.Runtime.CompilerServices.AsyncStateMachineDispatcher.MoveNext()", AsyncStitchBoundaryKind.V1Dispatcher, -1)]
-        [InlineData("System.Runtime.CompilerServices.AsyncStateMachineDispatcher.MoveNext", AsyncStitchBoundaryKind.V1Dispatcher, -1)] // no module
+        [InlineData("System.Private.CoreLib!System.Runtime.CompilerServices.AsyncStateMachineDispatcher.MoveNext()", (int)AsyncProfilerCallStackStitchBoundaryKind.V1Dispatcher, -1)]
+        [InlineData("System.Runtime.CompilerServices.AsyncStateMachineDispatcher.MoveNext", (int)AsyncProfilerCallStackStitchBoundaryKind.V1Dispatcher, -1)] // no module
         // V1 dispatcher infrastructure (type-family based, not method-name based)
-        [InlineData("System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder+AsyncStateMachineBox`1.MoveNext()", AsyncStitchBoundaryKind.V1DispatcherInfrastructure, -1)]
-        [InlineData("System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder+AsyncProfilerAsyncStateMachineBox`1.InstrumentedMoveNext()", AsyncStitchBoundaryKind.V1DispatcherInfrastructure, -1)]
-        [InlineData("System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder+ProfilerAsyncStateMachineBox`1.ExecuteDirectly()", AsyncStitchBoundaryKind.V1DispatcherInfrastructure, -1)]
-        [InlineData("System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder+DebugFinalizableAsyncStateMachineBox`1.MoveNext()", AsyncStitchBoundaryKind.V1DispatcherInfrastructure, -1)]
-        [InlineData("System.Private.CoreLib!System.Runtime.CompilerServices.AsyncStateMachineDispatcher.ExecuteDirectly()", AsyncStitchBoundaryKind.V1DispatcherInfrastructure, -1)]
+        [InlineData("System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder+AsyncStateMachineBox`1.MoveNext()", (int)AsyncProfilerCallStackStitchBoundaryKind.V1DispatcherInfrastructure, -1)]
+        [InlineData("System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder+AsyncProfilerAsyncStateMachineBox`1.InstrumentedMoveNext()", (int)AsyncProfilerCallStackStitchBoundaryKind.V1DispatcherInfrastructure, -1)]
+        [InlineData("System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder+ProfilerAsyncStateMachineBox`1.ExecuteDirectly()", (int)AsyncProfilerCallStackStitchBoundaryKind.V1DispatcherInfrastructure, -1)]
+        [InlineData("System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder+DebugFinalizableAsyncStateMachineBox`1.MoveNext()", (int)AsyncProfilerCallStackStitchBoundaryKind.V1DispatcherInfrastructure, -1)]
+        [InlineData("System.Private.CoreLib!System.Runtime.CompilerServices.AsyncStateMachineDispatcher.ExecuteDirectly()", (int)AsyncProfilerCallStackStitchBoundaryKind.V1DispatcherInfrastructure, -1)]
         // Not a boundary
-        [InlineData("System.Private.CoreLib!System.Threading.Tasks.Task.RunContinuations(System.Object)", AsyncStitchBoundaryKind.None, -1)]
-        [InlineData("MyApp!MyApp.Program.MoveNext()", AsyncStitchBoundaryKind.None, -1)]
-        [InlineData("MyApp!MyApp.AsyncStateMachineBox`1.MoveNext()", AsyncStitchBoundaryKind.None, -1)]
+        [InlineData("System.Private.CoreLib!System.Threading.Tasks.Task.RunContinuations(System.Object)", (int)AsyncProfilerCallStackStitchBoundaryKind.None, -1)]
+        [InlineData("MyApp!MyApp.Program.MoveNext()", (int)AsyncProfilerCallStackStitchBoundaryKind.None, -1)]
+        [InlineData("MyApp!MyApp.AsyncStateMachineBox`1.MoveNext()", (int)AsyncProfilerCallStackStitchBoundaryKind.None, -1)]
         // A bare "MoveNext" (or on any other type) must NOT be mistaken for the non-merged dispatcher.
-        [InlineData("System.Private.CoreLib!Some.Other.StateMachineBox`1.MoveNext()", AsyncStitchBoundaryKind.None, -1)]
-        [InlineData("MoveNext", AsyncStitchBoundaryKind.None, -1)]
-        [InlineData(null, AsyncStitchBoundaryKind.None, -1)]
-        [InlineData("", AsyncStitchBoundaryKind.None, -1)]
-        public void Classify_RecognizesBoundaryKinds(string frameName, AsyncStitchBoundaryKind expectedKind, int expectedWrapperIndex)
+        [InlineData("System.Private.CoreLib!Some.Other.StateMachineBox`1.MoveNext()", (int)AsyncProfilerCallStackStitchBoundaryKind.None, -1)]
+        [InlineData("MoveNext", (int)AsyncProfilerCallStackStitchBoundaryKind.None, -1)]
+        [InlineData(null, (int)AsyncProfilerCallStackStitchBoundaryKind.None, -1)]
+        [InlineData("", (int)AsyncProfilerCallStackStitchBoundaryKind.None, -1)]
+        public void Classify_RecognizesBoundaryKinds(string frameName, int expectedKindValue, int expectedWrapperIndex)
         {
-            AsyncStitchBoundaryKind kind = AsyncStitchBoundary.Classify(frameName, out int wrapperIndex);
+            var expectedKind = (AsyncProfilerCallStackStitchBoundaryKind)expectedKindValue;
+            AsyncProfilerCallStackStitchBoundaryKind kind = AsyncProfilerCallStackStitchBoundary.Classify(frameName, out int wrapperIndex);
             Assert.Equal(expectedKind, kind);
             Assert.Equal(expectedWrapperIndex, wrapperIndex);
         }
@@ -187,173 +188,175 @@ namespace TraceEventTests
         public void Classify_RecognizesConstructedV1StateMachineBoxFramesFromRealTrace(string frameName)
         {
             Assert.Equal(
-                AsyncStitchBoundaryKind.V1DispatcherInfrastructure,
-                AsyncStitchBoundary.Classify(frameName, out int wrapperIndex));
+                AsyncProfilerCallStackStitchBoundaryKind.V1DispatcherInfrastructure,
+                AsyncProfilerCallStackStitchBoundary.Classify(frameName, out int wrapperIndex));
             Assert.Equal(-1, wrapperIndex);
         }
 
         [Theory]
         [InlineData(
             "AsyncProfilerScenarios!V1TraceScenarios+<BurnCpuAsync>d__15.MoveNext()",
-            StitchSyncFrameKind.V1StateMachineMoveNext)]
+            (int)AsyncProfilerStitchSyncFrameKind.V1StateMachineMoveNext)]
         [InlineData(
             "System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1[System.Int64].Start(!!0&)",
-            StitchSyncFrameKind.V1MethodBuilderStart)]
+            (int)AsyncProfilerStitchSyncFrameKind.V1MethodBuilderStart)]
         [InlineData(
             "System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1[System.Int64].AwaitUnsafeOnCompleted(!!0&,!!1&)",
-            StitchSyncFrameKind.V1MethodBuilderAwaitUnsafeOnCompleted)]
+            (int)AsyncProfilerStitchSyncFrameKind.V1MethodBuilderAwaitUnsafeOnCompleted)]
         [InlineData(
             "System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1[System.Int64].AwaitUnsafeOnCompleted(!!0&,!!1&,class System.Threading.Tasks.Task`1<!0>&)",
-            StitchSyncFrameKind.V1MethodBuilderAwaitUnsafeOnCompleted)]
+            (int)AsyncProfilerStitchSyncFrameKind.V1MethodBuilderAwaitUnsafeOnCompleted)]
         [InlineData(
             "System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1[System.Int64].AwaitUnsafeOnCompleted(!!0&,class System.Runtime.CompilerServices.IAsyncStateMachineBox)",
-            StitchSyncFrameKind.V1MethodBuilderAwaitUnsafeOnCompleted)]
+            (int)AsyncProfilerStitchSyncFrameKind.V1MethodBuilderAwaitUnsafeOnCompleted)]
         [InlineData(
             "System.Private.CoreLib!System.Runtime.CompilerServices.AsyncMethodBuilderCore.Start(!!0&)",
-            StitchSyncFrameKind.V1MethodBuilderStart)]
+            (int)AsyncProfilerStitchSyncFrameKind.V1MethodBuilderStart)]
         [InlineData(
             "System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1[System.Int64].SetExistingTaskResult(class System.Threading.Tasks.Task`1<!0>,!0)",
-            StitchSyncFrameKind.V1MethodBuilderCompletion)]
+            (int)AsyncProfilerStitchSyncFrameKind.V1MethodBuilderCompletion)]
         [InlineData(
             "System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1[System.Int64].GetStateMachineBox(!!0&,class System.Threading.Tasks.Task`1<!0>&)",
-            StitchSyncFrameKind.V1MethodBuilderInfrastructure)]
+            (int)AsyncProfilerStitchSyncFrameKind.V1MethodBuilderInfrastructure)]
         [InlineData(
             "System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1[System.Int64].SetException(class System.Exception)",
-            StitchSyncFrameKind.V1MethodBuilderInfrastructure)]
+            (int)AsyncProfilerStitchSyncFrameKind.V1MethodBuilderInfrastructure)]
         [InlineData(
             "System.Private.CoreLib!System.Runtime.CompilerServices.AsyncIteratorMethodBuilder.Complete()",
-            StitchSyncFrameKind.V1MethodBuilderInfrastructure)]
+            (int)AsyncProfilerStitchSyncFrameKind.V1MethodBuilderInfrastructure)]
         [InlineData(
             "System.Private.CoreLib!System.Runtime.CompilerServices.YieldAwaitable+YieldAwaiter.System.Runtime.CompilerServices.IStateMachineBoxAwareAwaiter.AwaitUnsafeOnCompleted(class System.Runtime.CompilerServices.IAsyncStateMachineBox)",
-            StitchSyncFrameKind.V1AwaiterRegistrationInfrastructure)]
+            (int)AsyncProfilerStitchSyncFrameKind.V1AwaiterRegistrationInfrastructure)]
         [InlineData(
             "System.Private.CoreLib!System.Runtime.CompilerServices.TaskAwaiter.UnsafeOnCompletedInternal(class System.Threading.Tasks.Task,class System.Action,bool)",
-            StitchSyncFrameKind.V1AwaiterRegistrationInfrastructure)]
+            (int)AsyncProfilerStitchSyncFrameKind.V1AwaiterRegistrationInfrastructure)]
         [InlineData(
             "System.Private.CoreLib!System.Runtime.CompilerServices.ConfiguredValueTaskAwaitable+ConfiguredValueTaskAwaiter.UnsafeOnCompleted(class System.Action)",
-            StitchSyncFrameKind.V1AwaiterRegistrationInfrastructure)]
+            (int)AsyncProfilerStitchSyncFrameKind.V1AwaiterRegistrationInfrastructure)]
         [InlineData(
             "System.Private.CoreLib!System.Runtime.CompilerServices.TaskAwaiter.GetResult()",
-            StitchSyncFrameKind.None)]
+            (int)AsyncProfilerStitchSyncFrameKind.None)]
         [InlineData(
             "System.Private.CoreLib!System.Threading.Tasks.Task.RunContinuations(class System.Object)",
-            StitchSyncFrameKind.SystemPrivateCoreLibTaskRunContinuations)]
+            (int)AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskRunContinuations)]
         [InlineData(
             "System.Private.CoreLib!System.Threading.ThreadPoolWorkQueue.Dispatch()",
-            StitchSyncFrameKind.SystemPrivateCoreLibThreadPoolDispatch)]
+            (int)AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibThreadPoolDispatch)]
         [InlineData(
             "System.Private.CoreLib!System.Threading.Tasks.Task.TrySetResult()",
-            StitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult)]
+            (int)AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult)]
         [InlineData(
             "System.Private.CoreLib!System.Threading.Tasks.Task`1[System.Boolean].TrySetResult(!0)",
-            StitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult)]
+            (int)AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult)]
         [InlineData(
             "System.Private.CoreLib!System.Threading.Tasks.TaskCompletionSource`1[System.Boolean].SetResult(!0)",
-            StitchSyncFrameKind.SystemPrivateCoreLibTaskCompletionSourceSetResult)]
+            (int)AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskCompletionSourceSetResult)]
         [InlineData(
             "System.Private.CoreLib!System.Threading.Tasks.Task`1[[System.Collections.Generic.List`1[System.Int32]]].TrySetResult(!0)",
-            StitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult)]
+            (int)AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult)]
         [InlineData(
             "System.Private.CoreLib!System.Threading.Tasks.Task`1.TrySetResult(!0)",
-            StitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult)]
+            (int)AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult)]
         [InlineData(
             "System.Private.CoreLib!Other.Namespace.Task.RunContinuations()",
-            StitchSyncFrameKind.None)]
+            (int)AsyncProfilerStitchSyncFrameKind.None)]
         [InlineData(
             "System.Private.CoreLib!Other.Namespace.TaskCompletionSource`1[System.Boolean].SetResult(!0)",
-            StitchSyncFrameKind.None)]
+            (int)AsyncProfilerStitchSyncFrameKind.None)]
         [InlineData(
             "System.Private.CoreLib!Other.Namespace.ExecutionContext.RunInternal()",
-            StitchSyncFrameKind.None)]
+            (int)AsyncProfilerStitchSyncFrameKind.None)]
         [InlineData(
             "System.Private.CoreLib!System.Threading.Tasks.TaskExtra.RunContinuations()",
-            StitchSyncFrameKind.None)]
+            (int)AsyncProfilerStitchSyncFrameKind.None)]
         [InlineData(
             "System.Private.CoreLib!System.Threading.Tasks.Task`1[System.Boolean]+Other.TrySetResult(!0)",
-            StitchSyncFrameKind.None)]
+            (int)AsyncProfilerStitchSyncFrameKind.None)]
         [InlineData(
             "System.Private.CoreLib!System.Threading.Tasks.Task`2[System.Boolean,System.Int32].TrySetResult(!0)",
-            StitchSyncFrameKind.None)]
+            (int)AsyncProfilerStitchSyncFrameKind.None)]
         [InlineData(
             "System.Private.CoreLib!System.Threading.Tasks.TaskCompletionSource`10.SetResult(!0)",
-            StitchSyncFrameKind.None)]
+            (int)AsyncProfilerStitchSyncFrameKind.None)]
         [InlineData(
             "System.Private.CoreLib!System.Threading.Tasks.AwaitTaskContinuation`1[System.Boolean].RunOrScheduleAction()",
-            StitchSyncFrameKind.None)]
+            (int)AsyncProfilerStitchSyncFrameKind.None)]
         [InlineData(
             "System.Private.CoreLib!System.Threading.ExecutionContext`1.RunInternal()",
-            StitchSyncFrameKind.None)]
+            (int)AsyncProfilerStitchSyncFrameKind.None)]
         [InlineData(
             "System.Private.CoreLib!System.Threading.Tasks.Task`1[System.Boolean.TrySetResult(!0)",
-            StitchSyncFrameKind.None)]
+            (int)AsyncProfilerStitchSyncFrameKind.None)]
         [InlineData(
             "System.Private.CoreLib!System.Threading.Tasks.AwaitTaskContinuation.RunOrScheduleAction(class System.Action,bool)",
-            StitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure)]
+            (int)AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure)]
         [InlineData(
             "System.Private.CoreLib!System.Threading.ExecutionContext.RunInternal(class System.Threading.ExecutionContext,class System.Threading.ContextCallback,class System.Object)",
-            StitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure)]
+            (int)AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure)]
         [InlineData(
             "System.Private.CoreLib!System.Threading.ExecutionContext.RunFromThreadPoolDispatchLoop(class System.Threading.Thread,class System.Threading.ExecutionContext,class System.Threading.ContextCallback,class System.Object)",
-            StitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure)]
+            (int)AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure)]
         [InlineData(
             "Other.CoreLib!System.Runtime.CompilerServices.AsyncMethodBuilderCore.Start(!!0&)",
-            StitchSyncFrameKind.None)]
+            (int)AsyncProfilerStitchSyncFrameKind.None)]
         [InlineData(
             "System.Private.CoreLib!Other.Namespace.AsyncMethodBuilderCore.Start(!!0&)",
-            StitchSyncFrameKind.None)]
+            (int)AsyncProfilerStitchSyncFrameKind.None)]
         [InlineData(
             "MyBuilders!CustomAsyncMethodBuilder.Start(!!0&)",
-            StitchSyncFrameKind.None)]
+            (int)AsyncProfilerStitchSyncFrameKind.None)]
         [InlineData(
             "MyBuilders!CustomAsyncMethodBuilder.AwaitUnsafeOnCompleted(!!0&,!!1&)",
-            StitchSyncFrameKind.None)]
+            (int)AsyncProfilerStitchSyncFrameKind.None)]
         [InlineData(
             "MyBuilders!CustomAsyncMethodBuilder.SetException(class System.Exception)",
-            StitchSyncFrameKind.None)]
+            (int)AsyncProfilerStitchSyncFrameKind.None)]
         [InlineData(
             "MyCoreLib!System.Threading.Tasks.Task.RunContinuations(class System.Object)",
-            StitchSyncFrameKind.None)]
+            (int)AsyncProfilerStitchSyncFrameKind.None)]
         [InlineData(
             "MyApp!InlineContinuationAwaiter.UnsafeOnCompleted(class System.Action)",
-            StitchSyncFrameKind.None)]
+            (int)AsyncProfilerStitchSyncFrameKind.None)]
         [InlineData(
             "MyApp!MyType.MoveNext()",
-            StitchSyncFrameKind.None)]
+            (int)AsyncProfilerStitchSyncFrameKind.None)]
         public void ClassifySynchronousFrame_RecognizesKnownAsyncRelatedFrames(
             string frameName,
-            StitchSyncFrameKind expected)
+            int expectedValue)
         {
-            Assert.Equal(expected, AsyncStitchBoundary.ClassifySynchronousFrame(frameName));
+            var expected = (AsyncProfilerStitchSyncFrameKind)expectedValue;
+            Assert.Equal(expected, AsyncProfilerCallStackStitchBoundary.ClassifySynchronousFrame(frameName));
         }
 
         [Theory]
         [InlineData(
             "System.Runtime.CompilerServices.AsyncMethodBuilderCore.Start(!!0&)",
-            StitchSyncFrameKind.V1MethodBuilderStart)]
+            (int)AsyncProfilerStitchSyncFrameKind.V1MethodBuilderStart)]
         [InlineData(
             "System.Threading.ThreadPoolWorkQueue.Dispatch()",
-            StitchSyncFrameKind.SystemPrivateCoreLibThreadPoolDispatch)]
+            (int)AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibThreadPoolDispatch)]
         [InlineData(
             "System.Threading.Tasks.Task`1[System.Int64].TrySetResult(!0)",
-            StitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult)]
+            (int)AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult)]
         [InlineData(
             "System.Threading.Tasks.Task`1[!0].TrySetResult(!0)",
-            StitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult)]
+            (int)AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult)]
         [InlineData(
             "System.Threading.Tasks.Task`1[[System.Collections.Generic.List`1[System.Int32]]].TrySetResult(!0)",
-            StitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult)]
+            (int)AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult)]
         [InlineData(
             "System.Threading.Tasks.TaskCompletionSource`1[System.Boolean].SetResult(!0)",
-            StitchSyncFrameKind.SystemPrivateCoreLibTaskCompletionSourceSetResult)]
+            (int)AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskCompletionSourceSetResult)]
         public void ClassifySynchronousFrame_SplitTraceEventModuleAndMethod_RequiresCoreLib(
-            string method, StitchSyncFrameKind expected)
+            string method, int expectedValue)
         {
+            var expected = (AsyncProfilerStitchSyncFrameKind)expectedValue;
             Assert.Equal(
                 expected,
-                AsyncStitchBoundary.ClassifySynchronousFrame(method, isHostModule: true));
+                AsyncProfilerCallStackStitchBoundary.ClassifySynchronousFrame(method, isHostModule: true));
             Assert.Equal(
-                StitchSyncFrameKind.None,
-                AsyncStitchBoundary.ClassifySynchronousFrame(method, isHostModule: false));
+                AsyncProfilerStitchSyncFrameKind.None,
+                AsyncProfilerCallStackStitchBoundary.ClassifySynchronousFrame(method, isHostModule: false));
         }
 
         [Theory]
@@ -371,8 +374,8 @@ namespace TraceEventTests
             string method)
         {
             Assert.Equal(
-                StitchSyncFrameKind.None,
-                AsyncStitchBoundary.ClassifySynchronousFrame(method, isHostModule: true));
+                AsyncProfilerStitchSyncFrameKind.None,
+                AsyncProfilerCallStackStitchBoundary.ClassifySynchronousFrame(method, isHostModule: true));
         }
 
         [Theory]
@@ -381,17 +384,17 @@ namespace TraceEventTests
         public void ClassifySynchronousFrame_DispatcherCreation_RequiresCoreLibAndIsNotABoundary(string method)
         {
             Assert.Equal(
-                StitchSyncFrameKind.V1DispatcherCreationInfrastructure,
-                AsyncStitchBoundary.ClassifySynchronousFrame("System.Private.CoreLib!" + method));
+                AsyncProfilerStitchSyncFrameKind.V1DispatcherCreationInfrastructure,
+                AsyncProfilerCallStackStitchBoundary.ClassifySynchronousFrame("System.Private.CoreLib!" + method));
             Assert.Equal(
-                StitchSyncFrameKind.V1DispatcherCreationInfrastructure,
-                AsyncStitchBoundary.ClassifySynchronousFrame(method, isHostModule: true));
+                AsyncProfilerStitchSyncFrameKind.V1DispatcherCreationInfrastructure,
+                AsyncProfilerCallStackStitchBoundary.ClassifySynchronousFrame(method, isHostModule: true));
             Assert.Equal(
-                StitchSyncFrameKind.None,
-                AsyncStitchBoundary.ClassifySynchronousFrame(method, isHostModule: false));
+                AsyncProfilerStitchSyncFrameKind.None,
+                AsyncProfilerCallStackStitchBoundary.ClassifySynchronousFrame(method, isHostModule: false));
             Assert.Equal(
-                AsyncStitchBoundaryKind.None,
-                AsyncStitchBoundary.Classify("System.Private.CoreLib!" + method, out int wrapperIndex));
+                AsyncProfilerCallStackStitchBoundaryKind.None,
+                AsyncProfilerCallStackStitchBoundary.Classify("System.Private.CoreLib!" + method, out int wrapperIndex));
             Assert.Equal(-1, wrapperIndex);
         }
 
@@ -406,33 +409,34 @@ namespace TraceEventTests
         public void ClassifySynchronousFrame_DispatcherCreation_RejectsLookalikes(string method)
         {
             Assert.Equal(
-                StitchSyncFrameKind.None,
-                AsyncStitchBoundary.ClassifySynchronousFrame(method, isHostModule: true));
+                AsyncProfilerStitchSyncFrameKind.None,
+                AsyncProfilerCallStackStitchBoundary.ClassifySynchronousFrame(method, isHostModule: true));
             Assert.Equal(
-                StitchSyncFrameKind.None,
-                AsyncStitchBoundary.ClassifySynchronousFrame("System.Private.CoreLib!" + method));
+                AsyncProfilerStitchSyncFrameKind.None,
+                AsyncProfilerCallStackStitchBoundary.ClassifySynchronousFrame("System.Private.CoreLib!" + method));
         }
 
         [Theory]
-        [InlineData("System.Runtime.CompilerServices.AsyncProfiler+AsyncCallstack.CaptureStateMachineAsyncCallstack(unsigned int8[],int32&,value class State&)", StitchSyncFrameKind.AsyncProfilerCallstackCapture)]
-        [InlineData("System.Runtime.CompilerServices.AsyncProfiler+AsyncCallstack.EmitAsyncCallstack(unsigned int8[],int32&,!!0&)", StitchSyncFrameKind.AsyncProfilerCallstackEmission)]
-        [InlineData("System.Runtime.CompilerServices.AsyncProfiler+AsyncCallstack.EmitEvent()", StitchSyncFrameKind.AsyncProfilerCallstackEmission)]
-        [InlineData("System.Runtime.CompilerServices.AsyncProfiler+ResumeAsyncContext.Resume()", StitchSyncFrameKind.AsyncProfilerContextResume)]
-        [InlineData("System.Runtime.CompilerServices.AsyncProfiler+SyncPoint.ResetContext()", StitchSyncFrameKind.AsyncProfilerInfrastructure)]
-        [InlineData("System.Runtime.CompilerServices.AsyncStateMachineDiagnostics`1[Scenario+<ChildAsync>d__3]..cctor()", StitchSyncFrameKind.AsyncProfilerInfrastructure)]
-        [InlineData("System.Runtime.CompilerServices.AsyncStateMachineDiagnostics`1[Scenario+<ChildAsync>d__3].get_MethodId()", StitchSyncFrameKind.AsyncProfilerInfrastructure)]
-        [InlineData("System.Runtime.CompilerServices.AsyncStateMachineDiagnostics`1[!0].get_StateOffset()", StitchSyncFrameKind.AsyncProfilerInfrastructure)]
-        [InlineData("System.Runtime.CompilerServices.InitHelpers.CallClassConstructor(void*,void*,class System.Exception*)", StitchSyncFrameKind.AsyncProfilerInfrastructure)]
-        [InlineData("System.Runtime.CompilerServices.InitHelpers.InitClassHelper(value class MethodTable*)", StitchSyncFrameKind.AsyncProfilerInfrastructure)]
-        [InlineData("System.Runtime.CompilerServices.InitHelpers.InitClassSlow(value class MethodTable*)", StitchSyncFrameKind.AsyncProfilerInfrastructure)]
-        [InlineData("System.Runtime.CompilerServices.StaticsHelpers.GetNonGCStaticBaseSlow(value class MethodTable*)", StitchSyncFrameKind.AsyncProfilerInfrastructure)]
-        [InlineData("System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1+AsyncStateMachineBox`1[System.Int64,Scenario+<ChildAsync>d__3].System.Runtime.CompilerServices.IAsyncStateMachineBox.GetDiagnosticData(unsigned int64&,int32&,class System.Object&)", StitchSyncFrameKind.AsyncProfilerInfrastructure)]
+        [InlineData("System.Runtime.CompilerServices.AsyncProfiler+AsyncCallstack.CaptureStateMachineAsyncCallstack(unsigned int8[],int32&,value class State&)", (int)AsyncProfilerStitchSyncFrameKind.ProfilerCallstackCapture)]
+        [InlineData("System.Runtime.CompilerServices.AsyncProfiler+AsyncCallstack.EmitAsyncCallstack(unsigned int8[],int32&,!!0&)", (int)AsyncProfilerStitchSyncFrameKind.ProfilerCallstackEmission)]
+        [InlineData("System.Runtime.CompilerServices.AsyncProfiler+AsyncCallstack.EmitEvent()", (int)AsyncProfilerStitchSyncFrameKind.ProfilerCallstackEmission)]
+        [InlineData("System.Runtime.CompilerServices.AsyncProfiler+ResumeAsyncContext.Resume()", (int)AsyncProfilerStitchSyncFrameKind.ProfilerContextResume)]
+        [InlineData("System.Runtime.CompilerServices.AsyncProfiler+SyncPoint.ResetContext()", (int)AsyncProfilerStitchSyncFrameKind.ProfilerInfrastructure)]
+        [InlineData("System.Runtime.CompilerServices.AsyncStateMachineDiagnostics`1[Scenario+<ChildAsync>d__3]..cctor()", (int)AsyncProfilerStitchSyncFrameKind.ProfilerInfrastructure)]
+        [InlineData("System.Runtime.CompilerServices.AsyncStateMachineDiagnostics`1[Scenario+<ChildAsync>d__3].get_MethodId()", (int)AsyncProfilerStitchSyncFrameKind.ProfilerInfrastructure)]
+        [InlineData("System.Runtime.CompilerServices.AsyncStateMachineDiagnostics`1[!0].get_StateOffset()", (int)AsyncProfilerStitchSyncFrameKind.ProfilerInfrastructure)]
+        [InlineData("System.Runtime.CompilerServices.InitHelpers.CallClassConstructor(void*,void*,class System.Exception*)", (int)AsyncProfilerStitchSyncFrameKind.ProfilerInfrastructure)]
+        [InlineData("System.Runtime.CompilerServices.InitHelpers.InitClassHelper(value class MethodTable*)", (int)AsyncProfilerStitchSyncFrameKind.ProfilerInfrastructure)]
+        [InlineData("System.Runtime.CompilerServices.InitHelpers.InitClassSlow(value class MethodTable*)", (int)AsyncProfilerStitchSyncFrameKind.ProfilerInfrastructure)]
+        [InlineData("System.Runtime.CompilerServices.StaticsHelpers.GetNonGCStaticBaseSlow(value class MethodTable*)", (int)AsyncProfilerStitchSyncFrameKind.ProfilerInfrastructure)]
+        [InlineData("System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1+AsyncStateMachineBox`1[System.Int64,Scenario+<ChildAsync>d__3].System.Runtime.CompilerServices.IAsyncStateMachineBox.GetDiagnosticData(unsigned int64&,int32&,class System.Object&)", (int)AsyncProfilerStitchSyncFrameKind.ProfilerInfrastructure)]
         public void ClassifySynchronousFrame_ProfilerEnvelope_RequiresExactCoreLibMethods(
-            string method, StitchSyncFrameKind expected)
+            string method, int expectedValue)
         {
-            Assert.Equal(expected, AsyncStitchBoundary.ClassifySynchronousFrame("System.Private.CoreLib!" + method));
-            Assert.Equal(expected, AsyncStitchBoundary.ClassifySynchronousFrame(method, isHostModule: true));
-            Assert.Equal(StitchSyncFrameKind.None, AsyncStitchBoundary.ClassifySynchronousFrame(method, isHostModule: false));
+            var expected = (AsyncProfilerStitchSyncFrameKind)expectedValue;
+            Assert.Equal(expected, AsyncProfilerCallStackStitchBoundary.ClassifySynchronousFrame("System.Private.CoreLib!" + method));
+            Assert.Equal(expected, AsyncProfilerCallStackStitchBoundary.ClassifySynchronousFrame(method, isHostModule: true));
+            Assert.Equal(AsyncProfilerStitchSyncFrameKind.None, AsyncProfilerCallStackStitchBoundary.ClassifySynchronousFrame(method, isHostModule: false));
         }
 
         [Theory]
@@ -453,21 +457,21 @@ namespace TraceEventTests
         [InlineData("Other.CoreLib!System.Runtime.CompilerServices.AsyncProfiler+AsyncCallstack.EmitEvent()")]
         public void ClassifySynchronousFrame_ProfilerEnvelope_RejectsLookalikes(string method)
         {
-            Assert.Equal(StitchSyncFrameKind.None, AsyncStitchBoundary.ClassifySynchronousFrame(method, isHostModule: true));
+            Assert.Equal(AsyncProfilerStitchSyncFrameKind.None, AsyncProfilerCallStackStitchBoundary.ClassifySynchronousFrame(method, isHostModule: true));
         }
 
         [Fact]
         public void Contract_ConstantsMatchRuntime()
         {
             // These values are a contract with the dotnet/runtime async profiler; guard against accidental drift.
-            Assert.Equal("Continuation_Wrapper_", AsyncStitchBoundary.ContinuationWrapperPrefix);
-            Assert.Equal(32, AsyncStitchBoundary.WrapperPoolCount);
-            Assert.Equal("DispatchContinuations", AsyncStitchBoundary.DispatchContinuationsName);
-            Assert.Equal("InstrumentedDispatchContinuations", AsyncStitchBoundary.InstrumentedDispatchContinuationsName);
-            Assert.Equal("MoveNextAsDispatcher", AsyncStitchBoundary.MoveNextAsDispatcherName);
-            Assert.Equal("AsyncStateMachineDispatcher", AsyncStitchBoundary.AsyncStateMachineDispatcherTypeName);
-            Assert.Equal("MoveNext", AsyncStitchBoundary.AsyncStateMachineDispatcherMethodName);
-            Assert.Equal("System.Private.CoreLib", AsyncStitchBoundary.HostModuleName);
+            Assert.Equal("Continuation_Wrapper_", AsyncProfilerCallStackStitchBoundary.ContinuationWrapperPrefix);
+            Assert.Equal(32, AsyncProfilerCallStackStitchBoundary.WrapperPoolCount);
+            Assert.Equal("DispatchContinuations", AsyncProfilerCallStackStitchBoundary.DispatchContinuationsName);
+            Assert.Equal("InstrumentedDispatchContinuations", AsyncProfilerCallStackStitchBoundary.InstrumentedDispatchContinuationsName);
+            Assert.Equal("MoveNextAsDispatcher", AsyncProfilerCallStackStitchBoundary.MoveNextAsDispatcherName);
+            Assert.Equal("AsyncStateMachineDispatcher", AsyncProfilerCallStackStitchBoundary.AsyncStateMachineDispatcherTypeName);
+            Assert.Equal("MoveNext", AsyncProfilerCallStackStitchBoundary.AsyncStateMachineDispatcherMethodName);
+            Assert.Equal("System.Private.CoreLib", AsyncProfilerCallStackStitchBoundary.HostModuleName);
         }
 
         [Theory]
@@ -481,7 +485,7 @@ namespace TraceEventTests
         [InlineData("", null)]
         public void GetDeclaringTypeName_ExtractsTypeComponent(string frameName, string expected)
         {
-            Assert.Equal(expected, AsyncStitchBoundary.GetDeclaringTypeName(frameName));
+            Assert.Equal(expected, AsyncProfilerCallStackStitchBoundary.GetDeclaringTypeName(frameName));
         }
 
         [Fact]
@@ -494,7 +498,7 @@ namespace TraceEventTests
 
             Assert.Equal(
                 "AsyncProfilerAsyncStateMachineBox`1[System.Int64,V1TraceScenarios+<BurnCpuAsync>d__15]",
-                AsyncStitchBoundary.GetDeclaringTypeName(frameName));
+                AsyncProfilerCallStackStitchBoundary.GetDeclaringTypeName(frameName));
         }
     }
 }

@@ -12,6 +12,7 @@ using Microsoft.Diagnostics.Tracing.Computers;
 using Microsoft.Diagnostics.Tracing.Etlx;
 using Microsoft.Diagnostics.Tracing.Parsers;
 using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
+using Microsoft.Diagnostics.Tracing.Stacks;
 
 using Xunit;
 
@@ -21,7 +22,7 @@ namespace TraceEventTests
     /// End-to-end validation of the async-profiler TraceLog integration: synthesize an EventPipe (.nettrace)
     /// stream that carries a CPU-sample event plus an <c>AsyncEvents</c> buffer whose (nested) async call
     /// stacks span the sample's QPC, convert it to ETLX (which runs the build hook + serializes the index),
-    /// reopen the ETLX, then query <see cref="TraceLog.GetAsyncCallStacks(ThreadIndex, long)"/> using the
+    /// reopen the ETLX, then query <see cref="TraceLog.GetAsyncProfilerCallStacks(ThreadIndex, long)"/> using the
     /// sample event's own thread and QPC.
     /// </summary>
     public class AsyncProfilerTraceLogTests
@@ -101,16 +102,16 @@ namespace TraceEventTests
                 using (var traceLog = new TraceLog(etlxPath))
                 {
                     Assert.True(traceLog.HasAsyncProfilerEvents);
-                    Assert.False(traceLog.IsAsyncCallStacksLoaded);
+                    Assert.False(traceLog.IsAsyncProfilerCallStacksLoaded);
                     Assert.Equal(StartQpc + 20,
-                        Assert.Single(traceLog.GetAsyncCallStacks(ProcessId, (ulong)OsThreadId, StartQpc + 15)).EndQpc);
-                    Assert.Empty(traceLog.GetAsyncCallStacks(ProcessId, (ulong)OsThreadId, StartQpc + 20));
-                    Assert.Empty(traceLog.GetAsyncCallStacks(ProcessId, (ulong)OsThreadId, StartQpc + 35));
-                    AsyncCallStack recovered = Assert.Single(traceLog.GetAsyncCallStacks(ProcessId, (ulong)OsThreadId, StartQpc + 45));
+                        Assert.Single(traceLog.GetAsyncProfilerCallStacks(ProcessId, (ulong)OsThreadId, StartQpc + 15)).EndQpc);
+                    Assert.Empty(traceLog.GetAsyncProfilerCallStacks(ProcessId, (ulong)OsThreadId, StartQpc + 20));
+                    Assert.Empty(traceLog.GetAsyncProfilerCallStacks(ProcessId, (ulong)OsThreadId, StartQpc + 35));
+                    AsyncProfilerCallStack recovered = Assert.Single(traceLog.GetAsyncProfilerCallStacks(ProcessId, (ulong)OsThreadId, StartQpc + 45));
                     Assert.Equal(0xBUL, recovered.Frames.MethodIdAt(0));
                     Assert.Equal(long.MaxValue, recovered.EndQpc);
-                    Assert.True(traceLog.ReleaseAsyncCallStacks());
-                    Assert.Empty(traceLog.GetAsyncCallStacks(ProcessId, (ulong)OsThreadId, StartQpc + 35));
+                    Assert.True(traceLog.ReleaseAsyncProfilerCallStacks());
+                    Assert.Empty(traceLog.GetAsyncProfilerCallStacks(ProcessId, (ulong)OsThreadId, StartQpc + 35));
                 }
             }
             finally
@@ -127,7 +128,7 @@ namespace TraceEventTests
         }
 
         [Fact]
-        public void EndToEnd_AsyncCallStacks_RoundTripThroughTraceLog()
+        public void EndToEnd_CallStacks_RoundTripThroughTraceLog()
         {
             const int ProcessId = 1234;
             const int OsThreadId = 5000;
@@ -169,7 +170,7 @@ namespace TraceEventTests
             long sampleQpc = StartQpc + 25;   // a CPU sample landing inside both nested async ranges
 
             var writer = new EventPipeWriterV6();
-            writer.WriteHeaders();
+            writer.WriteHeaders(null, syncTimeQpc: StartQpc);
             writer.WriteMetadataBlock(
                 new EventMetadata(1, AsyncProfilerTraceEventParser.ProviderName, "AsyncEvents", AsyncProfilerTraceEventParser.AsyncEventsEventId),
                 new EventMetadata(2, "TestSampleProfiler", "Sample", 1));
@@ -222,7 +223,41 @@ namespace TraceEventTests
                 using (var traceLog = new TraceLog(etlxPath))
                 {
                     Assert.True(traceLog.HasAsyncProfilerEvents);
-                    Assert.False(traceLog.IsAsyncCallStacksLoaded);
+                    Assert.False(traceLog.IsAsyncProfilerCallStacksLoaded);
+
+                    using (var symbols = new SymbolReader(TextWriter.Null))
+                    {
+                        foreach (bool enableAsyncCallStacks in new[] { false, true })
+                        {
+                            var sampleComputer = new SampleProfilerThreadTimeComputer(traceLog, symbols)
+                            {
+                                EnableAsyncCallStacks = enableAsyncCallStacks,
+                                IncludeEventSourceEvents = false,
+                            };
+                            Assert.False(sampleComputer.AsyncCallStacksActive);
+                            sampleComputer.GenerateThreadTimeStacks(new MutableTraceEventStackSource(traceLog));
+                            Assert.Equal(enableAsyncCallStacks, sampleComputer.AsyncCallStacksActive);
+                            Assert.Equal(enableAsyncCallStacks, traceLog.IsAsyncProfilerCallStacksLoaded);
+                            if (enableAsyncCallStacks)
+                            {
+                                Assert.True(traceLog.ReleaseAsyncProfilerCallStacks());
+                            }
+
+                            var threadTimeComputer = new ThreadTimeStackComputer(traceLog, symbols)
+                            {
+                                EnableAsyncCallStacks = enableAsyncCallStacks,
+                                IncludeEventSourceEvents = false,
+                            };
+                            Assert.False(threadTimeComputer.AsyncCallStacksActive);
+                            threadTimeComputer.GenerateThreadTimeStacks(new MutableTraceEventStackSource(traceLog));
+                            Assert.Equal(enableAsyncCallStacks, threadTimeComputer.AsyncCallStacksActive);
+                            Assert.Equal(enableAsyncCallStacks, traceLog.IsAsyncProfilerCallStacksLoaded);
+                            if (enableAsyncCallStacks)
+                            {
+                                Assert.True(traceLog.ReleaseAsyncProfilerCallStacks());
+                            }
+                        }
+                    }
 
                     // Find the CPU sample event's thread + QPC from the reopened ETLX. The raw AsyncEvents
                     // records are omitted by default because the persisted index supersedes them.
@@ -252,7 +287,7 @@ namespace TraceEventTests
                     Assert.Equal(sampleQpc, sampleEventQpc);
 
                     // The async call stacks active at the CPU sample's QPC: nested D1 (outer) + D2 (inner).
-                    IReadOnlyList<AsyncCallStack> nested = traceLog.GetAsyncCallStacks(sampleThreadIndex, sampleEventQpc);
+                    IReadOnlyList<AsyncProfilerCallStack> nested = traceLog.GetAsyncProfilerCallStacks(sampleThreadIndex, sampleEventQpc);
                     Assert.Equal(2, nested.Count);
                     Assert.Equal(0, nested[0].Depth);
                     Assert.Equal(1UL, nested[0].DispatcherId);
@@ -263,46 +298,46 @@ namespace TraceEventTests
 
                     Assert.Same(
                         nested[1],
-                        traceLog.GetAsyncCallStack(sampleThreadIndex, dispatcherId: 2, timeQPC: sampleEventQpc));
+                        traceLog.GetAsyncProfilerCallStack(sampleThreadIndex, dispatcherId: 2, timeQPC: sampleEventQpc));
                     Assert.Same(
                         nested[1],
-                        traceLog.GetAsyncCallStack(
+                        traceLog.GetAsyncProfilerCallStack(
                             ProcessId, (ulong)OsThreadId, dispatcherId: 2, timeQPC: sampleEventQpc));
 
-                    AsyncDispatcherCreation creation = traceLog.GetAsyncCallStackCreation(nested[1]);
-                    Assert.NotNull(creation);
-                    Assert.Equal(2UL, creation.ChildDispatcherId);
-                    Assert.Equal(1UL, creation.ParentDispatcherId);
-                    Assert.Equal(StartQpc + 18, creation.CreateQpc);
+                    AsyncProfilerDispatcherInfo dispatcher = traceLog.GetAsyncProfilerDispatcherInfo(nested[1]);
+                    Assert.NotNull(dispatcher);
+                    Assert.Equal(2UL, dispatcher.DispatcherId);
+                    Assert.Equal(1UL, dispatcher.ParentDispatcherId);
+                    Assert.Equal(StartQpc + 18, dispatcher.CreationQpc);
 
-                    Assert.True(traceLog.TryGetParentAsyncCallStack(
+                    Assert.True(traceLog.TryGetParentAsyncProfilerCallStack(
                         nested[1],
-                        out AsyncCallStack parent,
+                        out AsyncProfilerCallStack parent,
                         out long parentQpc));
                     Assert.Same(nested[0], parent);
                     Assert.Equal(StartQpc + 18, parentQpc);
-                    Assert.True(traceLog.AsyncMethodCompletionObserved(parent));
+                    Assert.True(traceLog.AsyncProfilerMethodCompletionObserved(parent));
                     Assert.Equal(1, parent.GetCompletedFrameCount(parentQpc));
-                    Assert.Same(parent, traceLog.GetParentAsyncCallStack(nested[1]));
-                    AsyncDispatcherCreation childCreation =
-                        Assert.Single(traceLog.GetChildAsyncCallStackCreations(parent));
-                    Assert.Equal(creation.Thread, childCreation.Thread);
-                    Assert.Equal(creation.ChildDispatcherId, childCreation.ChildDispatcherId);
-                    Assert.Equal(creation.ParentDispatcherId, childCreation.ParentDispatcherId);
-                    Assert.Equal(creation.CreateQpc, childCreation.CreateQpc);
+                    Assert.Same(parent, traceLog.GetParentAsyncProfilerCallStack(nested[1]));
+                    AsyncProfilerDispatcherInfo childDispatcher =
+                        Assert.Single(traceLog.GetChildAsyncProfilerDispatcherInfos(parent));
+                    Assert.Equal(dispatcher.CreationThread, childDispatcher.CreationThread);
+                    Assert.Equal(dispatcher.DispatcherId, childDispatcher.DispatcherId);
+                    Assert.Equal(dispatcher.ParentDispatcherId, childDispatcher.ParentDispatcherId);
+                    Assert.Equal(dispatcher.CreationQpc, childDispatcher.CreationQpc);
 
                     // Releasing the materialized index preserves already-returned immutable objects and makes the
                     // next public query transparently deserialize a fresh index from the deferred ETLX region.
-                    AsyncCallStack retainedOuter = nested[0];
-                    Assert.True(traceLog.IsAsyncCallStacksLoaded);
-                    Assert.True(traceLog.ReleaseAsyncCallStacks());
-                    Assert.False(traceLog.IsAsyncCallStacksLoaded);
+                    AsyncProfilerCallStack retainedOuter = nested[0];
+                    Assert.True(traceLog.IsAsyncProfilerCallStacksLoaded);
+                    Assert.True(traceLog.ReleaseAsyncProfilerCallStacks());
+                    Assert.False(traceLog.IsAsyncProfilerCallStacksLoaded);
                     Assert.Equal(new ulong[] { 0xA, 0xB }, MethodIds(retainedOuter.Frames));
 
-                    IReadOnlyList<AsyncCallStack> reloaded = traceLog.GetAsyncCallStacks(sampleThreadIndex, sampleEventQpc);
+                    IReadOnlyList<AsyncProfilerCallStack> reloaded = traceLog.GetAsyncProfilerCallStacks(sampleThreadIndex, sampleEventQpc);
                     Assert.Equal(2, reloaded.Count);
                     Assert.NotSame(retainedOuter, reloaded[0]);
-                    Assert.True(traceLog.IsAsyncCallStacksLoaded);
+                    Assert.True(traceLog.IsAsyncProfilerCallStacksLoaded);
 
                     // Release and reload are synchronized. A query that obtained the old index can finish while
                     // another caller releases it, and later callers load a complete replacement.
@@ -310,19 +345,19 @@ namespace TraceEventTests
                     {
                         if ((i & 3) == 0)
                         {
-                            traceLog.ReleaseAsyncCallStacks();
+                            traceLog.ReleaseAsyncProfilerCallStacks();
                         }
                         else
                         {
                             Assert.Equal(
                                 2,
-                                traceLog.GetAsyncCallStacks(sampleThreadIndex, sampleEventQpc).Count);
+                                traceLog.GetAsyncProfilerCallStacks(sampleThreadIndex, sampleEventQpc).Count);
                         }
                     });
-                    Assert.Equal(2, traceLog.GetAsyncCallStacks(sampleThreadIndex, sampleEventQpc).Count);
+                    Assert.Equal(2, traceLog.GetAsyncProfilerCallStacks(sampleThreadIndex, sampleEventQpc).Count);
 
                     // The (processId, osThreadId) overload resolves the same real thread identically.
-                    IReadOnlyList<AsyncCallStack> byId = traceLog.GetAsyncCallStacks(ProcessId, (ulong)OsThreadId, sampleEventQpc);
+                    IReadOnlyList<AsyncProfilerCallStack> byId = traceLog.GetAsyncProfilerCallStacks(ProcessId, (ulong)OsThreadId, sampleEventQpc);
                     Assert.Equal(2, byId.Count);
                     Assert.Equal(new ulong[] { 0xA, 0xB }, MethodIds(byId[0].Frames));
                     Assert.Equal(new ulong[] { 0xC }, MethodIds(byId[1].Frames));
@@ -330,18 +365,18 @@ namespace TraceEventTests
                     // The ghost thread has async data but no TraceThread, so the ThreadIndex-based lookup can't
                     // reach it, yet the (processId, osThreadId) overload can.
                     Assert.Equal(ThreadIndex.Invalid, ThreadIndexForOsThread(traceLog, GhostOsThreadId));
-                    IReadOnlyList<AsyncCallStack> ghost = traceLog.GetAsyncCallStacks(ProcessId, (ulong)GhostOsThreadId, StartQpc + 25);
+                    IReadOnlyList<AsyncProfilerCallStack> ghost = traceLog.GetAsyncProfilerCallStacks(ProcessId, (ulong)GhostOsThreadId, StartQpc + 25);
                     Assert.Single(ghost);
                     Assert.Equal(new ulong[] { 0xE, 0xF }, MethodIds(ghost[0].Frames));
 
                     // Only the outer D1 is active earlier; nothing after both suspend.
-                    Assert.Single(traceLog.GetAsyncCallStacks(sampleThreadIndex, StartQpc + 15));
-                    Assert.Empty(traceLog.GetAsyncCallStacks(sampleThreadIndex, StartQpc + 45));
+                    Assert.Single(traceLog.GetAsyncProfilerCallStacks(sampleThreadIndex, StartQpc + 15));
+                    Assert.Empty(traceLog.GetAsyncProfilerCallStacks(sampleThreadIndex, StartQpc + 45));
 
                     // An invalid thread yields nothing (both overloads).
-                    Assert.Empty(traceLog.GetAsyncCallStacks(ThreadIndex.Invalid, sampleEventQpc));
-                    Assert.Empty(traceLog.GetAsyncCallStacks(ProcessId, 999999, sampleEventQpc));
-                    Assert.Empty(traceLog.GetAsyncCallStacks(99999, (ulong)OsThreadId, sampleEventQpc));
+                    Assert.Empty(traceLog.GetAsyncProfilerCallStacks(ThreadIndex.Invalid, sampleEventQpc));
+                    Assert.Empty(traceLog.GetAsyncProfilerCallStacks(ProcessId, 999999, sampleEventQpc));
+                    Assert.Empty(traceLog.GetAsyncProfilerCallStacks(99999, (ulong)OsThreadId, sampleEventQpc));
                 }
 
                 preservedEtlxPath = nettracePath + ".preserved.etlx";
@@ -352,7 +387,7 @@ namespace TraceEventTests
                 using (var traceLog = new TraceLog(preservedEtlxPath))
                 {
                     Assert.True(traceLog.HasAsyncProfilerEvents);
-                    Assert.False(traceLog.IsAsyncCallStacksLoaded);
+                    Assert.False(traceLog.IsAsyncProfilerCallStacksLoaded);
 
                     int asyncEventsCount = 0;
                     foreach (TraceEvent e in traceLog.Events)
@@ -367,7 +402,7 @@ namespace TraceEventTests
                     Assert.Equal(2, asyncEventsCount);
                     Assert.Equal(
                         2,
-                        traceLog.GetAsyncCallStacks(ProcessId, (ulong)OsThreadId, sampleQpc).Count);
+                        traceLog.GetAsyncProfilerCallStacks(ProcessId, (ulong)OsThreadId, sampleQpc).Count);
                 }
             }
             finally
@@ -399,7 +434,7 @@ namespace TraceEventTests
             return ThreadIndex.Invalid;
         }
 
-        private static ulong[] MethodIds(AsyncCallStackFrames frames)
+        private static ulong[] MethodIds(AsyncProfilerCallStackFrames frames)
         {
             var ids = new ulong[frames.FrameCount];
             for (int i = 0; i < ids.Length; i++)

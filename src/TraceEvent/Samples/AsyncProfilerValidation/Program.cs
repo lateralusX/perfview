@@ -92,7 +92,7 @@ namespace AsyncProfilerValidation
                 SymbolPathEnvironment = Environment.GetEnvironmentVariable("_NT_SYMBOL_PATH"),
                 OnlyManagedCodeStacks = true,
                 IncludeEventSourceEvents = true,
-                EnableActiveAsyncFrameAnnotations = true,
+                EnableFrameAnnotations = true,
                 EnableContextAncestry = false
             });
 
@@ -119,7 +119,7 @@ namespace AsyncProfilerValidation
                 var source = new MutableTraceEventStackSource(log) { OnlyManagedCodeStacks = true };
                 var computer = CreateComputer(log, symbols, view);
                 computer.GenerateThreadTimeStacks(source);
-                if (view.Stitch && !computer.AsyncStitchActive)
+                if (view.EnableAsyncCallStacks && !computer.AsyncCallStacksActive)
                 {
                     throw new InvalidDataException("No usable async index initialized stitching; check producer, keywords, and flush timing.");
                 }
@@ -165,11 +165,11 @@ namespace AsyncProfilerValidation
                     Count = count,
                     Weight = weight,
                     TimestampMetricSha256 = digest,
-                    computer.AsyncStitchActive,
+                    computer.AsyncCallStacksActive,
                     computer.UseTasks,
                     computer.GroupByStartStopActivity,
                     SymbolPath = symbols.SymbolPath,
-                    Diagnostics = computer.AsyncStitchDiagnostics
+                    Diagnostics = computer.AsyncProfilerCallStackDiagnostics
                 });
                 Console.WriteLine($"{view.Name}: {count} samples, weight {weight:R}, timestamp/metric SHA-256 {digest}");
             }
@@ -236,7 +236,7 @@ namespace AsyncProfilerValidation
                         ThreadEndMSec = thread.EndTimeRelativeMSec,
                         CallStackIndex = (int)data.CallStackIndex(),
                         PhysicalFrames = physical,
-                        Activations = log.GetAsyncCallStacks(data).Select(a => ActivationInfo(log, a, qpc)).ToArray()
+                        Activations = log.GetAsyncProfilerCallStacks(data).Select(a => ActivationInfo(log, a, qpc)).ToArray()
                     });
                 };
                 events.Process();
@@ -254,15 +254,15 @@ namespace AsyncProfilerValidation
                 using var emitted = new StreamWriter(Path.Combine(output, view.Name + ".emitted.jsonl"));
                 var source = new MutableTraceEventStackSource(log) { OnlyManagedCodeStacks = true };
                 var computer = CreateComputer(log, symbols, view);
-                computer.TraceAsyncStitchSteps = true;
+                computer.TraceAsyncProfilerCallStackSteps = true;
                 int callbackCount = 0;
-                computer.AsyncStackTransforms.Add(context =>
+                computer.AsyncProfilerCallStackTransformPipeline.Add(context =>
                 {
                     if (context.Segments.Count == 0)
                     {
                         return;
                     }
-                    AsyncThreadKey owner = context.Segments[0].Thread;
+                    AsyncProfilerThreadKey owner = context.Segments[0].Thread;
                     if (!targets.TryGetValue((context.TimestampQpc, owner.ProcessIndex, owner.OsThreadId), out var indices))
                     {
                         return;
@@ -288,7 +288,7 @@ namespace AsyncProfilerValidation
                             SyncFrameKind = frame.SyncFrameKind.ToString(),
                             Presentation = frame.Presentation.ToString(),
                             Boundary = frame.CodeAddress == CodeAddressIndex.Invalid
-                                ? AsyncStitchBoundaryInfo.None : context.ClassifyBoundary(frame.CodeAddress)
+                                ? AsyncProfilerCallStackStitchBoundaryInfo.None : context.ClassifyBoundary(frame.CodeAddress)
                         }).ToArray(),
                         Diagnostics = context.Diagnostics
                     });
@@ -312,7 +312,7 @@ namespace AsyncProfilerValidation
                             FrameIndex = (int)frame,
                             Name = source.GetFrameName(frame, false),
                             Address = AddressInfo(log, source.GetFrameCodeAddress(frame)),
-                            Async = source.TryGetAsyncFrameInfo(frame, out var info) ? (object)info : null
+                            Async = source.TryGetAsyncProfilerCallStackFrameInfo(frame, out var info) ? (object)info : null
                         });
                     }
                     count++;
@@ -330,11 +330,11 @@ namespace AsyncProfilerValidation
                     view.Name,
                     EmittedTimestampCandidates = count,
                     TransformCallbacks = callbackCount,
-                    computer.AsyncStitchActive,
+                    computer.AsyncCallStacksActive,
                     computer.UseTasks,
                     computer.GroupByStartStopActivity,
                     SymbolPath = symbols.SymbolPath,
-                    Diagnostics = computer.AsyncStitchDiagnostics
+                    Diagnostics = computer.AsyncProfilerCallStackDiagnostics
                 });
             }
             WriteJson(Path.Combine(output, "probe.summary.json"), new
@@ -352,13 +352,15 @@ namespace AsyncProfilerValidation
         }
 
         private static SampleProfilerThreadTimeComputer CreateComputer(
-            TraceLog log, SymbolReader symbols, (string Name, bool Stitch, bool Conservative, bool Cleanup) view)
+            TraceLog log, SymbolReader symbols, (string Name, bool EnableAsyncCallStacks, bool EnableNormalization, bool EnableInfrastructureCleanup) view)
         {
-            var computer = new SampleProfilerThreadTimeComputer(log, symbols, view.Stitch);
-            computer.AsyncStackTransforms.EnableConservativeTransforms = view.Conservative;
-            computer.AsyncStackTransforms.EnableAsyncInfrastructureCleanup = view.Cleanup;
-            computer.AsyncStackTransforms.EnableActiveAsyncFrameAnnotations = true;
-            computer.AsyncStackTransforms.EnableContextAncestry = false;
+            var computer = new SampleProfilerThreadTimeComputer(log, symbols)
+            {
+                EnableAsyncCallStacks = view.EnableAsyncCallStacks,
+            };
+            computer.AsyncCallStackTransforms.EnableNormalization = view.EnableNormalization;
+            computer.AsyncCallStackTransforms.EnableInfrastructureCleanup = view.EnableInfrastructureCleanup;
+            computer.AsyncCallStackTransforms.EnableFrameAnnotations = true;
             return computer;
         }
 
@@ -378,7 +380,7 @@ namespace AsyncProfilerValidation
             };
         }
 
-        private static object ActivationIdentity(AsyncCallStack activation) =>
+        private static object ActivationIdentity(AsyncProfilerCallStack activation) =>
             activation == null ? null : new
             {
                 ProcessIndex = (int)activation.Thread.ProcessIndex,
@@ -391,22 +393,22 @@ namespace AsyncProfilerValidation
                 Kind = activation.Frames.Kind.ToString()
             };
 
-        private static object ActivationInfo(TraceLog log, AsyncCallStack activation, long qpc)
+        private static object ActivationInfo(TraceLog log, AsyncProfilerCallStack activation, long qpc)
         {
-            bool hasParent = log.TryGetParentAsyncCallStack(activation, out var parent, out long parentQpc);
+            bool hasParent = log.TryGetParentAsyncProfilerCallStack(activation, out var parent, out long parentQpc);
             return new
             {
                 Identity = ActivationIdentity(activation),
                 activation.ContinuationIndexBase,
                 activation.WrapperCount,
-                MethodCompletionObserved = log.AsyncMethodCompletionObserved(activation),
+                MethodCompletionObserved = log.AsyncProfilerMethodCompletionObserved(activation),
                 MethodCompleted = activation.GetMethodCompletedFrameCount(qpc),
                 ExceptionCompleted = activation.GetExceptionCompletedFrameCount(qpc),
                 RecordedCompleted = activation.GetCompletedFrameCount(qpc),
                 WrapperResets = activation.GetWrapperResetCount(qpc),
-                Creation = log.GetAsyncCallStackCreation(activation),
+                DispatcherInfo = log.GetAsyncProfilerDispatcherInfo(activation),
                 Parent = hasParent ? new { TimestampQpc = parentQpc, Identity = ActivationIdentity(parent) } : null,
-                Children = log.GetChildAsyncCallStackCreations(activation).ToArray(),
+                Children = log.GetChildAsyncProfilerDispatcherInfos(activation).ToArray(),
                 Frames = Enumerable.Range(0, activation.Frames.FrameCount).Select(i => new
                 {
                     Ordinal = i,
@@ -483,7 +485,7 @@ namespace AsyncProfilerValidation
         }
 
         private static readonly JsonSerializerOptions s_jsonOptions = new JsonSerializerOptions { IncludeFields = true };
-        private static readonly (string Name, bool Stitch, bool Conservative, bool Cleanup)[] s_views =
+        private static readonly (string Name, bool EnableAsyncCallStacks, bool EnableNormalization, bool EnableInfrastructureCleanup)[] s_views =
         {
             ("raw", false, false, false),
             ("structural", true, false, false),

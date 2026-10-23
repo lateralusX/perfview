@@ -37,27 +37,11 @@ namespace Microsoft.Diagnostics.Tracing
         /// Create a new ThreadTimeComputer
         /// </summary>
         public ThreadTimeStackComputer(TraceLog eventLog, SymbolReader symbolReader)
-            : this(eventLog, symbolReader, false)
-        {
-        }
-
-        /// <summary>
-        /// Create a new ThreadTimeComputer, optionally stitching async-profiler ancestry into CPU and wait stacks.
-        /// </summary>
-        /// <param name="eventLog">The trace to compute stacks over.</param>
-        /// <param name="symbolReader">Used to resolve managed method symbols.</param>
-        /// <param name="stitchAsyncCallStacks">
-        /// Opt-in: when true and a usable async index exists, physical stacks with active async intervals use
-        /// <see cref="AsyncCpuStackStitcher"/> instead of the normal activity/TPL reconstruction, retaining the
-        /// configured thread/process or request roots. Stacks without usable async data keep existing behavior.
-        /// The two-argument constructor leaves this disabled; configure <see cref="AsyncStackTransforms"/> before generation.
-        /// </param>
-        public ThreadTimeStackComputer(TraceLog eventLog, SymbolReader symbolReader, bool stitchAsyncCallStacks)
         {
             m_eventLog = eventLog;
             m_symbolReader = symbolReader;
-            m_stitchAsyncCallStacks = stitchAsyncCallStacks;
-            AsyncStackTransforms = new AsyncStackTransformPipeline();
+            AsyncProfilerCallStackTransformPipeline = new AsyncProfilerCallStackTransformPipeline();
+            AsyncCallStackTransforms = new AsyncCallStackTransforms(AsyncProfilerCallStackTransformPipeline);
 
             m_threadState = new ThreadState[eventLog.Threads.Count];
             for (int i = 0; i < m_threadState.Length; i++)
@@ -117,32 +101,39 @@ namespace Microsoft.Diagnostics.Tracing
         public bool GroupByStartStopActivity;
 
         /// <summary>
-        /// True after generation initializes requested async stitching with a usable async index. Does not
-        /// guarantee a sampled stack matched an activation; consult <see cref="AsyncStitchDiagnostics"/>.
-        /// <see cref="TraceLog.HasAsyncProfilerEvents"/> alone is not sufficient to make this true.
+        /// Enables async-profiler reconstruction of CPU and wait call stacks when a usable index exists. Disabled
+        /// by default; configure before <see cref="GenerateThreadTimeStacks"/>. Stacks without usable async context
+        /// retain their normal behavior. This does not control trace conversion, event parsing, or index construction.
         /// </summary>
-        public bool AsyncStitchActive => m_asyncStackSourceBuilder != null;
+        public bool EnableAsyncCallStacks { get; set; }
 
         /// <summary>
-        /// Ordered presentation transforms applied to stitched CPU and wait stacks before StackSource interning.
-        /// Conservative normalization is enabled by default; async-infrastructure cleanup, context ancestry, and active
-        /// frame annotations are opt-in. Custom transforms run last. Configure before stack generation;
-        /// samples without active async intervals do not enter this pipeline.
+        /// True after generation initializes requested async call stacks with a usable index. Does not guarantee
+        /// that any particular stack matched an async activation. False before generation or when async call
+        /// stacks were disabled or no usable index exists.
         /// </summary>
-        public AsyncStackTransformPipeline AsyncStackTransforms { get; }
+        public bool AsyncCallStacksActive => m_asyncProfilerCallStackSourceBuilder != null;
 
         /// <summary>
-        /// Aggregate diagnostics from stitched CPU and wait stacks, or null when stitching was inactive.
-        /// Counters include normal stitching, fallback, and presentation activity as well as anomalies.
+        /// Presentation settings for reconstructed async call stacks. Configure this object before
+        /// <see cref="GenerateThreadTimeStacks"/>. Stacks without usable async context are not transformed.
+        /// </summary>
+        public AsyncCallStackTransforms AsyncCallStackTransforms { get; }
+
+        internal AsyncProfilerCallStackTransformPipeline AsyncProfilerCallStackTransformPipeline { get; }
+
+        /// <summary>
+        /// Aggregate diagnostics from reconstructed CPU and wait stacks, or null when async call stacks were inactive.
+        /// Counters include normal reconstruction, fallback, and presentation activity as well as anomalies.
         /// Messages are bounded.
         /// </summary>
-        public StitchDiagnostics AsyncStitchDiagnostics => m_asyncStackSourceBuilder?.Diagnostics;
+        internal AsyncProfilerCallStackDiagnostics AsyncProfilerCallStackDiagnostics => m_asyncProfilerCallStackSourceBuilder?.Diagnostics;
 
         /// <summary>
-        /// Emit per-segment stitch details into <see cref="AsyncStitchDiagnostics"/>'s bounded messages.
+        /// Emit per-segment reconstruction details into <see cref="AsyncProfilerCallStackDiagnostics"/>'s bounded messages.
         /// Disabled by default; configure before generation.
         /// </summary>
-        public bool TraceAsyncStitchSteps { get; set; }
+        internal bool TraceAsyncProfilerCallStackSteps { get; set; }
 
         /// <summary>
         /// Reduce nested application insights requests by using related activity id.
@@ -467,7 +458,7 @@ namespace Microsoft.Diagnostics.Tracing
             eventSource.Kernel.TcpIpRecv += OnTcIpRecv;
             eventSource.Kernel.MemoryHardFault += OnHardFault;
 
-            InitializeAsyncStitchingIfRequested();
+            InitializeAsyncProfilerCallStacksIfRequested();
             eventSource.Process();
 
             var endSessionRelativeMSec = m_eventLog.SessionDuration.TotalMilliseconds;
@@ -506,7 +497,7 @@ namespace Microsoft.Diagnostics.Tracing
 
             m_outputStackSource.DoneAddingSamples();
             m_threadState = null;
-            m_asyncStackSourceBuilder?.ClearResources();
+            m_asyncProfilerCallStackSourceBuilder?.ClearResources();
         }
 
         private void InitializeForUniversal()
@@ -707,7 +698,7 @@ namespace Microsoft.Diagnostics.Tracing
                 TraceThread newThread = data.Thread();
                 if (newThread != null)
                 {
-                    StackSourceCallStackIndex stackIndex = GetCallStack(data, newThread, allowAsyncStitching: true);
+                    StackSourceCallStackIndex stackIndex = GetCallStack(data, newThread, enableAsyncCallStacks: true);
                     m_threadState[(int)newThread.ThreadIndex].LogBlockingEnd(
                         data.TimeStampRelativeMSec, data.ProcessorNumber, stackIndex, newThread, this);
                 }
@@ -747,7 +738,7 @@ namespace Microsoft.Diagnostics.Tracing
             if (thread != null)
             {
                 bool isCpuSample = data is SampledProfileTraceData;
-                StackSourceCallStackIndex stackIndex = GetCallStack(data, thread, allowAsyncStitching: isCpuSample);
+                StackSourceCallStackIndex stackIndex = GetCallStack(data, thread, enableAsyncCallStacks: isCpuSample);
                 m_threadState[(int)thread.ThreadIndex].LogCPUStack(data.TimeStampRelativeMSec, stackIndex, thread, this, isCpuSample);
             }
             else
@@ -770,7 +761,7 @@ namespace Microsoft.Diagnostics.Tracing
             }
 
             // Get the blocking stack.
-            StackSourceCallStackIndex stackIndex = GetCallStack(data, thread, allowAsyncStitching: true);
+            StackSourceCallStackIndex stackIndex = GetCallStack(data, thread, enableAsyncCallStacks: true);
 
             // If the thread wasn't previously marked as blocked, then mark it.
             if (!m_threadState[(int)thread.ThreadIndex].ThreadBlocked)
@@ -826,7 +817,7 @@ namespace Microsoft.Diagnostics.Tracing
                 }
             }
 
-            StackSourceCallStackIndex stackIndex = GetCallStack(data, thread, allowAsyncStitching: true);
+            StackSourceCallStackIndex stackIndex = GetCallStack(data, thread, enableAsyncCallStacks: true);
             m_threadState[(int)thread.ThreadIndex].LogCPUStack(
                 data.TimeStampRelativeMSec,
                 stackIndex,
@@ -948,13 +939,13 @@ namespace Microsoft.Diagnostics.Tracing
         private StackSourceCallStackIndex GetCallStack(
             TraceEvent data,
             TraceThread thread,
-            bool allowAsyncStitching = false)
+            bool enableAsyncCallStacks = false)
         {
             Debug.Assert(data.Thread() == thread);
 
-            if (allowAsyncStitching &&
-                m_asyncStackSourceBuilder != null &&
-                m_asyncStackSourceBuilder.TryGetStitchedCallStack(
+            if (enableAsyncCallStacks &&
+                m_asyncProfilerCallStackSourceBuilder != null &&
+                m_asyncProfilerCallStackSourceBuilder.TryGetCallStack(
                     data, thread, out StackSourceCallStackIndex stitched))
             {
                 return stitched;
@@ -983,25 +974,25 @@ namespace Microsoft.Diagnostics.Tracing
             return ret;
         }
 
-        private void InitializeAsyncStitchingIfRequested()
+        private void InitializeAsyncProfilerCallStacksIfRequested()
         {
-            if (!m_stitchAsyncCallStacks)
+            if (!EnableAsyncCallStacks)
             {
                 return;
             }
 
-            m_asyncStackSourceBuilder = AsyncCpuStackSourceBuilder.TryCreate(
+            m_asyncProfilerCallStackSourceBuilder = AsyncProfilerCallStackSourceBuilder.TryCreate(
                 m_eventLog,
                 m_outputStackSource,
-                AsyncStackTransforms,
-                GetAsyncStitchRoot);
-            if (m_asyncStackSourceBuilder != null)
+                AsyncProfilerCallStackTransformPipeline,
+                GetAsyncProfilerCallStackRoot);
+            if (m_asyncProfilerCallStackSourceBuilder != null)
             {
-                m_asyncStackSourceBuilder.TraceSteps = TraceAsyncStitchSteps;
+                m_asyncProfilerCallStackSourceBuilder.TraceSteps = TraceAsyncProfilerCallStackSteps;
             }
         }
 
-        private StackSourceCallStackIndex GetAsyncStitchRoot(TraceEvent data, TraceThread thread)
+        private StackSourceCallStackIndex GetAsyncProfilerCallStackRoot(TraceEvent data, TraceThread thread)
         {
             if (GroupByAspNetRequest)
             {
@@ -1578,8 +1569,7 @@ namespace Microsoft.Diagnostics.Tracing
         private MutableTraceEventStackSource m_outputStackSource; // The output source we are generating. 
         private TraceLog m_eventLog;                        // The event log associated with m_stackSource.  
         private SymbolReader m_symbolReader;
-        private readonly bool m_stitchAsyncCallStacks;
-        private AsyncCpuStackSourceBuilder m_asyncStackSourceBuilder;
+        private AsyncProfilerCallStackSourceBuilder m_asyncProfilerCallStackSourceBuilder;
 
         // These are boring caches of frame names which speed things up a bit.  
         private Dictionary<double, StackSourceFrameIndex> m_nodeNameInternTable;

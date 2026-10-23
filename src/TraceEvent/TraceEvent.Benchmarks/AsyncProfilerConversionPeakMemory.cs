@@ -14,7 +14,7 @@ namespace TraceEventBenchmarks
             using (AsyncProfilerEndToEndFixture fixture =
                 AsyncProfilerEndToEndFixture.Create(profile, AsyncProfilerKindMode.V2Only))
             {
-                fixture.WriteNettrace(fixture.NetTracePath, includeAsyncProfilerData: true);
+                fixture.WriteNettrace(fixture.NetTracePath, includeProfilerData: true);
                 CollectGarbage();
 
                 using (var process = Process.GetCurrentProcess())

@@ -590,6 +590,29 @@ Source paths below are relative to `src\TraceEvent`. Public API names are
 distinguished from internal implementation components. The runtime's emission
 code remains the authority for the captured wire format.
 
+The supported public async API is limited to the two stack computers:
+`EnableAsyncCallStacks`, `AsyncCallStacksActive`, and the getter-only
+`AsyncCallStackTransforms` settings object. The parser, activation/index
+queries, stitcher, transform pipeline/callbacks, diagnostics, and emitted
+provenance hooks described below are **internal implementation APIs**. They
+are documented for repository development and the signed validation helper,
+not as extension points for external consumers. See section 10 for public usage.
+
+Use `AsyncProfiler` qualification where the enclosing scope does not already
+identify the feature. Top-level profiler-owned types in general namespaces keep
+the prefix, as do profiler-specific members and backing fields on general-purpose
+types such as `TraceLog` and the stack computers.
+Inside a profiler-specific type or namespace, use concise role names instead:
+`AsyncProfilerCallStacksIndex.CallStacksIntervalIndex` and
+`AsyncProfilerCallStacksIndex.GetCallStacks`, even though the latter returns
+`IReadOnlyList<AsyncProfilerCallStack>`. Apply the same scope rule to helpers,
+backing fields, parameters, and locals rather than repeating the owner's prefix.
+Public feature controls and `AsyncCallStackTransforms` retain their
+feature-oriented names, as do private configuration aliases that mirror those
+controls (`enableAsyncCallStacks` and `view.EnableAsyncCallStacks`).
+The parser's `AsyncProfiler` namespace follows the same rule. Wire-format
+identifiers and runtime method-name contracts retain their actual emitted names.
+
 ## 1. End-to-end architecture
 
 The design separates **recorded evidence**, **structural reconstruction**, and
@@ -610,7 +633,7 @@ AsyncProfilerComputer                       TraceLog code-address tables
   completions / wrapper resets / creates ----+
         |
         v
-AsyncCallStacksIndex
+AsyncProfilerCallStacksIndex
   finalized intervals + interned frames + timelines + creation relationships
         |
         v
@@ -622,11 +645,11 @@ SampleProfilerThreadTimeComputer or ThreadTimeStackComputer
   event's physical stack + active intervals at the event's exact QPC
         |
         v
-AsyncCpuStackSourceBuilder (internal)
+AsyncProfilerCallStackSourceBuilder (internal)
   materialize/classify physical frames and canonicalize method identities
-  -> AsyncCpuStackStitcher: mandatory structural reconstruction
+  -> AsyncProfilerCallStackStitcher: mandatory structural reconstruction
   -> optional historical creation-parent ancestry
-  -> AsyncStackTransformPipeline: enabled built-ins, then custom transforms
+  -> AsyncProfilerCallStackTransformPipeline: enabled built-ins, then custom transforms
   -> intern frames, attach role metadata, preserve the host's root policy
         |
         v
@@ -649,12 +672,12 @@ completion, and historical ancestry.
 | Object | Meaning |
 |---|---|
 | `AsyncCallstackKind` | V1 `StateMachineAsync` or V2 `RuntimeAsync` instrumentation, not a serialization version. |
-| `AsyncThreadKey` | A unique trace `ProcessIndex` plus the OS thread ID from the batch header. A reusable OS PID is not the key. |
-| `AsyncCallStack` | One resume interval on a thread, with dispatcher ID, nesting depth, frame-list reference, and progress timelines. The same dispatcher can have multiple activations. |
-| `AsyncCallStackFrames` | An interned, leaf-first frame list. Both kinds carry native IPs; V1 also carries raw signed compiler states. |
-| `AsyncDispatcherCreation` | Recorded child/parent dispatcher relationship at a creation QPC; not a complete synchronous call path. |
-| `StitchedFrame` | One reconstructed frame, with physical/logical identity, origin, activation context, and presentation request. |
-| `AsyncStackSourceFrameInfo` | Async identity and role retained on a generated stack-source frame, independently of its displayed name. |
+| `AsyncProfilerThreadKey` | A unique trace `ProcessIndex` plus the OS thread ID from the batch header. A reusable OS PID is not the key. |
+| `AsyncProfilerCallStack` | One resume interval on a thread, with dispatcher ID, nesting depth, frame-list reference, and progress timelines. The same dispatcher can have multiple activations. |
+| `AsyncProfilerCallStackFrames` | An interned, leaf-first frame list. Both kinds carry native IPs; V1 also carries raw signed compiler states. |
+| `AsyncProfilerDispatcherInfo` | Recorded dispatcher metadata: ID, parent ID, and creation thread/QPC; not a complete synchronous call path. |
+| `AsyncProfilerStitchedFrame` | One reconstructed frame, with physical/logical identity, origin, activation context, and presentation request. |
+| `AsyncProfilerCallStackSourceFrameInfo` | Async identity and role retained on a generated stack-source frame, independently of its displayed name. |
 
 Frame lists are leaf-to-root. Active-interval queries return activations in the
 opposite direction: outermost-to-innermost, in ascending `Depth`.
@@ -678,10 +701,10 @@ using Microsoft.Diagnostics.Tracing.Stacks;
 | Dimension | Current contract |
 |---|---|
 | Instrumentation family | V1 classic state machines versus V2 runtime-async continuations; both can occur in one process and one nested execution stack. |
-| Outer batch layout | `AsyncProfilerBufferHeader`, currently version 1 and 37 bytes. |
-| Logical-event schema | Per-event version and payload-length-prefix width advertised in `AsyncProfilerManifest`. |
+| Outer batch layout | `BufferHeader`, currently version 1 and 37 bytes. |
+| Logical-event schema | Per-event version and payload-length-prefix width advertised in `Manifest`. |
 | ETLX serialization | `TraceLog` currently requires ETLX version 78 for both reader and writer compatibility. |
-| Async-index serialization | Internal `AsyncCallStacksIndex` serialization version, currently 1; not a separately promised interchange format. |
+| Async-index serialization | Internal `AsyncProfilerCallStacksIndex` serialization version, currently 1; not a separately promised interchange format. |
 | Captured runtime profile | Implementation-dependent layout rules selected from captured CoreLib/module information, not the analyzer's runtime version. |
 
 `MethodIdAt(i)` and `AsyncCallstackEvent.MethodIds[i]` are native code IPs for
@@ -691,7 +714,7 @@ V1 state is neither an IL offset nor a native offset and must not be added to
 an IP to obtain an address.
 
 `CodeAddressIndex`, `MethodIndex`, `ThreadIndex`, and `ProcessIndex` belong to
-their originating trace. `AsyncCallStackFramesIndex` belongs to its async
+their originating trace. `AsyncProfilerCallStackFramesIndex` belongs to its async
 index; `StackSourceFrameIndex` belongs to its stack source. Neither integer
 equality across traces nor equal displayed names establish identity.
 
@@ -709,16 +732,16 @@ in-trace QPC matching.
 `Microsoft.Diagnostics.Tracing.Parsers`. Payload types and decoding helpers
 are in `Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler`.
 
-| Public API | Purpose |
+| Internal API | Purpose |
 |---|---|
 | `new AsyncProfilerTraceEventParser(TraceEventSource source)` | Register the parser against a raw source or an ETLX event source. |
-| `AsyncEvents` event, `Action<AsyncEventsTraceData>` | Observe the original batch. `Length` is the outer payload length; `Buffer` returns its byte array. |
+| `AsyncEvents` event, `Action<AsyncProfilerTraceEvent>` | Observe the original batch. `Length` is the outer payload length; `Buffer` returns its byte array. |
 | `ProviderName`, `ProviderGuid`, `AsyncEventsEventId` | Identify `System.Runtime.CompilerServices.AsyncProfilerEventSource`, event 1. |
-| `ParseBuffer(byte[] buffer, IAsyncProfilerSubEventSink sink)` | Decode one buffer using fresh built-in manifest defaults. |
-| `ParseBuffer(byte[] buffer, AsyncProfilerManifest manifest, IAsyncProfilerSubEventSink sink)` | Decode while retaining the process instance's manifest across buffers. |
-| `AsyncProfilerBufferHeader.TryRead(...)` | Read the fixed header; full buffer/event-boundary validation belongs to `ParseBuffer`. |
-| `AsyncProfilerManifest.GetVersion(...)`, `GetPayloadLengthFieldSize(...)`, `Apply(...)` | Inspect/update the live event-framing table. Unlisted entries retain their previous values. |
-| `AsyncEventInfo` and `AsyncProfilerReader` | Default event classifications and fixed-width/LEB128/zigzag readers for low-level consumers. |
+| `ParseBuffer(byte[] buffer, ISubEventSink sink)` | Decode one buffer using fresh built-in manifest defaults. |
+| `ParseBuffer(byte[] buffer, Manifest manifest, ISubEventSink sink)` | Decode while retaining the process instance's manifest across buffers. |
+| `BufferHeader.TryRead(...)` | Read the fixed header; full buffer/event-boundary validation belongs to `ParseBuffer`. |
+| `Manifest.GetVersion(...)`, `GetPayloadLengthFieldSize(...)`, `Apply(...)` | Inspect/update the live event-framing table. Unlisted entries retain their previous values. |
+| `AsyncEventInfo` and `BufferReader` | Default event classifications and fixed-width/LEB128/zigzag readers for low-level consumers. |
 
 Each outer EventSource payload contains a length followed by a batch. Its
 header identifies the emitting OS thread and the batch's QPC range. Logical
@@ -740,7 +763,7 @@ buffers, not arbitrary multi-buffer streams with manifest changes.
 
 ### Typed sink contract
 
-`IAsyncProfilerSubEventSink` receives synchronous `in`-parameter callbacks:
+`ISubEventSink` receives synchronous `in`-parameter callbacks:
 
 | Callbacks | Payload and meaning |
 |---|---|
@@ -751,7 +774,7 @@ buffers, not arbitrary multi-buffer streams with manifest changes.
 | `OnResetThreadContext`, `OnResetContinuationWrapperIndex` | `AsyncNeutralEvent`: thread re-synchronization or wrapper progress. |
 | `OnMetadata`, `OnSyncClock` | `AsyncMetadataEvent` / `AsyncSyncClockEvent`: manifest, wrapper count, and clock correlation. |
 | `OnUnknown` | `AsyncUnknownEvent`: unknown event identity and payload length. |
-| `OnParseError` | `AsyncProfilerParseError`: message, byte offset, and any known header, QPC, and event ID. |
+| `OnParseError` | `ParseError`: message, byte offset, and any known header, QPC, and event ID. |
 
 Logical IDs 1-10 are V2, 11-19 are V1, and 20-23 are neutral. They are not
 expanded into individually enumerable `TraceEvent` records. The raw
@@ -767,21 +790,21 @@ resolution. A zero-frame record must not be assumed to reconstruct ancestry.
 
 ## 4. Building activation state
 
-**Public type:** `Microsoft.Diagnostics.Tracing.Computers.AsyncProfilerComputer`.
+**Internal type:** `Microsoft.Diagnostics.Tracing.Computers.AsyncProfilerComputer`.
 
-| Public API | Contract |
+| Internal API | Contract |
 |---|---|
-| `new AsyncProfilerComputer()` | Standalone computer, driven by the caller. The parser-binding constructor used by TraceLog is internal. |
+| `new AsyncProfilerComputer()` | Standalone internal computer, driven by repository code. TraceLog uses its parser-binding constructor. |
 | `Process(byte[] buffer)` | Process one batch in the default process instance, index 0. Use only for a single logical process. |
 | `Process(byte[] buffer, ProcessIndex processIndex)` | Keep manifests, metadata, recovery, and thread state isolated by process instance. |
 | `Finish()` | Finalize still-open activations after the stream; call once after processing all buffers. |
-| `Index`, `DistinctFramesCount`, `GetFrames(...)`, `GetAsyncCallStacks(AsyncThreadKey, long)` | Access/query finalized state. Open builders are not point-query results until committed. |
+| `Index`, `DistinctFramesCount`, `GetFrames(...)`, `GetCallStacks(AsyncProfilerThreadKey, long)` | Access/query finalized state. Open builders are not point-query results until committed. |
 | `ParseError` event and `ParseErrorCount` | Observe decode failures and the affected process instance. |
 | `OnFrameObserved` | `Action<ProcessIndex, ulong, AsyncCallstackKind>` invoked for nonzero IPs in accepted resume/append records, before final interning. |
 | `ClockKnown`, `WrapperCount`, `QpcToDateTime(long)` | Clock/wrapper helpers for default process index 0. |
 | `ClockKnownForProcess(...)`, `GetWrapperCount(...)`, `QpcToDateTime(ProcessIndex, long)` | Process-specific variants. UTC conversion returns null without usable clock metadata. |
 
-For direct raw-source use, subscribe to `parser.AsyncEvents` and call
+For in-repository raw-source investigations, subscribe to `parser.AsyncEvents` and call
 `computer.Process(data.Buffer, processIndexOf(data))`. The caller must supply
 a stable process-instance mapping, not cast an OS PID to `ProcessIndex`.
 Call `source.Process()` and then `computer.Finish()`. TraceLog performs this
@@ -828,12 +851,12 @@ require fresh metadata before resets can re-arm the process. Finalized
 intervals and other processes remain intact.
 
 TraceLog writes bounded individual warnings and a failure-count summary to
-`TraceLogOptions.ConversionLog`. Save that log: the public TraceLog query API
-does not expose the building computer's `ParseErrorCount` afterward.
+`TraceLogOptions.ConversionLog`. Save that log: the building computer's
+`ParseErrorCount` is not exposed publicly afterward.
 
 ## 5. Interning, symbolization, persistence, and memory
 
-**Implementation:** `AsyncCallStacksIndex`, its compact per-thread records,
+**Implementation:** `AsyncProfilerCallStacksIndex`, its compact per-thread records,
 and the async integration in `TraceLog.CopyRawEvents`.
 
 Frame interning keys include process instance, instrumentation kind, IP
@@ -857,7 +880,7 @@ The index persists frame lists, interval records, completion/reset timelines,
 completion-availability epochs, and dispatcher creations. In-memory builders,
 decoder scratch arrays, and point-query interval trees are not serialized.
 Construction uses chunked compact records; loading allocates records from the
-stored counts. Public activation objects are materialized when queried.
+stored counts. Stable activation objects are materialized when queried.
 Each thread's start-sorted, max-end-augmented interval tree is built lazily.
 
 Use `TraceLog.CreateFromEventPipeDataFile(...)` for EventPipe captures or
@@ -867,17 +890,19 @@ These conversion paths install the async parser/computer automatically;
 ordinary TraceLog consumers do not instantiate a second computer to rebuild
 the persisted index.
 
-| Public TraceLog API/option | Meaning |
+| Internal TraceLog API/option (except existing `KeepAllEvents`) | Meaning |
 |---|---|
 | `HasAsyncProfilerEvents` | Cheap event-presence check from persisted statistics; does not load the index. Metadata-only or malformed data can make it true. |
 | `TraceLogOptions.KeepAsyncProfilerEvents` | Default false. Retain raw batches in ETLX for inspection or later re-decoding. Does not gate index construction. |
 | `TraceLogOptions.KeepAllEvents` | Also preserves the raw batches. |
 | Async query methods | Load the deferred index on demand. Missing usable intervals produce empty/null results. |
-| `ReleaseAsyncCallStacks()` | Drop TraceLog's loaded index reference when reloadable ETLX backing exists; return true if released, otherwise false. A later query reloads it without replaying raw events. |
+| `ReleaseAsyncProfilerCallStacks()` | Drop TraceLog's loaded index reference when reloadable ETLX backing exists; return true if released, otherwise false. A later query reloads it without replaying raw events. |
 
-`TraceLog.AsyncCallStacks` and `IsAsyncCallStacksLoaded` are **internal**.
-External callers use the public query methods, not access to that field.
-Returned public activations remain valid across later queries and release;
+`TraceLog.AsyncProfilerCallStacks`, `IsAsyncProfilerCallStacksLoaded`, the async query methods,
+and the async-specific options above are **internal**. External consumers use
+the stack computers, which load the index only when async call stacks are
+enabled. Disabling them does not skip conversion-time parsing/index construction.
+Returned stable activations remain valid across later queries and release;
 retained results can keep backing data alive. Keep the originating TraceLog
 open for code-address, symbol, or source lookup. Release does not unload its
 code-address/symbol tables.
@@ -888,23 +913,24 @@ stack sources when only stitching/presentation policy changes. Do not assume
 that an older development cache is compatible merely because its filename or
 an unchanged internal version number looks familiar.
 
-## 6. Public activation and relationship queries
+## 6. Internal activation and relationship queries
 
-The usual consumer entry point is
-`Microsoft.Diagnostics.Tracing.Etlx.TraceLog`.
+The internal query entry point is
+`Microsoft.Diagnostics.Tracing.Etlx.TraceLog`. These methods are available to
+the library and signed development friends, not external consumers.
 
 ### Returned data objects
 
-`AsyncCallStack` and `AsyncCallStackFrames` are produced by the computer/index,
-not constructed directly by application callers.
+`AsyncProfilerCallStack` and `AsyncProfilerCallStackFrames` are produced by the computer/index,
+not constructed directly by callers.
 
-| Public members | Meaning |
+| Internal model members | Meaning |
 |---|---|
-| `AsyncCallStack.Thread`, `DispatcherId`, `Depth` | Process/thread identity, dispatcher identity, and nesting depth for this activation. |
+| `AsyncProfilerCallStack.Thread`, `DispatcherId`, `Depth` | Process/thread identity, dispatcher identity, and nesting depth for this activation. |
 | `FramesIndex`, `Frames` | Index-scoped handle and the interned frame-list object. |
 | `StartQpc`, `EndQpc` | Inclusive start and exclusive end in the trace QPC domain. |
 | `ContinuationIndexBase`, `WrapperCount` | Wrapper position captured at resume and the activation's wrapper-pool size. |
-| `AsyncCallStackFrames.Kind`, `FrameCount` | Instrumentation family and number of leaf-first frames. |
+| `AsyncProfilerCallStackFrames.Kind`, `FrameCount` | Instrumentation family and number of leaf-first frames. |
 | `MethodIdAt(int)`, `FrameStateAt(int)`, `CodeAddressAt(int)` | Captured IP, captured V1 state, and registered TraceLog address reference. |
 
 ### Active intervals
@@ -912,14 +938,14 @@ not constructed directly by application callers.
 The following are the current overloads (return types shown):
 
 ```csharp
-IReadOnlyList<AsyncCallStack> GetAsyncCallStacks(TraceEvent anchorEvent);
-IReadOnlyList<AsyncCallStack> GetAsyncCallStacks(ThreadIndex threadIndex, long timeQPC);
-IReadOnlyList<AsyncCallStack> GetAsyncCallStacks(ThreadIndex threadIndex, double timeRelativeMSec);
-IReadOnlyList<AsyncCallStack> GetAsyncCallStacks(int processId, ulong osThreadId, long timeQPC);
-IReadOnlyList<AsyncCallStack> GetAsyncCallStacks(int processId, ulong osThreadId, double timeRelativeMSec);
+IReadOnlyList<AsyncProfilerCallStack> GetAsyncProfilerCallStacks(TraceEvent anchorEvent);
+IReadOnlyList<AsyncProfilerCallStack> GetAsyncProfilerCallStacks(ThreadIndex threadIndex, long timeQPC);
+IReadOnlyList<AsyncProfilerCallStack> GetAsyncProfilerCallStacks(ThreadIndex threadIndex, double timeRelativeMSec);
+IReadOnlyList<AsyncProfilerCallStack> GetAsyncProfilerCallStacks(int processId, ulong osThreadId, long timeQPC);
+IReadOnlyList<AsyncProfilerCallStack> GetAsyncProfilerCallStacks(int processId, ulong osThreadId, double timeRelativeMSec);
 
-AsyncCallStack GetAsyncCallStack(ThreadIndex threadIndex, ulong dispatcherId, long timeQPC);
-AsyncCallStack GetAsyncCallStack(int processId, ulong osThreadId, ulong dispatcherId, long timeQPC);
+AsyncProfilerCallStack GetAsyncProfilerCallStack(ThreadIndex threadIndex, ulong dispatcherId, long timeQPC);
+AsyncProfilerCallStack GetAsyncProfilerCallStack(int processId, ulong osThreadId, ulong dispatcherId, long timeQPC);
 ```
 
 Point queries use `StartQpc <= qpc && qpc < EndQpc`, with outermost activation
@@ -942,10 +968,10 @@ For example, inside enumeration of a sample event, with `log` and `sample`
 from the same trace:
 
 ```csharp
-IReadOnlyList<AsyncCallStack> active = log.GetAsyncCallStacks(sample);
-foreach (AsyncCallStack activation in active)
+IReadOnlyList<AsyncProfilerCallStack> active = log.GetAsyncProfilerCallStacks(sample);
+foreach (AsyncProfilerCallStack activation in active)
 {
-    bool normalEventsObserved = log.AsyncMethodCompletionObserved(activation);
+    bool normalEventsObserved = log.AsyncProfilerMethodCompletionObserved(activation);
     for (int i = 0; i < activation.Frames.FrameCount; i++)
     {
         ulong ip = activation.Frames.MethodIdAt(i);
@@ -964,16 +990,16 @@ Use the stitcher/host when execution-versus-ancestry attribution is required.
 
 ### Dispatcher relationships and completion availability
 
-| Public TraceLog API | Result |
+| Internal TraceLog API | Result |
 |---|---|
-| `GetAsyncCallStackCreation(AsyncCallStack callStack)` | Latest recorded creation associated with the activation, or null. |
-| `GetParentAsyncCallStack(AsyncCallStack child)` | Parent activation at the child's creation QPC, or null. |
-| `TryGetParentAsyncCallStack(AsyncCallStack child, out AsyncCallStack parent, out long parentQpc)` | Resolve the parent and the historical creation timestamp used to query it. |
-| `GetChildAsyncCallStackCreations(AsyncCallStack parent)` | Children created on the parent's thread during its resume interval. |
-| `AsyncMethodCompletionObserved(AsyncCallStack callStack)` | Whether normal-completion events were observed for this activation's process, kind, and metadata/configuration epoch. Not proof every completion was captured. |
+| `GetAsyncProfilerDispatcherInfo(AsyncProfilerCallStack callStack)` | Latest recorded dispatcher metadata associated with the activation, or null. |
+| `GetParentAsyncProfilerCallStack(AsyncProfilerCallStack child)` | Parent activation at the child's creation QPC, or null. |
+| `TryGetParentAsyncProfilerCallStack(AsyncProfilerCallStack child, out AsyncProfilerCallStack parent, out long parentQpc)` | Resolve the parent and the historical creation timestamp used to query it. |
+| `GetChildAsyncProfilerDispatcherInfos(AsyncProfilerCallStack parent)` | Metadata for children created on the parent's thread during its resume interval. |
+| `AsyncProfilerMethodCompletionObserved(AsyncProfilerCallStack callStack)` | Whether normal-completion events were observed for this activation's process, kind, and metadata/configuration epoch. Not proof every completion was captured. |
 
-`AsyncDispatcherCreation` exposes `Thread`, `ChildDispatcherId`,
-`ParentDispatcherId`, and `CreateQpc`. Missing create records or parent resume
+`AsyncProfilerDispatcherInfo` exposes `CreationThread`, `DispatcherId`,
+`ParentDispatcherId`, and `CreationQpc`. Missing create records or parent resume
 intervals mean missing ancestry, not an inferred relationship.
 Creation-parent ancestry is historical: it does not establish that the parent
 was running at the child's sample time or recover intervening synchronous
@@ -982,28 +1008,28 @@ frames.
 ### Direct index API
 
 Callers owning `AsyncProfilerComputer.Index` can use
-`AsyncCallStacksIndex.Threads`, `DistinctFramesCount`, `IsEmpty`,
-`GetFrames(AsyncCallStackFramesIndex)`, point/singular queries keyed by
-`AsyncThreadKey`, and `GetAsyncCallStacks(AsyncThreadKey)` for all finalized
+`AsyncProfilerCallStacksIndex.Threads`, `DistinctFramesCount`, `IsEmpty`,
+`GetFrames(AsyncProfilerCallStackFramesIndex)`, point/singular queries keyed by
+`AsyncProfilerThreadKey`, and `GetCallStacks(AsyncProfilerThreadKey)` for all finalized
 runs in recording order. That last list is index-backed during construction,
 not a frozen snapshot of its count.
 
-Its relationship methods are `GetCreation` (process/dispatcher/QPC or
-activation), `GetChildCreations` (process/parent ID or activation), and
-`GetParentAsyncCallStack` / `TryGetParentAsyncCallStack`.
-`MethodCompletionObserved(AsyncCallStack)` selects the activation's epoch.
+Its relationship methods are `GetDispatcherInfo` (process/dispatcher/QPC or
+activation), `GetChildDispatcherInfos` (process/parent ID or activation), and
+`GetParentCallStack` / `TryGetParentCallStack`.
+`MethodCompletionObserved(AsyncProfilerCallStack)` selects the activation's epoch.
 Kind-only completion-observed overloads refer to default process index 0;
 process/kind overloads summarize **any** epoch in that process. Those broad
 summaries must not choose another activation's completion policy.
 `ExceptionCompletionObserved` has kind-only and process/kind forms.
 
-The index implements `IFastSerializable`. Public queries return stable
-activation objects; the allocation-saving list/activation reuse overloads are
-internal and have a different lifetime contract.
+The internal index implements `IFastSerializable`. Its stable-result queries
+return retainable activation objects; allocation-saving list/activation reuse
+overloads have a different lifetime contract.
 
 ## 7. Completion counting is separate from recorded states
 
-`AsyncCallStack` exposes:
+`AsyncProfilerCallStack` exposes:
 
 | API | Meaning |
 |---|---|
@@ -1032,9 +1058,9 @@ during emission, not a mutation of captured data.
 
 ## 8. Structural stitching and its lower-level APIs
 
-**Public types:** `AsyncCpuStackStitcher`, `StitchSyncFrame`, `StitchResult`,
-`StitchedFrame`, `StitchDiagnostics`, `AsyncStitchBoundary`,
-`AsyncStitchBoundaryCache`, and associated enums in
+**Internal types:** `AsyncProfilerCallStackStitcher`, `AsyncProfilerStitchSyncFrame`, `AsyncProfilerStitchResult`,
+`AsyncProfilerStitchedFrame`, `AsyncProfilerCallStackDiagnostics`, `AsyncProfilerCallStackStitchBoundary`,
+`AsyncProfilerCallStackStitchBoundaryCache`, and associated enums in
 `Microsoft.Diagnostics.Tracing.Computers`.
 
 The stitcher walks physical frames leaf-to-root and active segments
@@ -1068,24 +1094,24 @@ Empty/missing segment data preserves the supplied physical stack. Production
 hosts also bypass the builder entirely without an active interval or physical
 stack, so coverage gaps remain visible.
 
-### Public `Stitch` overloads
+### Internal `Stitch` overloads
 
 ```csharp
-StitchResult AsyncCpuStackStitcher.Stitch(
-    IReadOnlyList<StitchSyncFrame> syncLeafToRoot,
-    IReadOnlyList<AsyncCallStack> segmentsRootToLeaf,
+AsyncProfilerStitchResult AsyncProfilerCallStackStitcher.Stitch(
+    IReadOnlyList<AsyncProfilerStitchSyncFrame> syncLeafToRoot,
+    IReadOnlyList<AsyncProfilerCallStack> segmentsRootToLeaf,
     long qpc,
-    AsyncStitchBoundaryCache boundaries,
-    AsyncCallStacksIndex index,
+    AsyncProfilerCallStackStitchBoundaryCache boundaries,
+    AsyncProfilerCallStacksIndex index,
     ProcessIndex processIndex,
     Func<CodeAddressIndex, MethodIndex> methodOf,
     bool trace = false);
 
-StitchResult AsyncCpuStackStitcher.Stitch(
-    IReadOnlyList<StitchSyncFrame> syncLeafToRoot,
-    IReadOnlyList<AsyncCallStack> segmentsRootToLeaf,
+AsyncProfilerStitchResult AsyncProfilerCallStackStitcher.Stitch(
+    IReadOnlyList<AsyncProfilerStitchSyncFrame> syncLeafToRoot,
+    IReadOnlyList<AsyncProfilerCallStack> segmentsRootToLeaf,
     long qpc,
-    Func<CodeAddressIndex, AsyncStitchBoundaryInfo> classify,
+    Func<CodeAddressIndex, AsyncProfilerCallStackStitchBoundaryInfo> classify,
     Func<AsyncCallstackKind, bool> methodCompletionObserved,
     Func<CodeAddressIndex, MethodIndex> methodOf,
     bool trace = false);
@@ -1096,29 +1122,29 @@ overload selects completion availability per activation epoch; the delegate
 overload is useful for controlled integrations/tests, but its kind-only
 predicate cannot itself distinguish mixed configuration epochs.
 Callers must provide compatible trace-owned addresses and method identities.
-The public core does not perform symbol lookup, intern stack-source frames,
+The internal core does not perform symbol lookup, intern stack-source frames,
 or automatically run presentation transforms. The normal host computers
 prepare richer physical metadata, canonical method identities, and runtime
-ownership, so they are the recommended application-facing integration.
+ownership, so they are the supported application-facing integration.
 
-`StitchSyncFrame` contains `CodeAddress`, `Method`, optional
-`StitchSyncFrameKind`, and optional `BoxedStateMachineMethod`. Approved box
+`AsyncProfilerStitchSyncFrame` contains `CodeAddress`, `Method`, optional
+`AsyncProfilerStitchSyncFrameKind`, and optional `BoxedStateMachineMethod`. Approved box
 identity associates a physical runtime helper with its application state
 machine; it does not turn that helper IP into evidence of body execution.
-`StitchResult` contains leaf-first `Frames` and `Diagnostics`.
+`AsyncProfilerStitchResult` contains leaf-first `Frames` and `Diagnostics`.
 
-`AsyncStitchBoundary.Classify(...)`, `TryGetWrapperIndex(...)`, and
+`AsyncProfilerCallStackStitchBoundary.Classify(...)`, `TryGetWrapperIndex(...)`, and
 `ClassifySynchronousFrame(...)` expose name/classification helpers;
 `GetBareMethodName`, `GetDeclaringTypeName`, and
 `TryGetLogicalStateMachineMethodName` support generated-name interpretation.
 Metadata-free classifiers use common rules. A per-trace
-`new AsyncStitchBoundaryCache(log.CodeAddresses)` classifies code-address or
+`new AsyncProfilerCallStackStitchBoundaryCache(log.CodeAddresses)` classifies code-address or
 method indices using captured CoreLib ownership, caching the result;
 `BoundaryMethodCount` is a diagnostic count, not a sample-match count.
 
 ## 9. Frame provenance and presentation policy
 
-`StitchedFrame` carries `Origin`, `CodeAddress`, canonical physical `Method`,
+`AsyncProfilerStitchedFrame` carries `Origin`, `CodeAddress`, canonical physical `Method`,
 optional `BoxedStateMachineMethod`, `Segment` and `SegmentFrameIndex`,
 `SyncFrameKind`, `Presentation`, and `Context`. `ContextKind` distinguishes
 active and historical contexts. Factory methods (`CreateSync`,
@@ -1128,7 +1154,7 @@ active and historical contexts. Factory methods (`CreateSync`,
 distinctions; `WithPresentation(...)` changes presentation without changing
 structural identity.
 
-| `StitchedFrameOrigin` | Interpretation |
+| `AsyncProfilerStitchedFrameOrigin` | Interpretation |
 |---|---|
 | `Sync` | Retained physical frame; it can still belong to an active context. |
 | `AsyncCurrent` | Physically matched current async method, retaining the sampled address. |
@@ -1141,16 +1167,20 @@ structural identity.
 
 ### Pipeline configuration and ordering
 
-`AsyncStackTransformPipeline` is public. Configure the host's
-`AsyncStackTransforms` **before generation**.
+Configure the public `AsyncCallStackTransforms` settings object **before
+generation**. Its three properties forward to the computer-owned internal
+`AsyncProfilerCallStackTransformPipeline`; there is no second configuration state.
 
 | Property | Default | Effect |
 |---|---|---|
-| `EnableConservativeTransforms` | true | Strong-signal default presentation normalization; not a switch for structural reconstruction. |
-| `EnableAsyncInfrastructureCleanup` | false | Additional ownership-checked attribution/removal of runtime implementation machinery. |
-| `EnableContextAncestry` | false | Host inserts missing recorded historical parents before presentation. |
-| `MaximumContextAncestryDepth` | 64 | Positive maximum inserted-parent depth per active segment. |
-| `EnableActiveAsyncFrameAnnotations` | false | Host emitter labels active frames `[Async V1]` / `[Async V2]` and shows V1 presentation states where names can be decoded. |
+| `EnableNormalization` | true | Strong-signal default presentation normalization; not a switch for structural reconstruction. |
+| `EnableInfrastructureCleanup` | false | Additional ownership-checked attribution/removal of runtime implementation machinery. |
+| `EnableFrameAnnotations` | false | Host emitter labels active frames `[Async V1]` / `[Async V2]` and shows V1 presentation states where names can be decoded. |
+
+Historical creation-parent ancestry is unfinished and remains internal,
+disabled by default. Its internal `MaximumContextAncestryDepth` (64) limits
+inserted historical parents per active segment, not physical or final stack
+depth. No public ancestry or reconstructed-stack depth control is exposed.
 
 Enabled stages execute in this order:
 
@@ -1163,7 +1193,7 @@ Enabled stages execute in this order:
 5. Conservative V1 startup/reentrant normalization, completed-return
    attribution, and verified completion-handoff normalization.
 6. Optional async-infrastructure cleanup.
-7. Custom transforms, in registration order.
+7. Internal custom transforms, in registration order.
 8. Host frame interning, annotations, role metadata, and historical-context
    transition markers.
 
@@ -1199,26 +1229,26 @@ Historical parents remain explicitly labeled `[Async parent V1]` /
 `[Async parent context transition]`. They do not become current execution
 because their names appear in the chart.
 
-### Custom transform API and lifetime
+### Internal custom transforms and lifetime
 
-`Add(AsyncStackTransform)` registers a callback;
+The internal pipeline's `Add(AsyncProfilerCallStackTransform)` registers a callback;
 `ClearCustomTransforms()` removes custom callbacks without changing built-in
-flags. The delegate receives `AsyncStackTransformContext` with:
+flags. The delegate receives `AsyncProfilerCallStackTransformContext` with:
 
 | Member | Use |
 |---|---|
 | `TraceLog` | Owning trace; can be null in standalone transforms. |
 | `TimestampQpc` | Exact anchor-event QPC. |
 | `Segments` | Active intervals, outermost first. |
-| `Frames` | Mutable leaf-first `List<StitchedFrame>` after enabled built-ins. |
+| `Frames` | Mutable leaf-first `List<AsyncProfilerStitchedFrame>` after enabled built-ins. |
 | `ClassifyBoundary(CodeAddressIndex)` | Classification consistent with this trace. |
 | `Diagnostics` | Per-sample counters accumulated into the host's aggregate. |
 
 During host callbacks the context, segment list, activation slots, frame list,
 and diagnostics are reused. Snapshot primitive identities, roles, timestamps,
-and frame data synchronously. Retaining `StitchedFrame` alone is insufficient:
+and frame data synchronously. Retaining `AsyncProfilerStitchedFrame` alone is insufficient:
 its `Context` can reference a reused activation. These lifetimes differ from
-the stable objects returned by **public** TraceLog/index queries.
+the stable objects returned by the internal TraceLog/index query overloads.
 
 Standalone
 `pipeline.Transform(structuralResult, segments, qpc, classifyBoundary, traceLog)`
@@ -1229,7 +1259,7 @@ not cloned. This API does not insert historical ancestry or emit annotations.
 
 ### Runtime-specific rules are internal, not a public plug-in API
 
-`AsyncRuntimeRuleProfile`, `AsyncRuntimeRuleProfileCache`, and sequence
+`AsyncProfilerRuntimeRuleProfile`, `AsyncProfilerRuntimeRuleProfileCache`, and sequence
 matchers centralize implementation-specific helper recognition, ownership
 evidence, layout matching, and complete presentation-stage replacements.
 They are selected from **captured** CoreLib versions and loaded engine modules,
@@ -1243,26 +1273,30 @@ matching still checks frame identity, boundaries, same-module ownership, and
 context. A version match alone never authorizes removal.
 Compiler-generated application-name decoding is a separate convention; the
 captured runtime version does not identify the application's compiler.
-External presentation extensions use `Add(...)`; adding a runtime profile is
-a library implementation change with regression coverage.
+No public custom-pass registration API is exposed yet; a future extension
+contract requires deliberately designed stable frame/context types. Adding a
+runtime profile is a library implementation change with regression coverage.
 
 ## 10. Stack-source hosts, emitted metadata, and diagnostics
 
-Both host types expose constructors `(TraceLog, SymbolReader)` and
-`(TraceLog, SymbolReader, bool stitchAsyncCallStacks)`. The two-argument
-constructor leaves async stitching disabled.
+Both host types retain only their original `(TraceLog, SymbolReader)`
+constructor. Async call stacks are disabled by default; opt in through
+`EnableAsyncCallStacks` before generation, not a Boolean constructor overload.
 
 | Public host | Intended source |
 |---|---|
 | `SampleProfilerThreadTimeComputer` | SampleProfiler/EventPipe thread-time projection. |
 | `ThreadTimeStackComputer` | ETW/universal CPU and wait-stack projection, preserving configured activity/request roots. |
 
-Both expose `AsyncStackTransforms`, `TraceAsyncStitchSteps`,
-`AsyncStitchActive`, `AsyncStitchDiagnostics`, and
+Both publicly expose `EnableAsyncCallStacks`, the getter-only
+`AsyncCallStackTransforms`, `AsyncCallStacksActive`, and their existing
 `GenerateThreadTimeStacks(MutableTraceEventStackSource, TraceEvents = null)`.
-`AsyncStitchActive` becomes meaningful after initialization during generation:
+The settings object has no public constructor and belongs to its computer.
+Normalization defaults to true; infrastructure cleanup and annotations default
+to false. `AsyncCallStacksActive` is false before generation and becomes
+meaningful after initialization during generation:
 it means stitching was requested and a usable index exists, not that a
-particular sample matched. `HasAsyncProfilerEvents`, `AsyncStitchActive`, and
+particular sample matched. `HasAsyncProfilerEvents`, `AsyncCallStacksActive`, and
 per-sample successful attribution are three different facts.
 
 For example, with an open `TraceLog log` and `SymbolReader symbols`:
@@ -1272,19 +1306,25 @@ var output = new MutableTraceEventStackSource(log)
 {
     OnlyManagedCodeStacks = true
 };
-var computer = new SampleProfilerThreadTimeComputer(
-    log, symbols, stitchAsyncCallStacks: true);
-computer.AsyncStackTransforms.EnableActiveAsyncFrameAnnotations = true;
-computer.AsyncStackTransforms.EnableAsyncInfrastructureCleanup = false;
-computer.TraceAsyncStitchSteps = true;
+var computer = new SampleProfilerThreadTimeComputer(log, symbols)
+{
+    EnableAsyncCallStacks = true
+};
+computer.AsyncCallStackTransforms.EnableNormalization = true;
+computer.AsyncCallStackTransforms.EnableInfrastructureCleanup = false;
+computer.AsyncCallStackTransforms.EnableFrameAnnotations = true;
 computer.GenerateThreadTimeStacks(output);
 
-if (!computer.AsyncStitchActive)
+if (!computer.AsyncCallStacksActive)
 {
     throw new InvalidOperationException("No usable async index initialized stitching.");
 }
-StitchDiagnostics diagnostics = computer.AsyncStitchDiagnostics;
 ```
+
+The same controls apply to `ThreadTimeStackComputer`. The transform settings
+affect presentation after structural reconstruction; disabling normalization
+does not disable stitching. No public custom-transform registration, ancestry,
+depth limit, diagnostics, or frame-provenance configuration is exposed.
 
 The explicit failure is a caller policy for a run that requires async data;
 the library otherwise keeps the existing non-async generation path.
@@ -1309,14 +1349,14 @@ Do not correlate raw events and emitted records by one root-frame index or
 timestamp alone. The validation probe preserves timestamp candidates and
 original export ordinals rather than claiming a unique match.
 
-### Emitted frame identity
+### Internal emitted frame identity
 
-`TraceEventStackSource.TryGetAsyncFrameInfo(StackSourceFrameIndex, out
-AsyncStackSourceFrameInfo)` is virtual; `MutableTraceEventStackSource`
+The internal `TraceEventStackSource.TryGetAsyncProfilerCallStackFrameInfo(StackSourceFrameIndex, out
+AsyncProfilerCallStackSourceFrameInfo)` is virtual; `MutableTraceEventStackSource`
 provides metadata for generated async frames. Ordinary sync and pseudo
 frames return false.
 
-`AsyncStackSourceFrameInfo` exposes `Kind`, `ProcessIndex`, `CodeAddress`,
+`AsyncProfilerCallStackSourceFrameInfo` exposes `Kind`, `ProcessIndex`, `CodeAddress`,
 `MethodId`, captured `State`, and the flags `IsHistoricalParent`,
 `IsDispatchTarget`, `IsCurrent`, `IsStateMachineBoxCarrier`, `IsCompleting`,
 and `IsCompletionUnwind`. Display strings are not a substitute for these
@@ -1330,13 +1370,15 @@ not a sampled root-body address. Preserve both identities when investigating.
 Speedscope does not carry this full API metadata; keep the helper's sidecar
 evidence with an export.
 
-`StitchDiagnostics` includes public counter fields plus bounded `Messages`
+The internal `AsyncProfilerCallStackDiagnostics` includes counter fields plus bounded `Messages`
 and `MessagesDropped`. Examples include `SegmentsProcessed`,
 `BoundariesNotFound`, `V2WrapperFallbackUsed`, `V1InlineFallbackUsed`,
 `V1CompletionAlignmentAmbiguous`, `IncompleteAsyncRootsNormalized`, and
 presentation-collapse counters. Nonzero values can describe expected fallback
-or normal processing, not just failures. `TraceAsyncStitchSteps` adds detailed
+or normal processing, not just failures. `TraceAsyncProfilerCallStackSteps` adds detailed
 per-segment notes; message storage is bounded, not a complete event log.
+The computers' `AsyncProfilerCallStackDiagnostics` and `TraceAsyncProfilerCallStackSteps`
+members are internal diagnostic hooks, not public configuration.
 
 ## 11. Source and regression map
 
@@ -1344,13 +1386,14 @@ per-segment notes; message storage is bounded, not a complete event log.
 |---|---|---|
 | Framing/typed decoding | `Parsers\AsyncProfilerTraceEventParser.cs`, `Parsers\AsyncProfilerTypes.cs` | `TraceEvent.Tests\Parsing\AsyncProfilerParsing.cs` |
 | Stateful construction and recovery | `Computers\AsyncProfilerComputer.cs` | `AsyncProfilerComputerTests.cs` |
-| Compact storage, epochs, interval/creation queries | `Computers\AsyncCallStacksIndex.cs` | `AsyncProfilerComputerTests.cs`, `AsyncProfilerTraceLogTests.cs` |
-| Conversion, address registration, deferred region, public facade | `TraceLog.cs` | `AsyncProfilerTraceLogTests.cs` |
-| Structural reconstruction and boundary contracts | `Computers\AsyncCpuStackStitcher.cs`, `Computers\AsyncStitchBoundary.cs` | `AsyncCpuStackStitcherTests.cs`, `AsyncStitchBoundaryTests.cs` |
-| Runtime ownership and implementation layouts | `Computers\AsyncRuntimeRuleProfile.cs`, `Computers\AsyncRuntimeRuleProfileCache.cs`, `Computers\AsyncRuntimeSequenceMatch.cs` | `AsyncRuntimeRuleProfileTests.cs`, `AsyncRuntimeSequenceTests.cs`, `AsyncRuntimeProfileExtensibilityTests.cs` |
-| Historical creation ancestry | `Computers\AsyncContextAncestryAugmenter.cs` | `AsyncProfilerStitchIntegrationTests.cs` |
-| Presentation and callbacks | `Computers\AsyncStackTransformPipeline.cs`, `Computers\AsyncStackTransforms.cs` | `AsyncStackTransformPipelineTests.cs` |
-| Projection and emitted roles | `Computers\AsyncCpuStackSourceBuilder.cs`, `TraceEventStacks.cs`, `Computers\SampleProfilerThreadTimeComputer.cs`, `Computers\ThreadTimeComputer.cs` | `AsyncProfilerStitchIntegrationTests.cs` |
+| Compact storage, epochs, interval/creation queries | `Computers\AsyncProfilerCallStacksIndex.cs` | `AsyncProfilerComputerTests.cs`, `AsyncProfilerTraceLogTests.cs` |
+| Conversion, address registration, deferred region, internal queries | `TraceLog.cs` | `AsyncProfilerTraceLogTests.cs` |
+| Structural reconstruction and boundary contracts | `Computers\AsyncProfilerCallStackStitcher.cs`, `Computers\AsyncProfilerCallStackStitchBoundary.cs` | `AsyncProfilerCallStackStitcherTests.cs`, `AsyncProfilerCallStackStitchBoundaryTests.cs` |
+| Runtime ownership and implementation layouts | `Computers\AsyncProfilerRuntimeRuleProfile.cs`, `Computers\AsyncProfilerRuntimeRuleProfileCache.cs`, `Computers\AsyncProfilerRuntimeSequenceMatch.cs` | `AsyncProfilerRuntimeRuleProfileTests.cs`, `AsyncProfilerRuntimeSequenceTests.cs`, `AsyncProfilerRuntimeProfileExtensibilityTests.cs` |
+| Historical creation ancestry | `Computers\AsyncProfilerContextAncestryAugmenter.cs` | `AsyncProfilerStitchIntegrationTests.cs` |
+| Public presentation settings | `Computers\AsyncCallStackTransforms.cs` | `AsyncProfilerStitchIntegrationTests.cs` |
+| Internal presentation and callbacks | `Computers\AsyncProfilerCallStackTransformPipeline.cs`, `Computers\AsyncProfilerCallStackTransformPasses.cs` | `AsyncProfilerCallStackTransformPipelineTests.cs` |
+| Projection and emitted roles | `Computers\AsyncProfilerCallStackSourceBuilder.cs`, `TraceEventStacks.cs`, `Computers\SampleProfilerThreadTimeComputer.cs`, `Computers\ThreadTimeComputer.cs` | `AsyncProfilerStitchIntegrationTests.cs` |
 | Exported frame visibility | `Stacks\StackSourceWriterHelper.cs`, `Stacks\SpeedScopeStackSourceWriter.cs` | `TraceEvent.Tests\Speedscope\SpeedScopeExporterTests.cs` |
 
 Unless fully qualified, test filenames in this table are under

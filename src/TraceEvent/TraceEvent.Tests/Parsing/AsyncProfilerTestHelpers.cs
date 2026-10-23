@@ -3,8 +3,6 @@
 
 using System;
 using System.Collections.Generic;
-
-using Microsoft.Diagnostics.Tracing.Parsers;
 using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
 
 namespace TraceEventTests
@@ -275,7 +273,7 @@ namespace TraceEventTests
     }
 
     /// <summary>A sink that records every decoded sub-event so tests can assert on them.</summary>
-    internal sealed class CollectingSink : IAsyncProfilerSubEventSink
+    internal sealed class AsyncProfilerCollectingSink : ISubEventSink
     {
         public readonly List<AsyncEventID> Order = new List<AsyncEventID>();
         public readonly List<AsyncContextEvent> ContextCreates = new List<AsyncContextEvent>();
@@ -290,7 +288,7 @@ namespace TraceEventTests
         public readonly List<AsyncMetadataEvent> Metadatas = new List<AsyncMetadataEvent>();
         public readonly List<AsyncSyncClockEvent> SyncClocks = new List<AsyncSyncClockEvent>();
         public readonly List<AsyncUnknownEvent> Unknowns = new List<AsyncUnknownEvent>();
-        public readonly List<AsyncProfilerParseError> Errors = new List<AsyncProfilerParseError>();
+        public readonly List<ParseError> Errors = new List<ParseError>();
 
         public void OnContextCreate(in AsyncContextEvent e) { Order.Add(e.EventId); ContextCreates.Add(e); }
         public void OnContextResume(in AsyncContextEvent e) { Order.Add(e.EventId); ContextResumes.Add(e); }
@@ -305,6 +303,6 @@ namespace TraceEventTests
         public void OnMetadata(in AsyncMetadataEvent e) { Order.Add(AsyncEventID.AsyncProfilerMetadata); Metadatas.Add(e); }
         public void OnSyncClock(in AsyncSyncClockEvent e) { Order.Add(AsyncEventID.AsyncProfilerSyncClock); SyncClocks.Add(e); }
         public void OnUnknown(in AsyncUnknownEvent e) { Unknowns.Add(e); }
-        public void OnParseError(in AsyncProfilerParseError e) { Errors.Add(e); }
+        public void OnParseError(in ParseError e) { Errors.Add(e); }
     }
 }
