@@ -8,6 +8,8 @@
     <AssemblyOriginatorKeyFile>..\..\..\MSFT.snk</AssemblyOriginatorKeyFile>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Remove="Scenarios\**\*.cs;artifacts\**\*.cs;.artifacts\**\*.cs" />
+    <EmbeddedResource Remove="Scenarios\**\*;artifacts\**\*;.artifacts\**\*" />
     <ProjectReference Include="..\..\TraceEvent.csproj" />
   </ItemGroup>
 </Project>

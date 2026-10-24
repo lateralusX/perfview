@@ -1,0 +1,4 @@
+# Keep recorded original-input hashes meaningful across Git newline settings.
+/global.json -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+/Cases/**/src/*.cs -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+/Cases/**/src/*.csproj -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

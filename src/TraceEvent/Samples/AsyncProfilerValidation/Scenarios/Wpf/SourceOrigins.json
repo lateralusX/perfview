@@ -1,0 +1,554 @@
+{
+  "schemaVersion": 1,
+  "baselineCommit": "e8b05c36e14eb408f034de0f543bee9523f8fd87",
+  "archiveRootMeaning": "Identifiers are relative to the separately retained wpf-async-scenarios archive, not repository paths or published URLs.",
+  "sdkSelectionFile": "global.json",
+  "sdkSelectionOriginalArtifact": "v1-only-01/baseline/global.json",
+  "copiedInputBytePolicy": "Scoped Git attributes disable newline conversion for copied C#, project files and the SDK pin.",
+  "sdkSelectionSha256": "8D2CE6BC8394D19D928601A32D61C34063FCA373E0905B22820718C5F0BA92DD",
+  "projects": [
+    {
+      "id": "wpf.context-resumption.v1",
+      "originalArtifactRoot": "v1-only-01/baseline",
+      "copiedFiles": [
+        {
+          "path": "Cases/ContextResumption/V1/src/ClassicCodegen.cs",
+          "originalArtifact": "v1-only-01/baseline/src/ClassicCodegen.cs",
+          "sha256": "121E8628DC3BE8C8B3FF54629AAFA5C9AE462B2F6B21D3C452072B5BD3ABDD4E"
+        },
+        {
+          "path": "Cases/ContextResumption/V1/src/Program.cs",
+          "originalArtifact": "v1-only-01/baseline/src/Program.cs",
+          "sha256": "58C74913A3C92AB6F401E84C02763362951B7C7741D5C6D62E16F5D02D7F79B2"
+        },
+        {
+          "path": "Cases/ContextResumption/V1/src/RuntimeAsyncMethodGenerationAttribute.cs",
+          "originalArtifact": "v1-only-01/baseline/src/RuntimeAsyncMethodGenerationAttribute.cs",
+          "sha256": "11A69AC2F03AF693EE24F7DDE7C719B534AAFEEFDF9610E31AFE05A2E0BCF4EF"
+        },
+        {
+          "path": "Cases/ContextResumption/V1/src/WpfAsyncScenarios.csproj",
+          "originalArtifact": "v1-only-01/baseline/src/WpfAsyncScenarios.csproj",
+          "sha256": "D83FD0AB464E0ABF8581FF873713F15E989820F340537C61F87EE2E9F9ACE9C1"
+        }
+      ],
+      "projectBytesUnchanged": true,
+      "sourceBytesUnchanged": true,
+      "recordedOriginalBinarySha256": "F893CFBEB0A9BD04055577DBB66730003D30268AC33609D618C81D3D6D4597CE",
+      "relocatedBinaryStatus": "not-built-or-executed",
+      "environmentChanges": [
+        "Relocated paths",
+        "Local build props/targets isolate repository defaults; original project bytes preserved."
+      ]
+    },
+    {
+      "id": "wpf.context-resumption.v2",
+      "originalArtifactRoot": "explicit-policy-01",
+      "copiedFiles": [
+        {
+          "path": "Cases/ContextResumption/V2/src/Program.cs",
+          "originalArtifact": "explicit-policy-01/src/Program.cs",
+          "sha256": "2FE2D585967FD835AAE1CDE98D28725880061E6210DAE818BE709E337768A29A"
+        },
+        {
+          "path": "Cases/ContextResumption/V2/src/RuntimeAsyncMethodGenerationAttribute.cs",
+          "originalArtifact": "explicit-policy-01/src/RuntimeAsyncMethodGenerationAttribute.cs",
+          "sha256": "11A69AC2F03AF693EE24F7DDE7C719B534AAFEEFDF9610E31AFE05A2E0BCF4EF"
+        },
+        {
+          "path": "Cases/ContextResumption/V2/src/WpfAsyncScenarios.csproj",
+          "originalArtifact": "explicit-policy-01/src/WpfAsyncScenarios.csproj",
+          "sha256": "6639B592F41E41ED35BB61DC161EC22842A3E47290AE2A96DBA8DE3E403F3BAC"
+        }
+      ],
+      "projectBytesUnchanged": true,
+      "sourceBytesUnchanged": true,
+      "recordedOriginalBinarySha256": "6EEA6367E15273A45976CF85E5FBE742F4ECE8419419C631A41CE387A63D451D",
+      "relocatedBinaryStatus": "not-built-or-executed",
+      "environmentChanges": [
+        "Relocated paths",
+        "Local build props/targets isolate repository defaults; original project bytes preserved."
+      ]
+    },
+    {
+      "id": "wpf.deep-chains.v1",
+      "originalArtifactRoot": "v1-only-01/depth",
+      "copiedFiles": [
+        {
+          "path": "Cases/DeepChains/V1/src/ClassicCodegen.cs",
+          "originalArtifact": "v1-only-01/depth/src/ClassicCodegen.cs",
+          "sha256": "121E8628DC3BE8C8B3FF54629AAFA5C9AE462B2F6B21D3C452072B5BD3ABDD4E"
+        },
+        {
+          "path": "Cases/DeepChains/V1/src/GeneratedChains.cs",
+          "originalArtifact": "v1-only-01/depth/src/GeneratedChains.cs",
+          "sha256": "C1DFA5DE2DA99C1375AE6EFBD16475823425269334C4C7FE6B25C71F44325D3F"
+        },
+        {
+          "path": "Cases/DeepChains/V1/src/Program.cs",
+          "originalArtifact": "v1-only-01/depth/src/Program.cs",
+          "sha256": "C7B07407C8CD9A83532921A4DAB9C63FED20C3F409A48EF5E26C05CA3C01C937"
+        },
+        {
+          "path": "Cases/DeepChains/V1/src/RuntimeAsyncMethodGenerationAttribute.cs",
+          "originalArtifact": "v1-only-01/depth/src/RuntimeAsyncMethodGenerationAttribute.cs",
+          "sha256": "11A69AC2F03AF693EE24F7DDE7C719B534AAFEEFDF9610E31AFE05A2E0BCF4EF"
+        },
+        {
+          "path": "Cases/DeepChains/V1/src/WpfAsyncScenarios.csproj",
+          "originalArtifact": "v1-only-01/depth/src/WpfAsyncScenarios.csproj",
+          "sha256": "D83FD0AB464E0ABF8581FF873713F15E989820F340537C61F87EE2E9F9ACE9C1"
+        }
+      ],
+      "projectBytesUnchanged": true,
+      "sourceBytesUnchanged": true,
+      "recordedOriginalBinarySha256": "DCD6EB1AB55718DB48A2A653EAF461CBA5F7DCECAE31E7BFE82412BB3BC87467",
+      "relocatedBinaryStatus": "not-built-or-executed",
+      "environmentChanges": [
+        "Relocated paths",
+        "Local build props/targets isolate repository defaults; original project bytes preserved."
+      ]
+    },
+    {
+      "id": "wpf.deep-chains.v2",
+      "originalArtifactRoot": "depth-resumption-01",
+      "copiedFiles": [
+        {
+          "path": "Cases/DeepChains/V2/src/GeneratedChains.cs",
+          "originalArtifact": "depth-resumption-01/src/GeneratedChains.cs",
+          "sha256": "C1DFA5DE2DA99C1375AE6EFBD16475823425269334C4C7FE6B25C71F44325D3F"
+        },
+        {
+          "path": "Cases/DeepChains/V2/src/Program.cs",
+          "originalArtifact": "depth-resumption-01/src/Program.cs",
+          "sha256": "F456483066DC0C374BD42F788BD907ECAA0A9874BF71066087C21ADD09E8A637"
+        },
+        {
+          "path": "Cases/DeepChains/V2/src/RuntimeAsyncMethodGenerationAttribute.cs",
+          "originalArtifact": "depth-resumption-01/src/RuntimeAsyncMethodGenerationAttribute.cs",
+          "sha256": "11A69AC2F03AF693EE24F7DDE7C719B534AAFEEFDF9610E31AFE05A2E0BCF4EF"
+        },
+        {
+          "path": "Cases/DeepChains/V2/src/WpfAsyncScenarios.csproj",
+          "originalArtifact": "depth-resumption-01/src/WpfAsyncScenarios.csproj",
+          "sha256": "6639B592F41E41ED35BB61DC161EC22842A3E47290AE2A96DBA8DE3E403F3BAC"
+        }
+      ],
+      "projectBytesUnchanged": true,
+      "sourceBytesUnchanged": true,
+      "recordedOriginalBinarySha256": "1CB9CD51D0B8A6FA141B8BDB2497E83C041D6F78EE875E47CAB42F4DC22F52F6",
+      "relocatedBinaryStatus": "not-built-or-executed",
+      "environmentChanges": [
+        "Relocated paths",
+        "Local build props/targets isolate repository defaults; original project bytes preserved."
+      ]
+    },
+    {
+      "id": "wpf.overlapping-operations.v1",
+      "originalArtifactRoot": "v1-only-01/overlap",
+      "copiedFiles": [
+        {
+          "path": "Cases/OverlappingOperations/V1/src/ClassicCodegen.cs",
+          "originalArtifact": "v1-only-01/overlap/src/ClassicCodegen.cs",
+          "sha256": "121E8628DC3BE8C8B3FF54629AAFA5C9AE462B2F6B21D3C452072B5BD3ABDD4E"
+        },
+        {
+          "path": "Cases/OverlappingOperations/V1/src/Program.cs",
+          "originalArtifact": "v1-only-01/overlap/src/Program.cs",
+          "sha256": "3A731E600442F427D612169F2A328FCD5DBB7A5C4E2E5C6A1F8DCC250CAF86E3"
+        },
+        {
+          "path": "Cases/OverlappingOperations/V1/src/RuntimeAsyncMethodGenerationAttribute.cs",
+          "originalArtifact": "v1-only-01/overlap/src/RuntimeAsyncMethodGenerationAttribute.cs",
+          "sha256": "11A69AC2F03AF693EE24F7DDE7C719B534AAFEEFDF9610E31AFE05A2E0BCF4EF"
+        },
+        {
+          "path": "Cases/OverlappingOperations/V1/src/WpfAsyncScenarios.csproj",
+          "originalArtifact": "v1-only-01/overlap/src/WpfAsyncScenarios.csproj",
+          "sha256": "D83FD0AB464E0ABF8581FF873713F15E989820F340537C61F87EE2E9F9ACE9C1"
+        }
+      ],
+      "projectBytesUnchanged": true,
+      "sourceBytesUnchanged": true,
+      "recordedOriginalBinarySha256": "7EDC5E75D3E69673EC222FADAA00A480AACAF6D5BE8B944A16A90D7095034014",
+      "relocatedBinaryStatus": "not-built-or-executed",
+      "environmentChanges": [
+        "Relocated paths",
+        "Local build props/targets isolate repository defaults; original project bytes preserved."
+      ]
+    },
+    {
+      "id": "wpf.overlapping-operations.v2",
+      "originalArtifactRoot": "overlap-operations-01",
+      "copiedFiles": [
+        {
+          "path": "Cases/OverlappingOperations/V2/src/Program.cs",
+          "originalArtifact": "overlap-operations-01/src/Program.cs",
+          "sha256": "8E17E8FC9133BB0F36F9EFCBD65F5D452F60DBEFA5E521510AD4259F9E6DEB0C"
+        },
+        {
+          "path": "Cases/OverlappingOperations/V2/src/RuntimeAsyncMethodGenerationAttribute.cs",
+          "originalArtifact": "overlap-operations-01/src/RuntimeAsyncMethodGenerationAttribute.cs",
+          "sha256": "11A69AC2F03AF693EE24F7DDE7C719B534AAFEEFDF9610E31AFE05A2E0BCF4EF"
+        },
+        {
+          "path": "Cases/OverlappingOperations/V2/src/WpfAsyncScenarios.csproj",
+          "originalArtifact": "overlap-operations-01/src/WpfAsyncScenarios.csproj",
+          "sha256": "6639B592F41E41ED35BB61DC161EC22842A3E47290AE2A96DBA8DE3E403F3BAC"
+        }
+      ],
+      "projectBytesUnchanged": true,
+      "sourceBytesUnchanged": true,
+      "recordedOriginalBinarySha256": "01649349CB2249A00A825D16572EF148AD37E734CA487FA90FD33D800DC71E0F",
+      "relocatedBinaryStatus": "not-built-or-executed",
+      "environmentChanges": [
+        "Relocated paths",
+        "Local build props/targets isolate repository defaults; original project bytes preserved."
+      ]
+    },
+    {
+      "id": "wpf.exception-handling.v1",
+      "originalArtifactRoot": "v1-only-01/exception",
+      "copiedFiles": [
+        {
+          "path": "Cases/ExceptionHandling/V1/src/ClassicCodegen.cs",
+          "originalArtifact": "v1-only-01/exception/src/ClassicCodegen.cs",
+          "sha256": "121E8628DC3BE8C8B3FF54629AAFA5C9AE462B2F6B21D3C452072B5BD3ABDD4E"
+        },
+        {
+          "path": "Cases/ExceptionHandling/V1/src/Program.cs",
+          "originalArtifact": "v1-only-01/exception/src/Program.cs",
+          "sha256": "5A4590A0819F5B4CFCA7BC2A2296972E88745A85EDA21D49ABBCE83AE3431DBD"
+        },
+        {
+          "path": "Cases/ExceptionHandling/V1/src/RuntimeAsyncMethodGenerationAttribute.cs",
+          "originalArtifact": "v1-only-01/exception/src/RuntimeAsyncMethodGenerationAttribute.cs",
+          "sha256": "11A69AC2F03AF693EE24F7DDE7C719B534AAFEEFDF9610E31AFE05A2E0BCF4EF"
+        },
+        {
+          "path": "Cases/ExceptionHandling/V1/src/WpfAsyncScenarios.csproj",
+          "originalArtifact": "v1-only-01/exception/src/WpfAsyncScenarios.csproj",
+          "sha256": "D83FD0AB464E0ABF8581FF873713F15E989820F340537C61F87EE2E9F9ACE9C1"
+        }
+      ],
+      "projectBytesUnchanged": true,
+      "sourceBytesUnchanged": true,
+      "recordedOriginalBinarySha256": "761CCBC110A0E18E696656E94EA549C8DA9646A488F65B27B0782F03D95E2140",
+      "relocatedBinaryStatus": "not-built-or-executed",
+      "environmentChanges": [
+        "Relocated paths",
+        "Local build props/targets isolate repository defaults; original project bytes preserved."
+      ]
+    },
+    {
+      "id": "wpf.exception-handling.v2",
+      "originalArtifactRoot": "exception-propagation-01",
+      "copiedFiles": [
+        {
+          "path": "Cases/ExceptionHandling/V2/src/Program.cs",
+          "originalArtifact": "exception-propagation-01/src/Program.cs",
+          "sha256": "71CF2B582459EB4988D1366604164D75403563BD34B34D9D25709F5EE6CAE61A"
+        },
+        {
+          "path": "Cases/ExceptionHandling/V2/src/RuntimeAsyncMethodGenerationAttribute.cs",
+          "originalArtifact": "exception-propagation-01/src/RuntimeAsyncMethodGenerationAttribute.cs",
+          "sha256": "11A69AC2F03AF693EE24F7DDE7C719B534AAFEEFDF9610E31AFE05A2E0BCF4EF"
+        },
+        {
+          "path": "Cases/ExceptionHandling/V2/src/WpfAsyncScenarios.csproj",
+          "originalArtifact": "exception-propagation-01/src/WpfAsyncScenarios.csproj",
+          "sha256": "6639B592F41E41ED35BB61DC161EC22842A3E47290AE2A96DBA8DE3E403F3BAC"
+        }
+      ],
+      "projectBytesUnchanged": true,
+      "sourceBytesUnchanged": true,
+      "recordedOriginalBinarySha256": "5AFD237B8C8CA3381183B76B8F3DE46AE7038C60BA9E7625D6EF876E1281E312",
+      "relocatedBinaryStatus": "not-built-or-executed",
+      "environmentChanges": [
+        "Relocated paths",
+        "Local build props/targets isolate repository defaults; original project bytes preserved."
+      ]
+    },
+    {
+      "id": "wpf.cancellation.v1",
+      "originalArtifactRoot": "v1-only-01/cancellation",
+      "copiedFiles": [
+        {
+          "path": "Cases/Cancellation/V1/src/ClassicCodegen.cs",
+          "originalArtifact": "v1-only-01/cancellation/src/ClassicCodegen.cs",
+          "sha256": "121E8628DC3BE8C8B3FF54629AAFA5C9AE462B2F6B21D3C452072B5BD3ABDD4E"
+        },
+        {
+          "path": "Cases/Cancellation/V1/src/Program.cs",
+          "originalArtifact": "v1-only-01/cancellation/src/Program.cs",
+          "sha256": "67F51183513A6C5D2EB199AF95574E7A5DADD9C0F1B126E30341478903816A28"
+        },
+        {
+          "path": "Cases/Cancellation/V1/src/RuntimeAsyncMethodGenerationAttribute.cs",
+          "originalArtifact": "v1-only-01/cancellation/src/RuntimeAsyncMethodGenerationAttribute.cs",
+          "sha256": "11A69AC2F03AF693EE24F7DDE7C719B534AAFEEFDF9610E31AFE05A2E0BCF4EF"
+        },
+        {
+          "path": "Cases/Cancellation/V1/src/WpfAsyncScenarios.csproj",
+          "originalArtifact": "v1-only-01/cancellation/src/WpfAsyncScenarios.csproj",
+          "sha256": "D83FD0AB464E0ABF8581FF873713F15E989820F340537C61F87EE2E9F9ACE9C1"
+        }
+      ],
+      "projectBytesUnchanged": true,
+      "sourceBytesUnchanged": true,
+      "recordedOriginalBinarySha256": "75EAB55694506CAC046919BEA1508C2615E6D39236F35C5D52947F016693D611",
+      "relocatedBinaryStatus": "not-built-or-executed",
+      "environmentChanges": [
+        "Relocated paths",
+        "Local build props/targets isolate repository defaults; original project bytes preserved."
+      ]
+    },
+    {
+      "id": "wpf.cancellation.v2",
+      "originalArtifactRoot": "cancellation-fresh-01",
+      "copiedFiles": [
+        {
+          "path": "Cases/Cancellation/V2/src/Program.cs",
+          "originalArtifact": "cancellation-fresh-01/src/Program.cs",
+          "sha256": "6FC3269FF85C4BE59F4897371761107CD3036A16A24DCADD47650E218E935320"
+        },
+        {
+          "path": "Cases/Cancellation/V2/src/RuntimeAsyncMethodGenerationAttribute.cs",
+          "originalArtifact": "cancellation-fresh-01/src/RuntimeAsyncMethodGenerationAttribute.cs",
+          "sha256": "11A69AC2F03AF693EE24F7DDE7C719B534AAFEEFDF9610E31AFE05A2E0BCF4EF"
+        },
+        {
+          "path": "Cases/Cancellation/V2/src/WpfAsyncScenarios.csproj",
+          "originalArtifact": "cancellation-fresh-01/src/WpfAsyncScenarios.csproj",
+          "sha256": "6639B592F41E41ED35BB61DC161EC22842A3E47290AE2A96DBA8DE3E403F3BAC"
+        }
+      ],
+      "projectBytesUnchanged": true,
+      "sourceBytesUnchanged": true,
+      "recordedOriginalBinarySha256": "82169D8795F26B4D22315942F9105E50357E0662B2EFE958DFD8C6192817F7B0",
+      "relocatedBinaryStatus": "not-built-or-executed",
+      "environmentChanges": [
+        "Relocated paths",
+        "Local build props/targets isolate repository defaults; original project bytes preserved."
+      ]
+    },
+    {
+      "id": "wpf.dispatcher-reentrancy.v1",
+      "originalArtifactRoot": "v1-only-01/reentrancy",
+      "copiedFiles": [
+        {
+          "path": "Cases/DispatcherReentrancy/V1/src/ClassicCodegen.cs",
+          "originalArtifact": "v1-only-01/reentrancy/src/ClassicCodegen.cs",
+          "sha256": "121E8628DC3BE8C8B3FF54629AAFA5C9AE462B2F6B21D3C452072B5BD3ABDD4E"
+        },
+        {
+          "path": "Cases/DispatcherReentrancy/V1/src/Program.cs",
+          "originalArtifact": "v1-only-01/reentrancy/src/Program.cs",
+          "sha256": "9FDD3DEE3DFAE7DD75920599AFD4469D4B675AC1C689A4D9778C158A119E5B19"
+        },
+        {
+          "path": "Cases/DispatcherReentrancy/V1/src/RuntimeAsyncMethodGenerationAttribute.cs",
+          "originalArtifact": "v1-only-01/reentrancy/src/RuntimeAsyncMethodGenerationAttribute.cs",
+          "sha256": "11A69AC2F03AF693EE24F7DDE7C719B534AAFEEFDF9610E31AFE05A2E0BCF4EF"
+        },
+        {
+          "path": "Cases/DispatcherReentrancy/V1/src/WpfAsyncScenarios.csproj",
+          "originalArtifact": "v1-only-01/reentrancy/src/WpfAsyncScenarios.csproj",
+          "sha256": "D83FD0AB464E0ABF8581FF873713F15E989820F340537C61F87EE2E9F9ACE9C1"
+        }
+      ],
+      "projectBytesUnchanged": true,
+      "sourceBytesUnchanged": true,
+      "recordedOriginalBinarySha256": "20A1332172B173C5F76CB1FC51BD08BF5C3683697B2A3E155C60413C04C28F76",
+      "relocatedBinaryStatus": "not-built-or-executed",
+      "environmentChanges": [
+        "Relocated paths",
+        "Local build props/targets isolate repository defaults; original project bytes preserved."
+      ]
+    },
+    {
+      "id": "wpf.dispatcher-reentrancy.v2",
+      "originalArtifactRoot": "dispatcher-reentrancy-01",
+      "copiedFiles": [
+        {
+          "path": "Cases/DispatcherReentrancy/V2/src/Program.cs",
+          "originalArtifact": "dispatcher-reentrancy-01/src/Program.cs",
+          "sha256": "7C98FC62841F0FCE77C6F33D005A0419DB0DC1476D1FFAB8554991DF270F057C"
+        },
+        {
+          "path": "Cases/DispatcherReentrancy/V2/src/RuntimeAsyncMethodGenerationAttribute.cs",
+          "originalArtifact": "dispatcher-reentrancy-01/src/RuntimeAsyncMethodGenerationAttribute.cs",
+          "sha256": "11A69AC2F03AF693EE24F7DDE7C719B534AAFEEFDF9610E31AFE05A2E0BCF4EF"
+        },
+        {
+          "path": "Cases/DispatcherReentrancy/V2/src/WpfAsyncScenarios.csproj",
+          "originalArtifact": "dispatcher-reentrancy-01/src/WpfAsyncScenarios.csproj",
+          "sha256": "6639B592F41E41ED35BB61DC161EC22842A3E47290AE2A96DBA8DE3E403F3BAC"
+        }
+      ],
+      "projectBytesUnchanged": true,
+      "sourceBytesUnchanged": true,
+      "recordedOriginalBinarySha256": "EA1F68B5C286494C41220149EFF88816B95FB035AB19CF2D0B48AAA82CC88F4C",
+      "relocatedBinaryStatus": "not-built-or-executed",
+      "environmentChanges": [
+        "Relocated paths",
+        "Local build props/targets isolate repository defaults; original project bytes preserved."
+      ]
+    },
+    {
+      "id": "wpf.wrapper-rollover.v2",
+      "originalArtifactRoot": "wrapper-rollover-01",
+      "copiedFiles": [
+        {
+          "path": "Cases/WrapperRollover/V2/src/GeneratedChains.cs",
+          "originalArtifact": "wrapper-rollover-01/src/GeneratedChains.cs",
+          "sha256": "D4DFB54E9BC0E177B37E721C4B93DA1D6AE161DBED41341D9C99F7D82B6067D5"
+        },
+        {
+          "path": "Cases/WrapperRollover/V2/src/Program.cs",
+          "originalArtifact": "wrapper-rollover-01/src/Program.cs",
+          "sha256": "664CABFDE49AACBA816442EB4E0763A4C0D4FA675B0368A903C9BF7526A79E5B"
+        },
+        {
+          "path": "Cases/WrapperRollover/V2/src/RuntimeAsyncMethodGenerationAttribute.cs",
+          "originalArtifact": "wrapper-rollover-01/src/RuntimeAsyncMethodGenerationAttribute.cs",
+          "sha256": "11A69AC2F03AF693EE24F7DDE7C719B534AAFEEFDF9610E31AFE05A2E0BCF4EF"
+        },
+        {
+          "path": "Cases/WrapperRollover/V2/src/WpfAsyncScenarios.csproj",
+          "originalArtifact": "wrapper-rollover-01/src/WpfAsyncScenarios.csproj",
+          "sha256": "6639B592F41E41ED35BB61DC161EC22842A3E47290AE2A96DBA8DE3E403F3BAC"
+        }
+      ],
+      "projectBytesUnchanged": true,
+      "sourceBytesUnchanged": true,
+      "recordedOriginalBinarySha256": "9C82FC5949D4DB62BE4CB7B067EFDF7564AC045E521B48578AD239E846175835",
+      "relocatedBinaryStatus": "not-built-or-executed",
+      "environmentChanges": [
+        "Relocated paths",
+        "Local build props/targets isolate repository defaults; original project bytes preserved."
+      ]
+    },
+    {
+      "id": "wpf.whenall.v1",
+      "originalArtifactRoot": "v1-only-01/whenall",
+      "copiedFiles": [
+        {
+          "path": "Cases/WhenAll/V1/src/ClassicCodegen.cs",
+          "originalArtifact": "v1-only-01/whenall/src/ClassicCodegen.cs",
+          "sha256": "121E8628DC3BE8C8B3FF54629AAFA5C9AE462B2F6B21D3C452072B5BD3ABDD4E"
+        },
+        {
+          "path": "Cases/WhenAll/V1/src/Program.cs",
+          "originalArtifact": "v1-only-01/whenall/src/Program.cs",
+          "sha256": "A886141B1BE3B94B0AAE8BA25A4B4AD42DB425B88F8F17FB12B51A45E77B025D"
+        },
+        {
+          "path": "Cases/WhenAll/V1/src/RuntimeAsyncMethodGenerationAttribute.cs",
+          "originalArtifact": "v1-only-01/whenall/src/RuntimeAsyncMethodGenerationAttribute.cs",
+          "sha256": "11A69AC2F03AF693EE24F7DDE7C719B534AAFEEFDF9610E31AFE05A2E0BCF4EF"
+        },
+        {
+          "path": "Cases/WhenAll/V1/src/WpfAsyncScenarios.csproj",
+          "originalArtifact": "v1-only-01/whenall/src/WpfAsyncScenarios.csproj",
+          "sha256": "D83FD0AB464E0ABF8581FF873713F15E989820F340537C61F87EE2E9F9ACE9C1"
+        }
+      ],
+      "projectBytesUnchanged": true,
+      "sourceBytesUnchanged": true,
+      "recordedOriginalBinarySha256": "E52487D039016DB32E3BB6A78AF76BDB7AC8DF6D29B5C9411F7C2AC54966EAE4",
+      "relocatedBinaryStatus": "not-built-or-executed",
+      "environmentChanges": [
+        "Relocated paths",
+        "Local build props/targets isolate repository defaults; original project bytes preserved."
+      ]
+    },
+    {
+      "id": "wpf.whenall.v2",
+      "originalArtifactRoot": "whenall-join-01",
+      "copiedFiles": [
+        {
+          "path": "Cases/WhenAll/V2/src/Program.cs",
+          "originalArtifact": "whenall-join-01/src/Program.cs",
+          "sha256": "C529A3BC4435593E406A3A8049418C7FB06AF9B3ED3EEF59B25ABE55F5FF16E3"
+        },
+        {
+          "path": "Cases/WhenAll/V2/src/RuntimeAsyncMethodGenerationAttribute.cs",
+          "originalArtifact": "whenall-join-01/src/RuntimeAsyncMethodGenerationAttribute.cs",
+          "sha256": "11A69AC2F03AF693EE24F7DDE7C719B534AAFEEFDF9610E31AFE05A2E0BCF4EF"
+        },
+        {
+          "path": "Cases/WhenAll/V2/src/WpfAsyncScenarios.csproj",
+          "originalArtifact": "whenall-join-01/src/WpfAsyncScenarios.csproj",
+          "sha256": "6639B592F41E41ED35BB61DC161EC22842A3E47290AE2A96DBA8DE3E403F3BAC"
+        }
+      ],
+      "projectBytesUnchanged": true,
+      "sourceBytesUnchanged": true,
+      "recordedOriginalBinarySha256": "3E8FBCD2A57A16D6DBB8479E27CC94A0420F22C296C37718C91978B9C5FF17BC",
+      "relocatedBinaryStatus": "not-built-or-executed",
+      "environmentChanges": [
+        "Relocated paths",
+        "Local build props/targets isolate repository defaults; original project bytes preserved."
+      ]
+    },
+    {
+      "id": "wpf.mixed-families.mixed",
+      "originalArtifactRoot": "mixed-dispatcher-01",
+      "copiedFiles": [
+        {
+          "path": "Cases/MixedFamilies/Mixed/src/Program.cs",
+          "originalArtifact": "mixed-dispatcher-01/src/Program.cs",
+          "sha256": "0E25D0D91BF6ED99AA625266ED318183E50537755A958AF2E38A10F3CF7AC0A4"
+        },
+        {
+          "path": "Cases/MixedFamilies/Mixed/src/RuntimeAsyncMethodGenerationAttribute.cs",
+          "originalArtifact": "mixed-dispatcher-01/src/RuntimeAsyncMethodGenerationAttribute.cs",
+          "sha256": "11A69AC2F03AF693EE24F7DDE7C719B534AAFEEFDF9610E31AFE05A2E0BCF4EF"
+        },
+        {
+          "path": "Cases/MixedFamilies/Mixed/src/WpfAsyncScenarios.csproj",
+          "originalArtifact": "mixed-dispatcher-01/src/WpfAsyncScenarios.csproj",
+          "sha256": "6639B592F41E41ED35BB61DC161EC22842A3E47290AE2A96DBA8DE3E403F3BAC"
+        }
+      ],
+      "projectBytesUnchanged": true,
+      "sourceBytesUnchanged": true,
+      "recordedOriginalBinarySha256": "828AEB514FC91D708E570338ACC531A2218007B2EAFE27DBD5F25750239DCD6F",
+      "relocatedBinaryStatus": "not-built-or-executed",
+      "environmentChanges": [
+        "Relocated paths",
+        "Local build props/targets isolate repository defaults; original project bytes preserved."
+      ]
+    },
+    {
+      "id": "wpf.dynamic-await-policy.v2",
+      "originalArtifactRoot": ".",
+      "copiedFiles": [
+        {
+          "path": "Cases/DynamicAwaitPolicy/V2/src/Program.cs",
+          "originalArtifact": "src/Program.cs",
+          "sha256": "B89E96F601A47DC17CEF49C1CD9D969E53D8F87F668A2C941C2A09A64059057B"
+        },
+        {
+          "path": "Cases/DynamicAwaitPolicy/V2/src/RuntimeAsyncMethodGenerationAttribute.cs",
+          "originalArtifact": "src/RuntimeAsyncMethodGenerationAttribute.cs",
+          "sha256": "11A69AC2F03AF693EE24F7DDE7C719B534AAFEEFDF9610E31AFE05A2E0BCF4EF"
+        },
+        {
+          "path": "Cases/DynamicAwaitPolicy/V2/src/WpfAsyncScenarios.csproj",
+          "originalArtifact": "src/WpfAsyncScenarios.csproj",
+          "sha256": "6639B592F41E41ED35BB61DC161EC22842A3E47290AE2A96DBA8DE3E403F3BAC"
+        }
+      ],
+      "projectBytesUnchanged": true,
+      "sourceBytesUnchanged": true,
+      "recordedOriginalBinarySha256": "FF4939AACC211AF95E1FCCED971322A3CBF678E06FF3180ED204D9A6CE7F6E3F",
+      "relocatedBinaryStatus": "not-built-or-executed",
+      "environmentChanges": [
+        "Relocated paths",
+        "Local build props/targets isolate repository defaults; original project bytes preserved."
+      ]
+    }
+  ]
+}

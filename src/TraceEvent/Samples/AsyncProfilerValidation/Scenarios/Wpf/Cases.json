@@ -1,0 +1,249 @@
+{
+  "schemaVersion": 1,
+  "cases": [
+    {
+      "id": "wpf.context-resumption.v1",
+      "case": "ContextResumption",
+      "family": "V1",
+      "project": "Cases/ContextResumption/V1/src/WpfAsyncScenarios.csproj",
+      "modes": [
+        "capture-ui",
+        "configure-false"
+      ],
+      "features": "runtime-async=off",
+      "instructions": "Cases/ContextResumption/README.md",
+      "findingId": "wpf.context-resumption",
+      "sourceOriginId": "wpf.context-resumption.v1",
+      "relocatedExecution": "not-run"
+    },
+    {
+      "id": "wpf.context-resumption.v2",
+      "case": "ContextResumption",
+      "family": "V2",
+      "project": "Cases/ContextResumption/V2/src/WpfAsyncScenarios.csproj",
+      "modes": [
+        "capture-ui",
+        "configure-false"
+      ],
+      "features": "runtime-async=on",
+      "instructions": "Cases/ContextResumption/README.md",
+      "findingId": "wpf.context-resumption",
+      "sourceOriginId": "wpf.context-resumption.v2",
+      "relocatedExecution": "not-run"
+    },
+    {
+      "id": "wpf.deep-chains.v1",
+      "case": "DeepChains",
+      "family": "V1",
+      "project": "Cases/DeepChains/V1/src/WpfAsyncScenarios.csproj",
+      "modes": [
+        "depth-64"
+      ],
+      "features": "runtime-async=off",
+      "instructions": "Cases/DeepChains/README.md",
+      "findingId": "wpf.deep-chains",
+      "sourceOriginId": "wpf.deep-chains.v1",
+      "relocatedExecution": "not-run"
+    },
+    {
+      "id": "wpf.deep-chains.v2",
+      "case": "DeepChains",
+      "family": "V2",
+      "project": "Cases/DeepChains/V2/src/WpfAsyncScenarios.csproj",
+      "modes": [
+        "depth-08",
+        "depth-32",
+        "depth-64"
+      ],
+      "features": "runtime-async=on",
+      "instructions": "Cases/DeepChains/README.md",
+      "findingId": "wpf.deep-chains",
+      "sourceOriginId": "wpf.deep-chains.v2",
+      "relocatedExecution": "not-run"
+    },
+    {
+      "id": "wpf.overlapping-operations.v1",
+      "case": "OverlappingOperations",
+      "family": "V1",
+      "project": "Cases/OverlappingOperations/V1/src/WpfAsyncScenarios.csproj",
+      "modes": [
+        "overlap-abab"
+      ],
+      "features": "runtime-async=off",
+      "instructions": "Cases/OverlappingOperations/README.md",
+      "findingId": "wpf.overlapping-operations",
+      "sourceOriginId": "wpf.overlapping-operations.v1",
+      "relocatedExecution": "not-run"
+    },
+    {
+      "id": "wpf.overlapping-operations.v2",
+      "case": "OverlappingOperations",
+      "family": "V2",
+      "project": "Cases/OverlappingOperations/V2/src/WpfAsyncScenarios.csproj",
+      "modes": [
+        "overlap-abab"
+      ],
+      "features": "runtime-async=on",
+      "instructions": "Cases/OverlappingOperations/README.md",
+      "findingId": "wpf.overlapping-operations",
+      "sourceOriginId": "wpf.overlapping-operations.v2",
+      "relocatedExecution": "not-run"
+    },
+    {
+      "id": "wpf.exception-handling.v1",
+      "case": "ExceptionHandling",
+      "family": "V1",
+      "project": "Cases/ExceptionHandling/V1/src/WpfAsyncScenarios.csproj",
+      "modes": [
+        "exception-ui"
+      ],
+      "features": "runtime-async=off",
+      "instructions": "Cases/ExceptionHandling/README.md",
+      "findingId": "wpf.exception-handling",
+      "sourceOriginId": "wpf.exception-handling.v1",
+      "relocatedExecution": "not-run"
+    },
+    {
+      "id": "wpf.exception-handling.v2",
+      "case": "ExceptionHandling",
+      "family": "V2",
+      "project": "Cases/ExceptionHandling/V2/src/WpfAsyncScenarios.csproj",
+      "modes": [
+        "exception-ui"
+      ],
+      "features": "runtime-async=on",
+      "instructions": "Cases/ExceptionHandling/README.md",
+      "findingId": "wpf.exception-handling",
+      "sourceOriginId": "wpf.exception-handling.v2",
+      "relocatedExecution": "not-run"
+    },
+    {
+      "id": "wpf.cancellation.v1",
+      "case": "Cancellation",
+      "family": "V1",
+      "project": "Cases/Cancellation/V1/src/WpfAsyncScenarios.csproj",
+      "modes": [
+        "cancel-fresh-ui"
+      ],
+      "features": "runtime-async=off",
+      "instructions": "Cases/Cancellation/README.md",
+      "findingId": "wpf.cancellation",
+      "sourceOriginId": "wpf.cancellation.v1",
+      "relocatedExecution": "not-run"
+    },
+    {
+      "id": "wpf.cancellation.v2",
+      "case": "Cancellation",
+      "family": "V2",
+      "project": "Cases/Cancellation/V2/src/WpfAsyncScenarios.csproj",
+      "modes": [
+        "cancel-fresh-ui"
+      ],
+      "features": "runtime-async=on",
+      "instructions": "Cases/Cancellation/README.md",
+      "findingId": "wpf.cancellation",
+      "sourceOriginId": "wpf.cancellation.v2",
+      "relocatedExecution": "not-run"
+    },
+    {
+      "id": "wpf.dispatcher-reentrancy.v1",
+      "case": "DispatcherReentrancy",
+      "family": "V1",
+      "project": "Cases/DispatcherReentrancy/V1/src/WpfAsyncScenarios.csproj",
+      "modes": [
+        "nested-ui"
+      ],
+      "features": "runtime-async=off",
+      "instructions": "Cases/DispatcherReentrancy/README.md",
+      "findingId": "wpf.dispatcher-reentrancy",
+      "sourceOriginId": "wpf.dispatcher-reentrancy.v1",
+      "relocatedExecution": "not-run"
+    },
+    {
+      "id": "wpf.dispatcher-reentrancy.v2",
+      "case": "DispatcherReentrancy",
+      "family": "V2",
+      "project": "Cases/DispatcherReentrancy/V2/src/WpfAsyncScenarios.csproj",
+      "modes": [
+        "nested-ui"
+      ],
+      "features": "runtime-async=on",
+      "instructions": "Cases/DispatcherReentrancy/README.md",
+      "findingId": "wpf.dispatcher-reentrancy",
+      "sourceOriginId": "wpf.dispatcher-reentrancy.v2",
+      "relocatedExecution": "not-run"
+    },
+    {
+      "id": "wpf.wrapper-rollover.v2",
+      "case": "WrapperRollover",
+      "family": "V2",
+      "project": "Cases/WrapperRollover/V2/src/WpfAsyncScenarios.csproj",
+      "modes": [
+        "rollover-off-ui"
+      ],
+      "features": "runtime-async=on",
+      "instructions": "Cases/WrapperRollover/README.md",
+      "findingId": "wpf.wrapper-rollover",
+      "sourceOriginId": "wpf.wrapper-rollover.v2",
+      "relocatedExecution": "not-run"
+    },
+    {
+      "id": "wpf.whenall.v1",
+      "case": "WhenAll",
+      "family": "V1",
+      "project": "Cases/WhenAll/V1/src/WpfAsyncScenarios.csproj",
+      "modes": [
+        "whenall-ui"
+      ],
+      "features": "runtime-async=off",
+      "instructions": "Cases/WhenAll/README.md",
+      "findingId": "wpf.whenall",
+      "sourceOriginId": "wpf.whenall.v1",
+      "relocatedExecution": "not-run"
+    },
+    {
+      "id": "wpf.whenall.v2",
+      "case": "WhenAll",
+      "family": "V2",
+      "project": "Cases/WhenAll/V2/src/WpfAsyncScenarios.csproj",
+      "modes": [
+        "whenall-ui"
+      ],
+      "features": "runtime-async=on",
+      "instructions": "Cases/WhenAll/README.md",
+      "findingId": "wpf.whenall",
+      "sourceOriginId": "wpf.whenall.v2",
+      "relocatedExecution": "not-run"
+    },
+    {
+      "id": "wpf.mixed-families.mixed",
+      "case": "MixedFamilies",
+      "family": "Mixed",
+      "project": "Cases/MixedFamilies/Mixed/src/WpfAsyncScenarios.csproj",
+      "modes": [
+        "mixed-121",
+        "mixed-212"
+      ],
+      "features": "runtime-async=on",
+      "instructions": "Cases/MixedFamilies/README.md",
+      "findingId": "wpf.mixed-families",
+      "sourceOriginId": "wpf.mixed-families.mixed",
+      "relocatedExecution": "not-run"
+    },
+    {
+      "id": "wpf.dynamic-await-policy.v2",
+      "case": "DynamicAwaitPolicy",
+      "family": "V2",
+      "project": "Cases/DynamicAwaitPolicy/V2/src/WpfAsyncScenarios.csproj",
+      "modes": [
+        "capture-ui",
+        "configure-false"
+      ],
+      "features": "runtime-async=on",
+      "instructions": "Cases/DynamicAwaitPolicy/README.md",
+      "findingId": "wpf.dynamic-await-policy",
+      "sourceOriginId": "wpf.dynamic-await-policy.v2",
+      "relocatedExecution": "not-run"
+    }
+  ]
+}
