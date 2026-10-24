@@ -1,0 +1,3 @@
+<Project>
+  <!-- Experimental scenario projects do not inherit repository build targets. -->
+</Project>

@@ -1,0 +1,593 @@
+{
+  "schemaVersion": 1,
+  "rawEvidenceAvailability": "Retained separately; not checked in and not yet shared. No external artifact bundle or URL has been published.",
+  "historicalResultsOnly": true,
+  "relocatedSourcesExecutionStatus": "not-run",
+  "sourceOriginsRef": "../../Scenarios/Wpf/SourceOrigins.json",
+  "environments": [
+    {
+      "id": "wpf11rc",
+      "sdk": "11.0.100-rc.1.26420.103",
+      "framework": "11.0.0-rc.1.26420.103",
+      "frameworks": [
+        "Microsoft.NETCore.App",
+        "Microsoft.WindowsDesktop.App"
+      ],
+      "runtimeSourceVmr": "1d599674e31ad86ca9e6e1dad7055b531e4d58e4",
+      "rollForward": "Disable",
+      "selectedRuleProfile": "Common",
+      "capturedVersionMetadata": "empty",
+      "recordedBinarySha256": {
+        "Host": "05D69F035EC80C33D5F49F0CFE59E8F18FA120075553C7F69C2C7F17685C47C0",
+        "CoreLib": "3024CCD24E65BDD9C95D94FAB6B011AB54EE180275DA157A6FA0F76DC9D03820",
+        "CoreClr": "654C6E5E2C3B9E8C512B693711A1F44C9CB20BF68682FCE5115C1E4FF97267E5",
+        "PresentationFramework": "04C0726E45F513146C81CFBD7AE44354409AEF24D7EC85B4BD3B32D35909BCCD",
+        "PresentationCore": "3E34EE772BEE3E2FC0E67F060164F332C164A3C00EBCFE315EBF9C8C2FA20DC1",
+        "WindowsBase": "FB7D56220B3D67D74F107EAAAC706CC9D6DD195F17BD8353CF82323E581216D3"
+      }
+    }
+  ],
+  "traceEvent": [
+    {
+      "id": "traceevent-e8b05c36",
+      "commit": "e8b05c36e14eb408f034de0f543bee9523f8fd87",
+      "traceEventSha256": "97F9071B5C81B8A622F3C07D9289826766B7B06558C72B47AC220FBE3307D721",
+      "helperSha256": "4EFC217161292982AE3FFFB23F30634EDBD5281A535B2F05BF2D656E9C46A52B"
+    }
+  ],
+  "findings": [
+    {
+      "id": "wpf.context-resumption",
+      "summaryRef": "Findings/ContextResumption.md",
+      "sourceIds": [
+        "wpf.context-resumption.v1",
+        "wpf.context-resumption.v2"
+      ],
+      "runIds": [
+        "v1-only-01/baseline/runs/20261024-real-false-01",
+        "v1-only-01/baseline/runs/20261024-real-ui-01",
+        "explicit-policy-01/runs/20261024-real-capture-ui-01",
+        "explicit-policy-01/runs/20261024-real-configure-false-01"
+      ],
+      "originalFindingSummaryRefs": [
+        "explicit-policy-01/runs/20261024-explicit-api-results-01/RESULTS.md",
+        "v1-only-01/RESULTS.md"
+      ]
+    },
+    {
+      "id": "wpf.deep-chains",
+      "summaryRef": "Findings/DeepChains.md",
+      "sourceIds": [
+        "wpf.deep-chains.v1",
+        "wpf.deep-chains.v2"
+      ],
+      "runIds": [
+        "v1-only-01/depth/runs/20261024-real-01",
+        "depth-resumption-01/runs/20261024-real-depth08-01",
+        "depth-resumption-01/runs/20261024-real-depth32-01",
+        "depth-resumption-01/runs/20261024-real-depth64-01"
+      ],
+      "originalFindingSummaryRefs": [
+        "depth-resumption-01/runs/20261024-depth-api-results-01/RESULTS.md",
+        "v1-only-01/RESULTS.md"
+      ]
+    },
+    {
+      "id": "wpf.overlapping-operations",
+      "summaryRef": "Findings/OverlappingOperations.md",
+      "sourceIds": [
+        "wpf.overlapping-operations.v1",
+        "wpf.overlapping-operations.v2"
+      ],
+      "runIds": [
+        "v1-only-01/overlap/runs/20261024-real-01",
+        "overlap-operations-01/runs/20261024-real-abab-01"
+      ],
+      "originalFindingSummaryRefs": [
+        "overlap-operations-01/runs/20261024-overlap-api-results-01/RESULTS.md",
+        "v1-only-01/RESULTS.md"
+      ]
+    },
+    {
+      "id": "wpf.exception-handling",
+      "summaryRef": "Findings/ExceptionHandling.md",
+      "sourceIds": [
+        "wpf.exception-handling.v1",
+        "wpf.exception-handling.v2"
+      ],
+      "runIds": [
+        "v1-only-01/exception/runs/20261024-real-01",
+        "exception-propagation-01/runs/20261024-real-exception-01"
+      ],
+      "originalFindingSummaryRefs": [
+        "exception-propagation-01/runs/20261024-exception-api-results-01/RESULTS.md",
+        "v1-only-01/RESULTS.md"
+      ]
+    },
+    {
+      "id": "wpf.cancellation",
+      "summaryRef": "Findings/Cancellation.md",
+      "sourceIds": [
+        "wpf.cancellation.v1",
+        "wpf.cancellation.v2"
+      ],
+      "runIds": [
+        "v1-only-01/cancellation/runs/20261024-real-01",
+        "cancellation-fresh-01/runs/20261024-real-cancel-fresh-01"
+      ],
+      "originalFindingSummaryRefs": [
+        "cancellation-fresh-01/runs/20261024-cancellation-api-results-01/RESULTS.md",
+        "v1-only-01/RESULTS.md"
+      ]
+    },
+    {
+      "id": "wpf.dispatcher-reentrancy",
+      "summaryRef": "Findings/DispatcherReentrancy.md",
+      "sourceIds": [
+        "wpf.dispatcher-reentrancy.v1",
+        "wpf.dispatcher-reentrancy.v2"
+      ],
+      "runIds": [
+        "v1-only-01/reentrancy/runs/20261024-real-01",
+        "dispatcher-reentrancy-01/runs/20261024-real-nested-01"
+      ],
+      "originalFindingSummaryRefs": [
+        "dispatcher-reentrancy-01/runs/20261024-reentrancy-api-results-01/RESULTS.md",
+        "v1-only-01/RESULTS.md"
+      ]
+    },
+    {
+      "id": "wpf.wrapper-rollover",
+      "summaryRef": "Findings/WrapperRollover.md",
+      "sourceIds": [
+        "wpf.wrapper-rollover.v2"
+      ],
+      "runIds": [
+        "wrapper-rollover-01/runs/20261024-real-rollover-01"
+      ],
+      "originalFindingSummaryRefs": [
+        "wrapper-rollover-01/runs/20261024-rollover-api-results-01/RESULTS.md"
+      ]
+    },
+    {
+      "id": "wpf.whenall",
+      "summaryRef": "Findings/WhenAll.md",
+      "sourceIds": [
+        "wpf.whenall.v1",
+        "wpf.whenall.v2"
+      ],
+      "runIds": [
+        "v1-only-01/whenall/runs/20261024-real-01",
+        "whenall-join-01/runs/20261024-real-join-02"
+      ],
+      "originalFindingSummaryRefs": [
+        "whenall-join-01/REVIEW.md",
+        "v1-only-01/RESULTS.md"
+      ]
+    },
+    {
+      "id": "wpf.mixed-families",
+      "summaryRef": "Findings/MixedFamilies.md",
+      "sourceIds": [
+        "wpf.mixed-families.mixed"
+      ],
+      "runIds": [
+        "mixed-dispatcher-01/runs/20261024-real-mixed-121-01",
+        "mixed-dispatcher-01/runs/20261024-real-mixed-212-01"
+      ],
+      "originalFindingSummaryRefs": [
+        "mixed-dispatcher-01/runs/20261024-mixed-api-results-01/RESULTS.md"
+      ]
+    },
+    {
+      "id": "wpf.dynamic-await-policy",
+      "summaryRef": "Findings/DynamicAwaitPolicy.md",
+      "sourceIds": [
+        "wpf.dynamic-await-policy.v2"
+      ],
+      "runIds": [
+        "runs/20261023-real-capture-ui-01",
+        "runs/20261023-real-configure-false-01"
+      ],
+      "originalFindingSummaryRefs": [
+        "runs/20261023-wpf-context-api-results-01/RESULTS.md"
+      ]
+    },
+    {
+      "id": "wpf.detailed-v2-events",
+      "summaryRef": "Findings/DetailedV2Events.md",
+      "sourceIds": [
+        "wpf.cancellation.v2",
+        "wpf.exception-handling.v2"
+      ],
+      "runIds": [
+        "detailed-v2-events-01/exception/runs/20261024-on-details-01",
+        "detailed-v2-events-01/cancellation/runs/20261024-on-details-01"
+      ],
+      "originalFindingSummaryRefs": [
+        "detailed-v2-events-01/RESULTS.md"
+      ]
+    },
+    {
+      "id": "wpf.async-graph",
+      "summaryRef": "AsyncGraph.md",
+      "sourceIds": [
+        "wpf.whenall.v2"
+      ],
+      "runIds": [
+        "async-graph-feasibility-01/runs/20261024-relationships-01"
+      ],
+      "originalFindingSummaryRefs": [
+        "async-graph-feasibility-01/RESULTS.md"
+      ]
+    }
+  ],
+  "runs": [
+    {
+      "id": "v1-only-01/baseline/runs/20261024-real-false-01",
+      "sourceId": "wpf.context-resumption.v1",
+      "scenarioMode": "configure-false",
+      "captureSha256": "08A03EB20F41A67F27B6D594F6A08B1D1A407479A0806F0DCC72765981BAF967",
+      "originalBinarySha256": "F893CFBEB0A9BD04055577DBB66730003D30268AC33609D618C81D3D6D4597CE",
+      "environmentId": "wpf11rc",
+      "traceEventId": "traceevent-e8b05c36",
+      "provider": "System.Runtime.CompilerServices.AsyncProfilerEventSource:0x2F04C:5",
+      "profile": "dotnet-sampled-thread-time",
+      "originalSummaryRef": "v1-only-01/baseline/runs/20261024-real-false-01/capture.json",
+      "collectorId": "matched-collector"
+    },
+    {
+      "id": "v1-only-01/baseline/runs/20261024-real-ui-01",
+      "sourceId": "wpf.context-resumption.v1",
+      "scenarioMode": "capture-ui",
+      "captureSha256": "82746FFD2427F05ADF736D0B6CA0E4AF652472A4428CFF06CF98ABF0342DF737",
+      "originalBinarySha256": "F893CFBEB0A9BD04055577DBB66730003D30268AC33609D618C81D3D6D4597CE",
+      "environmentId": "wpf11rc",
+      "traceEventId": "traceevent-e8b05c36",
+      "provider": "System.Runtime.CompilerServices.AsyncProfilerEventSource:0x2F04C:5",
+      "profile": "dotnet-sampled-thread-time",
+      "originalSummaryRef": "v1-only-01/baseline/runs/20261024-real-ui-01/capture.json",
+      "collectorId": "matched-collector"
+    },
+    {
+      "id": "explicit-policy-01/runs/20261024-real-capture-ui-01",
+      "sourceId": "wpf.context-resumption.v2",
+      "scenarioMode": "capture-ui",
+      "captureSha256": "3A20B44CB78BB87D28F761D5FA0B312F89F1D01E78CAD304AE0761C0D07FFF01",
+      "originalBinarySha256": "6EEA6367E15273A45976CF85E5FBE742F4ECE8419419C631A41CE387A63D451D",
+      "environmentId": "wpf11rc",
+      "traceEventId": "traceevent-e8b05c36",
+      "provider": "System.Runtime.CompilerServices.AsyncProfilerEventSource:0x2F04C:5",
+      "profile": "dotnet-sampled-thread-time",
+      "originalSummaryRef": "explicit-policy-01/runs/20261024-real-capture-ui-01/capture.json",
+      "collectorId": "matched-collector"
+    },
+    {
+      "id": "explicit-policy-01/runs/20261024-real-configure-false-01",
+      "sourceId": "wpf.context-resumption.v2",
+      "scenarioMode": "configure-false",
+      "captureSha256": "B51B81780B3442563FA4219426B8C4513856EF57E0307556ADC641F2A30CFB43",
+      "originalBinarySha256": "6EEA6367E15273A45976CF85E5FBE742F4ECE8419419C631A41CE387A63D451D",
+      "environmentId": "wpf11rc",
+      "traceEventId": "traceevent-e8b05c36",
+      "provider": "System.Runtime.CompilerServices.AsyncProfilerEventSource:0x2F04C:5",
+      "profile": "dotnet-sampled-thread-time",
+      "originalSummaryRef": "explicit-policy-01/runs/20261024-real-configure-false-01/capture.json",
+      "collectorId": "matched-collector"
+    },
+    {
+      "id": "v1-only-01/depth/runs/20261024-real-01",
+      "sourceId": "wpf.deep-chains.v1",
+      "scenarioMode": "depth-64",
+      "captureSha256": "91D0034CC9697554EE905C51AEDDC7E73441519ADCACB85C9AD9A25ECCD7860F",
+      "originalBinarySha256": "DCD6EB1AB55718DB48A2A653EAF461CBA5F7DCECAE31E7BFE82412BB3BC87467",
+      "environmentId": "wpf11rc",
+      "traceEventId": "traceevent-e8b05c36",
+      "provider": "System.Runtime.CompilerServices.AsyncProfilerEventSource:0x2F04C:5",
+      "profile": "dotnet-sampled-thread-time",
+      "originalSummaryRef": "v1-only-01/depth/runs/20261024-real-01/capture.json",
+      "collectorId": "matched-collector"
+    },
+    {
+      "id": "depth-resumption-01/runs/20261024-real-depth08-01",
+      "sourceId": "wpf.deep-chains.v2",
+      "scenarioMode": "depth-08",
+      "captureSha256": "12E51A5CDCB7C06BDCE597C659F36AABE6AE3730F075BAD3D8FD0AADE7658125",
+      "originalBinarySha256": "1CB9CD51D0B8A6FA141B8BDB2497E83C041D6F78EE875E47CAB42F4DC22F52F6",
+      "environmentId": "wpf11rc",
+      "traceEventId": "traceevent-e8b05c36",
+      "provider": "System.Runtime.CompilerServices.AsyncProfilerEventSource:0x2F04C:5",
+      "profile": "dotnet-sampled-thread-time",
+      "originalSummaryRef": "depth-resumption-01/runs/20261024-real-depth08-01/capture.json",
+      "collectorId": "matched-collector"
+    },
+    {
+      "id": "depth-resumption-01/runs/20261024-real-depth32-01",
+      "sourceId": "wpf.deep-chains.v2",
+      "scenarioMode": "depth-32",
+      "captureSha256": "A34CCAB690A7A67A60ECFEB335DCBB130D554E9D28B98D50CB68FE337911A042",
+      "originalBinarySha256": "1CB9CD51D0B8A6FA141B8BDB2497E83C041D6F78EE875E47CAB42F4DC22F52F6",
+      "environmentId": "wpf11rc",
+      "traceEventId": "traceevent-e8b05c36",
+      "provider": "System.Runtime.CompilerServices.AsyncProfilerEventSource:0x2F04C:5",
+      "profile": "dotnet-sampled-thread-time",
+      "originalSummaryRef": "depth-resumption-01/runs/20261024-real-depth32-01/capture.json",
+      "collectorId": "matched-collector"
+    },
+    {
+      "id": "depth-resumption-01/runs/20261024-real-depth64-01",
+      "sourceId": "wpf.deep-chains.v2",
+      "scenarioMode": "depth-64",
+      "captureSha256": "D6A9B508342332F72FD13CC61C364581A39A03EB25FA1F69F18FCEFA4D0A2A5C",
+      "originalBinarySha256": "1CB9CD51D0B8A6FA141B8BDB2497E83C041D6F78EE875E47CAB42F4DC22F52F6",
+      "environmentId": "wpf11rc",
+      "traceEventId": "traceevent-e8b05c36",
+      "provider": "System.Runtime.CompilerServices.AsyncProfilerEventSource:0x2F04C:5",
+      "profile": "dotnet-sampled-thread-time",
+      "originalSummaryRef": "depth-resumption-01/runs/20261024-real-depth64-01/capture.json",
+      "collectorId": "matched-collector"
+    },
+    {
+      "id": "v1-only-01/overlap/runs/20261024-real-01",
+      "sourceId": "wpf.overlapping-operations.v1",
+      "scenarioMode": "overlap-abab",
+      "captureSha256": "79C5D783AF08EC1EE9859A749D00B0289446A3F2404F92776478FDEC1523D90F",
+      "originalBinarySha256": "7EDC5E75D3E69673EC222FADAA00A480AACAF6D5BE8B944A16A90D7095034014",
+      "environmentId": "wpf11rc",
+      "traceEventId": "traceevent-e8b05c36",
+      "provider": "System.Runtime.CompilerServices.AsyncProfilerEventSource:0x2F04C:5",
+      "profile": "dotnet-sampled-thread-time",
+      "originalSummaryRef": "v1-only-01/overlap/runs/20261024-real-01/capture.json",
+      "collectorId": "matched-collector"
+    },
+    {
+      "id": "overlap-operations-01/runs/20261024-real-abab-01",
+      "sourceId": "wpf.overlapping-operations.v2",
+      "scenarioMode": "overlap-abab",
+      "captureSha256": "8436D54DC3B61253C21A3CDB52E7E03F127AEF0BF0211EA3F5691C339183C44D",
+      "originalBinarySha256": "01649349CB2249A00A825D16572EF148AD37E734CA487FA90FD33D800DC71E0F",
+      "environmentId": "wpf11rc",
+      "traceEventId": "traceevent-e8b05c36",
+      "provider": "System.Runtime.CompilerServices.AsyncProfilerEventSource:0x2F04C:5",
+      "profile": "dotnet-sampled-thread-time",
+      "originalSummaryRef": "overlap-operations-01/runs/20261024-real-abab-01/capture.json",
+      "collectorId": "matched-collector"
+    },
+    {
+      "id": "v1-only-01/exception/runs/20261024-real-01",
+      "sourceId": "wpf.exception-handling.v1",
+      "scenarioMode": "exception-ui",
+      "captureSha256": "4312B6687C11582CC356C474D7E267CE7A551F6C8CC5BC95BAF1F254964E5F51",
+      "originalBinarySha256": "761CCBC110A0E18E696656E94EA549C8DA9646A488F65B27B0782F03D95E2140",
+      "environmentId": "wpf11rc",
+      "traceEventId": "traceevent-e8b05c36",
+      "provider": "System.Runtime.CompilerServices.AsyncProfilerEventSource:0x2F04C:5",
+      "profile": "dotnet-sampled-thread-time",
+      "originalSummaryRef": "v1-only-01/exception/runs/20261024-real-01/capture.json",
+      "collectorId": "matched-collector"
+    },
+    {
+      "id": "exception-propagation-01/runs/20261024-real-exception-01",
+      "sourceId": "wpf.exception-handling.v2",
+      "scenarioMode": "exception-ui",
+      "captureSha256": "B48151BACEE60FA9D5CF01931547C51FCFCFA47B463E8081DBA80975453FADC4",
+      "originalBinarySha256": "5AFD237B8C8CA3381183B76B8F3DE46AE7038C60BA9E7625D6EF876E1281E312",
+      "environmentId": "wpf11rc",
+      "traceEventId": "traceevent-e8b05c36",
+      "provider": "System.Runtime.CompilerServices.AsyncProfilerEventSource:0x2F04C:5",
+      "profile": "dotnet-sampled-thread-time",
+      "originalSummaryRef": "exception-propagation-01/runs/20261024-real-exception-01/capture.json",
+      "collectorId": "matched-collector"
+    },
+    {
+      "id": "v1-only-01/cancellation/runs/20261024-real-01",
+      "sourceId": "wpf.cancellation.v1",
+      "scenarioMode": "cancel-fresh-ui",
+      "captureSha256": "C04F78C9C9AFC9B7DEFACBFFB8DCCDA894C5DC0CB9FEAF054A610F3F632583BA",
+      "originalBinarySha256": "75EAB55694506CAC046919BEA1508C2615E6D39236F35C5D52947F016693D611",
+      "environmentId": "wpf11rc",
+      "traceEventId": "traceevent-e8b05c36",
+      "provider": "System.Runtime.CompilerServices.AsyncProfilerEventSource:0x2F04C:5",
+      "profile": "dotnet-sampled-thread-time",
+      "originalSummaryRef": "v1-only-01/cancellation/runs/20261024-real-01/capture.json",
+      "collectorId": "matched-collector"
+    },
+    {
+      "id": "cancellation-fresh-01/runs/20261024-real-cancel-fresh-01",
+      "sourceId": "wpf.cancellation.v2",
+      "scenarioMode": "cancel-fresh-ui",
+      "captureSha256": "4F2966EA9BFD5DDDFFEABD6E5D9B1DC95348C20965178D511CBF92BBBB5FFDF7",
+      "originalBinarySha256": "82169D8795F26B4D22315942F9105E50357E0662B2EFE958DFD8C6192817F7B0",
+      "environmentId": "wpf11rc",
+      "traceEventId": "traceevent-e8b05c36",
+      "provider": "System.Runtime.CompilerServices.AsyncProfilerEventSource:0x2F04C:5",
+      "profile": "dotnet-sampled-thread-time",
+      "originalSummaryRef": "cancellation-fresh-01/runs/20261024-real-cancel-fresh-01/capture.json",
+      "collectorId": "matched-collector"
+    },
+    {
+      "id": "v1-only-01/reentrancy/runs/20261024-real-01",
+      "sourceId": "wpf.dispatcher-reentrancy.v1",
+      "scenarioMode": "nested-ui",
+      "captureSha256": "51313359F16B8BBACC98F9DEFDE2B803D6FF46C0B75E79F0C6CEF5BF6CF2FEF8",
+      "originalBinarySha256": "20A1332172B173C5F76CB1FC51BD08BF5C3683697B2A3E155C60413C04C28F76",
+      "environmentId": "wpf11rc",
+      "traceEventId": "traceevent-e8b05c36",
+      "provider": "System.Runtime.CompilerServices.AsyncProfilerEventSource:0x2F04C:5",
+      "profile": "dotnet-sampled-thread-time",
+      "originalSummaryRef": "v1-only-01/reentrancy/runs/20261024-real-01/capture.json",
+      "collectorId": "matched-collector"
+    },
+    {
+      "id": "dispatcher-reentrancy-01/runs/20261024-real-nested-01",
+      "sourceId": "wpf.dispatcher-reentrancy.v2",
+      "scenarioMode": "nested-ui",
+      "captureSha256": "0F026EA841A74A8D7030A1368DFA897F6B79551BBD63B05DD384EA034674FD4D",
+      "originalBinarySha256": "EA1F68B5C286494C41220149EFF88816B95FB035AB19CF2D0B48AAA82CC88F4C",
+      "environmentId": "wpf11rc",
+      "traceEventId": "traceevent-e8b05c36",
+      "provider": "System.Runtime.CompilerServices.AsyncProfilerEventSource:0x2F04C:5",
+      "profile": "dotnet-sampled-thread-time",
+      "originalSummaryRef": "dispatcher-reentrancy-01/runs/20261024-real-nested-01/capture.json",
+      "collectorId": "matched-collector"
+    },
+    {
+      "id": "wrapper-rollover-01/runs/20261024-real-rollover-01",
+      "sourceId": "wpf.wrapper-rollover.v2",
+      "scenarioMode": "rollover-off-ui",
+      "captureSha256": "10B3D4CFF6342A6D49A85C991A5A25EB0581834B6CFA77DA727CED8AA55B967F",
+      "originalBinarySha256": "9C82FC5949D4DB62BE4CB7B067EFDF7564AC045E521B48578AD239E846175835",
+      "environmentId": "wpf11rc",
+      "traceEventId": "traceevent-e8b05c36",
+      "provider": "System.Runtime.CompilerServices.AsyncProfilerEventSource:0x2F04C:5",
+      "profile": "dotnet-sampled-thread-time",
+      "originalSummaryRef": "wrapper-rollover-01/runs/20261024-real-rollover-01/capture.json",
+      "collectorId": "matched-collector"
+    },
+    {
+      "id": "v1-only-01/whenall/runs/20261024-real-01",
+      "sourceId": "wpf.whenall.v1",
+      "scenarioMode": "whenall-ui",
+      "captureSha256": "808B67294A18FD8F7A69BDDB878FED46822B88B1B540528E0EFA233F8F03AC59",
+      "originalBinarySha256": "E52487D039016DB32E3BB6A78AF76BDB7AC8DF6D29B5C9411F7C2AC54966EAE4",
+      "environmentId": "wpf11rc",
+      "traceEventId": "traceevent-e8b05c36",
+      "provider": "System.Runtime.CompilerServices.AsyncProfilerEventSource:0x2F04C:5",
+      "profile": "dotnet-sampled-thread-time",
+      "originalSummaryRef": "v1-only-01/whenall/runs/20261024-real-01/capture.json",
+      "collectorId": "matched-collector"
+    },
+    {
+      "id": "whenall-join-01/runs/20261024-real-join-02",
+      "sourceId": "wpf.whenall.v2",
+      "scenarioMode": "whenall-ui",
+      "captureSha256": "442024ED65E9E56504EEC6230CC55AEBA87E0B1F3492CC58E9B283BF06A1EEB4",
+      "originalBinarySha256": "3E8FBCD2A57A16D6DBB8479E27CC94A0420F22C296C37718C91978B9C5FF17BC",
+      "environmentId": "wpf11rc",
+      "traceEventId": "traceevent-e8b05c36",
+      "provider": "System.Runtime.CompilerServices.AsyncProfilerEventSource:0x2F04C:5",
+      "profile": "dotnet-sampled-thread-time",
+      "originalSummaryRef": "whenall-join-01/runs/20261024-real-join-02/capture.json",
+      "collectorId": "matched-collector"
+    },
+    {
+      "id": "mixed-dispatcher-01/runs/20261024-real-mixed-121-01",
+      "sourceId": "wpf.mixed-families.mixed",
+      "scenarioMode": "mixed-121",
+      "captureSha256": "62E5725817AEBB79BD8624E82472CBAB37E83E66251FC6A0FE32FAA46E4E5DE3",
+      "originalBinarySha256": "828AEB514FC91D708E570338ACC531A2218007B2EAFE27DBD5F25750239DCD6F",
+      "environmentId": "wpf11rc",
+      "traceEventId": "traceevent-e8b05c36",
+      "provider": "System.Runtime.CompilerServices.AsyncProfilerEventSource:0x2F04C:5",
+      "profile": "dotnet-sampled-thread-time",
+      "originalSummaryRef": "mixed-dispatcher-01/runs/20261024-real-mixed-121-01/capture.json",
+      "collectorId": "matched-collector"
+    },
+    {
+      "id": "mixed-dispatcher-01/runs/20261024-real-mixed-212-01",
+      "sourceId": "wpf.mixed-families.mixed",
+      "scenarioMode": "mixed-212",
+      "captureSha256": "7B7171D9EBDCCCE1440775795ECAC0B0A260D5F4CDD0F7CC374C18533F9256E1",
+      "originalBinarySha256": "828AEB514FC91D708E570338ACC531A2218007B2EAFE27DBD5F25750239DCD6F",
+      "environmentId": "wpf11rc",
+      "traceEventId": "traceevent-e8b05c36",
+      "provider": "System.Runtime.CompilerServices.AsyncProfilerEventSource:0x2F04C:5",
+      "profile": "dotnet-sampled-thread-time",
+      "originalSummaryRef": "mixed-dispatcher-01/runs/20261024-real-mixed-212-01/capture.json",
+      "collectorId": "matched-collector"
+    },
+    {
+      "id": "runs/20261023-real-capture-ui-01",
+      "sourceId": "wpf.dynamic-await-policy.v2",
+      "scenarioMode": "capture-ui",
+      "captureSha256": "C8743B2B33CB248477B6839373F09DA9639783DA375DAF6D76EB997A068C20D7",
+      "originalBinarySha256": "FF4939AACC211AF95E1FCCED971322A3CBF678E06FF3180ED204D9A6CE7F6E3F",
+      "environmentId": "wpf11rc",
+      "traceEventId": "traceevent-e8b05c36",
+      "provider": "System.Runtime.CompilerServices.AsyncProfilerEventSource:0x2F04C:5",
+      "profile": "dotnet-sampled-thread-time",
+      "originalSummaryRef": "runs/20261023-real-capture-ui-01/capture.json",
+      "collectorId": "matched-collector"
+    },
+    {
+      "id": "runs/20261023-real-configure-false-01",
+      "sourceId": "wpf.dynamic-await-policy.v2",
+      "scenarioMode": "configure-false",
+      "captureSha256": "AF42C29EB6BBF0B4643B6964A1112FC0B41150E442B3418486C9062981F92D55",
+      "originalBinarySha256": "FF4939AACC211AF95E1FCCED971322A3CBF678E06FF3180ED204D9A6CE7F6E3F",
+      "environmentId": "wpf11rc",
+      "traceEventId": "traceevent-e8b05c36",
+      "provider": "System.Runtime.CompilerServices.AsyncProfilerEventSource:0x2F04C:5",
+      "profile": "dotnet-sampled-thread-time",
+      "originalSummaryRef": "runs/20261023-real-configure-false-01/capture.json",
+      "collectorId": "matched-collector"
+    },
+    {
+      "id": "detailed-v2-events-01/exception/runs/20261024-on-details-01",
+      "sourceId": "wpf.exception-handling.v2",
+      "scenarioMode": "exception-ui",
+      "captureSha256": "64152FE235C3A48A53244BF1EA71018ADCC1325735642B6C496570C4FE36AE3F",
+      "originalBinarySha256": "5AFD237B8C8CA3381183B76B8F3DE46AE7038C60BA9E7625D6EF876E1281E312",
+      "environmentId": "wpf11rc",
+      "traceEventId": "traceevent-e8b05c36",
+      "provider": "System.Runtime.CompilerServices.AsyncProfilerEventSource:0x2F25C:5",
+      "profile": "dotnet-sampled-thread-time",
+      "originalSummaryRef": "detailed-v2-events-01/exception/runs/20261024-on-details-01/capture.json",
+      "investigation": "detailed-v2-events",
+      "collectorId": "matched-collector"
+    },
+    {
+      "id": "detailed-v2-events-01/cancellation/runs/20261024-on-details-01",
+      "sourceId": "wpf.cancellation.v2",
+      "scenarioMode": "cancel-fresh-ui",
+      "captureSha256": "2EC2CA0B43B22EEC7E6B521570D7CC24B133D1C1A878DA188980B612CE6666E5",
+      "originalBinarySha256": "82169D8795F26B4D22315942F9105E50357E0662B2EFE958DFD8C6192817F7B0",
+      "environmentId": "wpf11rc",
+      "traceEventId": "traceevent-e8b05c36",
+      "provider": "System.Runtime.CompilerServices.AsyncProfilerEventSource:0x2F25C:5",
+      "profile": "dotnet-sampled-thread-time",
+      "originalSummaryRef": "detailed-v2-events-01/cancellation/runs/20261024-on-details-01/capture.json",
+      "investigation": "detailed-v2-events",
+      "collectorId": "matched-collector"
+    },
+    {
+      "id": "async-graph-feasibility-01/runs/20261024-relationships-01",
+      "sourceId": "wpf.whenall.v2",
+      "scenarioMode": "whenall-ui",
+      "captureSha256": "1CEFE65B4E3B1147130D8FB846DE232E24624F343544DBBD8FA2B3DC61E3EB71",
+      "originalBinarySha256": "3E8FBCD2A57A16D6DBB8479E27CC94A0420F22C296C37718C91978B9C5FF17BC",
+      "environmentId": "wpf11rc",
+      "traceEventId": "traceevent-e8b05c36",
+      "provider": "System.Runtime.CompilerServices.AsyncProfilerEventSource:0x2F04D:5,System.Threading.Tasks.TplEventSource:0x7A:5",
+      "profile": "dotnet-sampled-thread-time",
+      "originalSummaryRef": "async-graph-feasibility-01/runs/20261024-relationships-01/capture.json",
+      "investigation": "async-graph",
+      "collectorId": "matched-collector"
+    }
+  ],
+  "collectors": [
+    {
+      "id": "matched-collector",
+      "sourceCommit": "6d63a866a4baee0b68eccd0f3533d0243bcd9dc4",
+      "toolVersion": "10.0.752301+6d63a866a4baee0b68eccd0f3533d0243bcd9dc4",
+      "configuration": "Debug",
+      "targetFramework": "net8.0",
+      "localPatchSha256": "9BF884DC614B8899E67CD6CBD618CD54C5FECBF9C3E4364C0F73679463A8541E",
+      "binaries": [
+        {
+          "name": "dotnet-trace.exe",
+          "sha256": "78BF9EEAF9560A9F496B647B7483E98854936512CAF4DBA003F0E24925578335"
+        },
+        {
+          "name": "dotnet-trace.dll",
+          "sha256": "B91AFBC2D2B8CCBD7D8DC7B25B9CD5F11BE21567E71E5A8BFF66A08421DF28FB"
+        },
+        {
+          "name": "dotnet.exe",
+          "sha256": "A5CCDC3A41D5E5C6014FF64509AED176DB39F4F14CAFFFF3DD1997F8907E94D7"
+        }
+      ],
+      "note": "Historical matched build included local API/dependency adaptations; a repository revision alone is not a compatibility guarantee."
+    }
+  ]
+}

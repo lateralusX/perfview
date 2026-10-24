@@ -1,0 +1,8 @@
+# Local run output only; historical findings and small provenance JSON stay tracked.
+/artifacts/
+/.artifacts/
+*.nettrace
+*.etlx
+*.jsonl
+*.speedscope.json
+*.trx

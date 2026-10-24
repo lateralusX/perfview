@@ -1,0 +1,3 @@
+<Project>
+  <!-- Preserve the standalone scenarios' SDK defaults, not PerfView's compiler policy. -->
+</Project>
