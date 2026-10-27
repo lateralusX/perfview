@@ -288,12 +288,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
                 if (!body)
                 {
-                    TraceModuleFile module = log.CodeAddresses.ModuleFile(frame.CodeAddress);
-                    if (!AsyncProfilerRuntimeRuleProfileCache.IsHostModule(module))
+                    ModuleFileIndex moduleIndex = context.GetHostModuleOwner(frame.CodeAddress);
+                    if (moduleIndex == ModuleFileIndex.Invalid)
                     {
                         return false;
                     }
-                    ModuleFileIndex moduleIndex = (module.ManagedModule ?? module).ModuleFileIndex;
                     if (runtimeModule != ModuleFileIndex.Invalid &&
                         (runtimeModule != moduleIndex || !ReferenceEquals(runtimeProfile, profile)))
                     {
@@ -952,7 +951,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// dispatch target; any inner AsyncCompleting frame rejects the fold. A V1 target additionally needs a
     /// resolved CoreLib box carrier, or recorded completion progress matching its exact frame index plus an
     /// immediately preceding, same-context CoreLib V1 dispatcher. A V2 target relies on the stitcher's verified
-    /// sampled-wrapper projection, not evidence of body execution.
+    /// structural wrapper/completion projection, not evidence of body execution.
     /// </para>
     /// <para>
     /// <b>Contract-based inputs:</b> activation nesting/progress comes from profiler records, while structural

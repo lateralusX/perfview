@@ -24,7 +24,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             AsyncProfilerCallStackDiagnostics diagnostics,
             List<AsyncProfilerStitchedFrame> frames,
             Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile> runtimeProfileResolver = null,
-            AsyncProfilerRuntimeRuleProfile runtimeProfile = null)
+            AsyncProfilerRuntimeRuleProfile runtimeProfile = null,
+            AsyncProfilerRuntimeRuleProfileCache runtimeProfiles = null)
         {
             TraceLog = traceLog;
             Segments = segments;
@@ -32,9 +33,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             m_classifyBoundary = classifyBoundary;
             Diagnostics = diagnostics;
             Frames = frames;
-            AsyncProfilerRuntimeRuleProfileCache profiles = null;
-            m_runtimeProfileResolver = runtimeProfileResolver ?? CreateRuntimeProfileResolver(traceLog, out profiles);
-            RuntimeProfile = runtimeProfile ?? ResolveRuntimeProfile(traceLog, segments, frames, m_runtimeProfileResolver, profiles);
+            m_runtimeProfiles = runtimeProfiles ??
+                (traceLog == null ? null : new AsyncProfilerRuntimeRuleProfileCache(traceLog.ModuleFiles));
+            m_runtimeProfileResolver = runtimeProfileResolver ?? CreateRuntimeProfileResolver(traceLog, m_runtimeProfiles);
+            RuntimeProfile = runtimeProfile ?? ResolveRuntimeProfile(
+                traceLog, segments, frames, m_runtimeProfileResolver, m_runtimeProfiles, runtimeProfileResolver == null);
         }
 
         /// <summary>
@@ -70,6 +73,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         internal AsyncProfilerRuntimeRuleProfile GetRuntimeProfile(CodeAddressIndex codeAddress) =>
             m_runtimeProfileResolver(codeAddress) ??
             throw new InvalidOperationException("The runtime profile resolver returned null.");
+
+        internal ModuleFileIndex GetHostModuleOwner(CodeAddressIndex codeAddress) =>
+            TraceLog == null || codeAddress == CodeAddressIndex.Invalid
+                ? ModuleFileIndex.Invalid
+                : m_runtimeProfiles.GetHostModuleOwner(TraceLog.CodeAddresses.ModuleFileIndex(codeAddress));
 
         /// <summary>
         /// Matches using captured candidate ownership. Application-led startup layouts use the owning sample's
@@ -107,9 +115,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         private static AsyncProfilerRuntimeRuleProfile ResolveRuntimeProfile(
             TraceLog traceLog, IReadOnlyList<AsyncProfilerCallStack> segments, List<AsyncProfilerStitchedFrame> frames,
-            Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile> runtimeProfileResolver, AsyncProfilerRuntimeRuleProfileCache profiles)
+            Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile> runtimeProfileResolver,
+            AsyncProfilerRuntimeRuleProfileCache profiles, bool useProcessProfile)
         {
-            if (profiles != null && segments.Count != 0 && segments[0].Thread.ProcessIndex != ProcessIndex.Invalid)
+            if (useProcessProfile && profiles != null && segments.Count != 0 &&
+                segments[0].Thread.ProcessIndex != ProcessIndex.Invalid)
             {
                 ProcessIndex process = segments[0].Thread.ProcessIndex;
                 for (int i = 1; i < segments.Count; i++)
@@ -126,7 +136,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             {
                 if (traceLog != null &&
                     (frame.CodeAddress == CodeAddressIndex.Invalid ||
-                     !AsyncProfilerRuntimeRuleProfileCache.IsHostModule(traceLog.CodeAddresses.ModuleFile(frame.CodeAddress))))
+                     !profiles.IsHostModule(traceLog.CodeAddresses.ModuleFileIndex(frame.CodeAddress))))
                 {
                     continue;
                 }
@@ -158,12 +168,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     {
                         return false;
                     }
-                    TraceModuleFile module = TraceLog.CodeAddresses.ModuleFile(frame.CodeAddress);
-                    if (!AsyncProfilerRuntimeRuleProfileCache.IsHostModule(module))
+                    ModuleFileIndex current = GetHostModuleOwner(frame.CodeAddress);
+                    if (current == ModuleFileIndex.Invalid)
                     {
                         return false;
                     }
-                    ModuleFileIndex current = (module.ManagedModule ?? module).ModuleFileIndex;
                     if (i != start && current != moduleIndex)
                     {
                         return false;
@@ -175,22 +184,20 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         private static Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile> CreateRuntimeProfileResolver(
-            TraceLog traceLog, out AsyncProfilerRuntimeRuleProfileCache profiles)
+            TraceLog traceLog, AsyncProfilerRuntimeRuleProfileCache profiles)
         {
-            profiles = null;
             if (traceLog == null)
             {
                 return _ => AsyncProfilerRuntimeRuleProfile.Common;
             }
-            var capturedProfiles = new AsyncProfilerRuntimeRuleProfileCache(traceLog.ModuleFiles);
-            profiles = capturedProfiles;
             return codeAddress => codeAddress == CodeAddressIndex.Invalid
                 ? AsyncProfilerRuntimeRuleProfile.Common
-                : capturedProfiles.GetProfile(traceLog.CodeAddresses.ModuleFileIndex(codeAddress));
+                : profiles.GetProfile(traceLog.CodeAddresses.ModuleFileIndex(codeAddress));
         }
 
         private readonly Func<CodeAddressIndex, AsyncProfilerCallStackStitchBoundaryInfo> m_classifyBoundary;
         private readonly Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile> m_runtimeProfileResolver;
+        private readonly AsyncProfilerRuntimeRuleProfileCache m_runtimeProfiles;
 
         #endregion
     }

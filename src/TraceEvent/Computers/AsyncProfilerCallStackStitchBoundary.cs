@@ -596,7 +596,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             TraceModuleFiles moduleFiles = _codeAddresses.ModuleFiles;
             foreach (TraceModuleFile moduleFile in moduleFiles)
             {
-                if (AsyncProfilerRuntimeRuleProfileCache.IsHostModule(moduleFile))
+                if (_runtimeProfiles.IsHostModule(moduleFile.ModuleFileIndex))
                 {
                     result.Add(moduleFile.ModuleFileIndex, _runtimeProfiles.GetProfile(moduleFile.ModuleFileIndex));
                 }

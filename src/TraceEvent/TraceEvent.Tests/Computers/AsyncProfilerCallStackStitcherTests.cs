@@ -105,6 +105,19 @@ namespace TraceEventTests
             public AsyncProfilerStitchResult Run(IReadOnlyList<AsyncProfilerStitchSyncFrame> sync, IReadOnlyList<AsyncProfilerCallStack> segmentsRootToLeaf, bool trace) =>
                 AsyncProfilerCallStackStitcher.Stitch(sync, segmentsRootToLeaf, Qpc, Classify, MethodCompletionObserved, MethodOf, trace);
 
+            public AsyncProfilerStitchResult RunWithHistory(
+                IReadOnlyList<AsyncProfilerStitchSyncFrame> sync,
+                IReadOnlyList<AsyncProfilerCallStack> segments, AsyncProfilerCallStacksIndex index)
+            {
+                var output = new List<AsyncProfilerStitchedFrame>();
+                var diagnostics = new AsyncProfilerCallStackDiagnostics();
+                var placements = new List<AsyncProfilerSegmentPlacement>();
+                AsyncProfilerCallStackStitcher.StitchInto(sync, segments, Qpc, Classify,
+                    (process, kind, start) => MethodCompletionObserved(kind), ProcessIndex.Invalid, MethodOf,
+                    false, output, diagnostics, placements, index: index);
+                return new AsyncProfilerStitchResult(output, diagnostics, placements);
+            }
+
             public AsyncProfilerStitchResult Run(IReadOnlyList<AsyncProfilerStitchSyncFrame> sync, IReadOnlyList<AsyncProfilerCallStack> segments,
                 AsyncProfilerRuntimeRuleProfile profile, Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile> runtimeProfileResolver = null)
             {
@@ -3115,10 +3128,9 @@ namespace TraceEventTests
         }
 
         [Fact]
-        public void V2_NoWrapperInDispatchPlumbing_UsesSyncLayout()
+        public void V2_NoWrapperWithoutIndexHistory_UsesSyncLayout()
         {
-            // An active V2 segment, but the CPU is in dispatch-continuation plumbing with no wrapper above the leaf:
-            // emit the sync layout unchanged (dispatch machinery kept); splice no ancestry.
+            // Completion counting alone cannot establish dispatcher ownership without activation history.
             var s = new Scenario();
             s.MarkMethodCompletionObserved(AsyncCallstackKind.RuntimeAsync);
             AsyncProfilerCallStack seg = s.Segment(AsyncCallstackKind.RuntimeAsync,
@@ -3141,6 +3153,216 @@ namespace TraceEventTests
             Assert.Equal(1, result.Diagnostics.V2SyncLayoutUsed);
             Assert.Equal(0, result.Diagnostics.V2LeafWrapperDropped);
             Assert.Equal(0, result.Diagnostics.SegmentsProcessed);
+        }
+
+        [Theory]
+        [InlineData(false, false)]
+        [InlineData(false, true)]
+        [InlineData(true, true)]
+        public void V2_NoWrapperWithCompletions_ProjectsRemainingSuffixAndPreservesPhysicalWork(
+            bool exception, bool olderDispatcher)
+        {
+            var s = new Scenario();
+            s.MarkMethodCompletionObserved(AsyncCallstackKind.RuntimeAsync);
+            AsyncProfilerCallStack segment = s.Segment(AsyncCallstackKind.RuntimeAsync,
+                new[] { -1, -1, 401, 402, 403 }, new[] { -1, -1, 70, 71, 72 },
+                completions: Completed(exception ? 1 : 2),
+                exceptionCompletions: exception ? Unwound(1) : null,
+                frameMethodIds: new ulong[] { 0, 0, 0x401, 0x402, 0x403 });
+            AsyncProfilerCallStacksIndex index = CreateHistory(segment);
+            var sync = new List<AsyncProfilerStitchSyncFrame>
+            {
+                s.Sync(83, 90),
+                s.Boundary(84, DispatchContinuation),
+                s.Boundary(85, DispatchContinuation),
+            };
+            if (olderDispatcher)
+            {
+                index.Add(segment.Thread, segment.FramesIndex, segment.Frames, 99, 0, 0, 32, -20, -10,
+                    Array.Empty<AsyncProfilerCallStack.CompletionDelta>(),
+                    Array.Empty<AsyncProfilerCallStack.CompletionDelta>(), Array.Empty<long>());
+                sync.Add(s.Sync(86, 91));
+                sync.Add(s.Boundary(87, DispatchContinuation));
+                sync.Add(s.Boundary(88, DispatchContinuation));
+            }
+            // A later activation must not affect an earlier sample.
+            index.Add(segment.Thread, segment.FramesIndex, segment.Frames, 100, 0, 0, 32, Qpc + 1, Qpc + 2,
+                Array.Empty<AsyncProfilerCallStack.CompletionDelta>(),
+                Array.Empty<AsyncProfilerCallStack.CompletionDelta>(), Array.Empty<long>());
+            sync.Add(s.Sync(89, 99));
+
+            AsyncProfilerStitchResult result = s.RunWithHistory(sync, new[] { segment }, index);
+
+            Assert.Equal(sync.Take(2).Select(frame => frame.CodeAddress)
+                .Concat(new[] { Scenario.CA(401), Scenario.CA(402), Scenario.CA(403) })
+                .Concat(sync.Skip(3).Select(frame => frame.CodeAddress)),
+                result.Frames.Select(frame => frame.CodeAddress));
+            Assert.All(result.Frames.Take(2), frame =>
+            {
+                Assert.Equal(AsyncProfilerStitchedFrameOrigin.Sync, frame.Origin);
+                Assert.Same(segment, frame.Context);
+            });
+            Assert.Equal(AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames, result.Frames[1].Presentation);
+            AsyncProfilerStitchedFrame target = result.Frames[2];
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget, target.Origin);
+            Assert.Equal(2, target.SegmentFrameIndex);
+            Assert.Equal(segment.Frames.CodeAddressAt(2), target.CodeAddress);
+            Assert.All(result.Frames.Skip(3).Take(2), frame =>
+                Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, frame.Origin));
+            Assert.All(result.Frames.Skip(5), frame => Assert.Null(frame.Context));
+            Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent);
+            AsyncProfilerSegmentPlacement placement = Assert.Single(result.SegmentPlacements);
+            Assert.Same(segment, placement.Activation);
+            Assert.Equal(0, placement.LeafIndex);
+            Assert.Equal(5, placement.RootIndexExclusive);
+            Assert.Equal(1, result.Diagnostics.SegmentsProcessed);
+            Assert.Equal(0, result.Diagnostics.V2SyncLayoutUsed);
+            Assert.Equal(2, result.Diagnostics.V2PlumbingFramesCollapsed);
+            Assert.Equal(0, result.Diagnostics.V2LeafWrapperDropped);
+        }
+
+        [Theory]
+        [InlineData(1, 0, false, true)]
+        [InlineData(3, 0, false, true)]
+        [InlineData(3, 1, false, true)]
+        [InlineData(1, 0, true, true)]
+        [InlineData(1, 0, false, false)]
+        [InlineData(3, 1, false, false)]
+        public void V2_NoWrapperWithAvailableCompletionCounting_ProjectsUncompletedTarget(
+            int frameCount, int exceptional, bool futureCompletion, bool sampledCallee)
+        {
+            var s = new Scenario();
+            s.MarkMethodCompletionObserved(AsyncCallstackKind.RuntimeAsync);
+            AsyncProfilerCallStack segment = s.Segment(AsyncCallstackKind.RuntimeAsync,
+                Enumerable.Range(400, frameCount).ToArray(), Enumerable.Range(70, frameCount).ToArray(),
+                completions: futureCompletion
+                    ? new[] { new AsyncProfilerCallStack.CompletionDelta(Qpc + 1, 1) }
+                    : null,
+                exceptionCompletions: exceptional > 0 ? Unwound(exceptional) : null,
+                frameMethodIds: Enumerable.Range(400, frameCount).Select(i => (ulong)i).ToArray());
+            var sync = new List<AsyncProfilerStitchSyncFrame>
+            {
+                s.Sync(83, 90),
+                s.Boundary(84, DispatchContinuation),
+                s.Boundary(85, DispatchContinuation),
+                s.Sync(86, 99),
+            };
+            if (!sampledCallee)
+            {
+                sync.RemoveAt(0);
+            }
+            int physicalPrefixCount = sampledCallee ? 1 : 0;
+
+            AsyncProfilerStitchResult result = s.RunWithHistory(sync, new[] { segment }, CreateHistory(segment));
+
+            Assert.Equal(sync.Take(physicalPrefixCount + 1).Select(frame => frame.CodeAddress)
+                .Concat(Enumerable.Range(exceptional, frameCount - exceptional).Select(segment.Frames.CodeAddressAt))
+                .Concat(sync.Skip(physicalPrefixCount + 2).Select(frame => frame.CodeAddress)),
+                result.Frames.Select(frame => frame.CodeAddress));
+            AsyncProfilerStitchedFrame marker = result.Frames[physicalPrefixCount];
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.Sync, marker.Origin);
+            Assert.Equal(AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames, marker.Presentation);
+            Assert.Same(segment, marker.Context);
+            AsyncProfilerStitchedFrame target = result.Frames[physicalPrefixCount + 1];
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget, target.Origin);
+            Assert.Equal(exceptional, target.SegmentFrameIndex);
+            Assert.Same(segment, target.Context);
+            Assert.Equal(frameCount - exceptional - 1,
+                result.Frames.Count(frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncRemaining));
+            Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent);
+            AsyncProfilerSegmentPlacement placement = Assert.Single(result.SegmentPlacements);
+            Assert.Equal(0, placement.LeafIndex);
+            Assert.Equal(physicalPrefixCount + 1 + frameCount - exceptional, placement.RootIndexExclusive);
+            Assert.Null(result.Frames.Last().Context);
+            Assert.Equal(1, result.Diagnostics.SegmentsProcessed);
+            Assert.Equal(0, result.Diagnostics.V2SyncLayoutUsed);
+            Assert.Equal(2, result.Diagnostics.V2PlumbingFramesCollapsed);
+            Assert.Equal(0, result.Diagnostics.V2LeafWrapperDropped);
+        }
+
+        [Theory]
+        [InlineData("no-events")]
+        [InlineData("no-history")]
+        [InlineData("zero-ip-first-target")]
+        [InlineData("future-records")]
+        [InlineData("fully-completed")]
+        [InlineData("over-completed")]
+        [InlineData("unknown-target")]
+        [InlineData("raw-ip-target")]
+        [InlineData("popped-inner")]
+        [InlineData("same-qpc")]
+        [InlineData("multiple-active")]
+        [InlineData("mixed-boundary")]
+        [InlineData("short-pair")]
+        [InlineData("repeated-pair")]
+        [InlineData("physical-body")]
+        public void V2_NoWrapperWithUncertainProgressOrOwnership_PreservesSyncLayout(string obstruction)
+        {
+            var s = new Scenario();
+            if (obstruction != "no-events")
+            {
+                s.MarkMethodCompletionObserved(AsyncCallstackKind.RuntimeAsync);
+            }
+            int normal = obstruction == "zero-ip-first-target" ? 0 :
+                obstruction == "fully-completed" ? 3 : obstruction == "over-completed" ? 4 : 1;
+            AsyncProfilerCallStack segment = s.Segment(AsyncCallstackKind.RuntimeAsync,
+                new[] { -1, obstruction == "raw-ip-target" ? -1 : 401, 402 },
+                new[] { -1, obstruction == "unknown-target" ? -1 : 70, 71 },
+                completions: new[] { new AsyncProfilerCallStack.CompletionDelta(
+                    obstruction == "future-records" ? Qpc + 1 : Qpc, normal) },
+                frameMethodIds: new ulong[] { 0, 0x401, 0x402 });
+            AsyncProfilerCallStacksIndex index = CreateHistory(segment);
+            if (obstruction == "popped-inner" || obstruction == "same-qpc")
+            {
+                index.Add(segment.Thread, segment.FramesIndex, segment.Frames, 99, 1, 0, 32,
+                    obstruction == "same-qpc" ? segment.StartQpc : Qpc - 2, Qpc - 1,
+                    Array.Empty<AsyncProfilerCallStack.CompletionDelta>(),
+                    Array.Empty<AsyncProfilerCallStack.CompletionDelta>(), Array.Empty<long>());
+            }
+            var sync = new List<AsyncProfilerStitchSyncFrame>
+            {
+                s.Sync(83, obstruction == "physical-body" ? 70 : 90),
+                s.Boundary(84, DispatchContinuation),
+                s.Boundary(85, DispatchContinuation),
+                s.Sync(86, 99),
+            };
+            if (obstruction == "short-pair")
+            {
+                sync.RemoveAt(2);
+            }
+            else if (obstruction == "repeated-pair")
+            {
+                sync[2] = s.Sync(85, 84);
+            }
+            else if (obstruction == "mixed-boundary")
+            {
+                sync.Add(s.Boundary(87, V1Dispatcher));
+            }
+
+            AsyncProfilerStitchResult result = s.RunWithHistory(sync,
+                obstruction == "multiple-active" ? new[] { segment, segment } : new[] { segment },
+                obstruction == "no-history" ? null : index);
+
+            Assert.Equal(sync.Select(frame => frame.CodeAddress), result.Frames.Select(frame => frame.CodeAddress));
+            Assert.All(result.Frames, frame =>
+            {
+                Assert.Equal(AsyncProfilerStitchedFrameOrigin.Sync, frame.Origin);
+                Assert.Null(frame.Context);
+            });
+            Assert.Empty(result.SegmentPlacements);
+            Assert.Equal(0, result.Diagnostics.SegmentsProcessed);
+            Assert.Equal(1, result.Diagnostics.V2SyncLayoutUsed);
+        }
+
+        private static AsyncProfilerCallStacksIndex CreateHistory(AsyncProfilerCallStack segment)
+        {
+            var index = new AsyncProfilerCallStacksIndex();
+            index.Add(segment.Thread, segment.Frames.Kind,
+                Enumerable.Range(0, segment.Frames.FrameCount).Select(segment.Frames.MethodIdAt).ToArray(), null,
+                segment.DispatcherId, segment.Depth, segment.ContinuationIndexBase, segment.WrapperCount,
+                segment.StartQpc, segment.EndQpc, Array.Empty<AsyncProfilerCallStack.CompletionDelta>(),
+                Array.Empty<AsyncProfilerCallStack.CompletionDelta>(), Array.Empty<long>());
+            return index;
         }
 
         [Theory]

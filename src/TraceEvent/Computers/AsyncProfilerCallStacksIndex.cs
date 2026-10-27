@@ -441,6 +441,14 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 : Array.Empty<AsyncProfilerCallStack>();
 
         /// <summary>
+        /// Whether this is the thread's unique latest activation begun by the sample time. A later, already
+        /// closed activation can leave its dispatcher physically above the surviving activation.
+        /// </summary>
+        internal bool IsLatestActivation(AsyncProfilerCallStack callStack, long qpc) =>
+            _threads.TryGetValue(callStack.Thread, out ThreadCallStacks c) &&
+            c.QueryIndex().IsLatestActivation(callStack, qpc);
+
+        /// <summary>
         /// Records a finalized async call stack, interning its frames.
         /// Called by <see cref="AsyncProfilerComputer"/> as async call stacks close.
         /// </summary>
@@ -1217,6 +1225,33 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 AsyncProfilerCallStacksIndex owner,
                 bool cacheMaterialized, ref int count) =>
                 Stab(0, _byStart.Length - 1, qpc, callStacks, result, owner, cacheMaterialized, ref count);
+
+            public bool IsLatestActivation(AsyncProfilerCallStack callStack, long qpc)
+            {
+                int lo = 0;
+                int hi = _byStart.Length;
+                while (lo < hi)
+                {
+                    int mid = lo + ((hi - lo) >> 1);
+                    if (_records[_byStart[mid]].StartQpc <= qpc)
+                    {
+                        lo = mid + 1;
+                    }
+                    else
+                    {
+                        hi = mid;
+                    }
+                }
+                if (lo == 0)
+                {
+                    return false;
+                }
+                CallStackRecord latest = _records[_byStart[lo - 1]];
+                return latest.StartQpc == callStack.StartQpc && latest.EndQpc == callStack.EndQpc &&
+                    latest.EndQpc > qpc && latest.DispatcherId == callStack.DispatcherId &&
+                    latest.Depth == callStack.Depth && latest.FramesIndex == callStack.FramesIndex &&
+                    (lo < 2 || _records[_byStart[lo - 2]].StartQpc != latest.StartQpc);
+            }
 
             private void Stab(int lo, int hi, long qpc, ThreadCallStacks callStacks,
                 List<AsyncProfilerCallStack> result, AsyncProfilerCallStacksIndex owner,

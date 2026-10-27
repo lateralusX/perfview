@@ -96,7 +96,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 m_stitchedFrames,
                 m_sampleDiagnostics,
                 contextAncestryAvailable ? m_segmentPlacements : null,
-                m_runtimeProfileResolver, runtimeProfile, m_eventLog);
+                m_runtimeProfileResolver, runtimeProfile, m_eventLog, m_index, m_runtimeProfiles);
             if (contextAncestryAvailable)
             {
                 m_contextAncestryAugmenter.Augment(
@@ -113,7 +113,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 m_classify,
                 m_sampleDiagnostics,
                 m_stitchedFrames,
-                m_runtimeProfileResolver, runtimeProfile);
+                m_runtimeProfileResolver, runtimeProfile, m_runtimeProfiles);
             m_transforms.ApplyInPlace(transformContext);
             m_sampleDiagnostics.AddTo(m_diagnostics);
 
@@ -205,7 +205,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     TraceCodeAddress codeAddress = ca == CodeAddressIndex.Invalid ? null : codeAddresses[ca];
                     string frameName = AsyncProfilerCallStackStitchBoundary.NormalizeMethodName(codeAddress?.FullMethodName);
                     TraceModuleFile module = ca == CodeAddressIndex.Invalid ? null : codeAddresses.ModuleFile(ca);
-                    bool isHostModule = AsyncProfilerRuntimeRuleProfileCache.IsHostModule(module);
+                    bool isHostModule = module != null && m_runtimeProfiles.IsHostModule(module.ModuleFileIndex);
                     AsyncProfilerRuntimeRuleProfile profile = module == null
                         ? AsyncProfilerRuntimeRuleProfile.Common
                         : m_runtimeProfiles.GetProfile(module.ModuleFileIndex);
@@ -229,7 +229,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
             TraceCodeAddress codeAddress = m_eventLog.CodeAddresses[codeAddressIndex];
             TraceModuleFile module = m_eventLog.CodeAddresses.ModuleFile(codeAddressIndex);
-            bool isHostModule = AsyncProfilerRuntimeRuleProfileCache.IsHostModule(module);
+            bool isHostModule = module != null && m_runtimeProfiles.IsHostModule(module.ModuleFileIndex);
             AsyncProfilerRuntimeRuleProfile profile = module == null
                 ? AsyncProfilerRuntimeRuleProfile.Common
                 : m_runtimeProfiles.GetProfile(module.ModuleFileIndex);

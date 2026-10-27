@@ -695,6 +695,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// activation-relative wrapper position, without claiming a physically executing application body.
     /// When that target is unavailable, its physical entry slice is retained; independently verified
     /// enclosing activations can still be stitched.
+    /// Without a wrapper, available method-completion counting can identify the remaining target, including
+    /// frame zero, of a single active V2 segment at its innermost complete dispatch-continuation pair, provided
+    /// index history rules out an intervening activation. The verified dispatch pair becomes one
+    /// <see cref="AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames"/> marker, while physical callees
+    /// and root-ward callers remain intact. The captured target address is logical provenance, not a sampled
+    /// application IP.
     /// A missing outermost dispatcher can instead be recovered from a unique ordered physical-method match.
     /// If its completion position agrees and the root-ward span is resolved and contains no other dispatcher,
     /// that incomplete span is replaced by <see cref="AsyncProfilerStitchedFrameOrigin.IncompleteRoot"/>. This does not
@@ -732,7 +738,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <param name="qpc">The sample time, in the trace's QPC domain.</param>
         /// <param name="boundaries">The per-trace boundary-method cache.</param>
         /// <param name="index">The async index, queried for whether completion events were observed in each
-        /// activation's metadata/configuration epoch.</param>
+        /// activation's metadata/configuration epoch, and for activation history when projecting a V2 target
+        /// without a wrapper.</param>
         /// <param name="processIndex">The process instance that emitted the sampled stack.</param>
         /// <param name="methodOf">Maps a <see cref="CodeAddressIndex"/> to its <see cref="MethodIndex"/>
         /// (typically <c>traceLog.CodeAddresses.MethodIndex</c>); used for the V1 identity match and V2 adjacency check.</param>
@@ -760,7 +767,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             StitchInto(syncLeafToRoot, segmentsRootToLeaf, qpc, boundaries.Classify, null,
                 index.MethodCompletionObserved, processIndex, methodOf, trace, output, diagnostics, placements,
                 boundaries.GetRuntimeProfile, boundaries.RuntimeProfiles.GetProcessProfile(processIndex),
-                boundaries.TraceLog);
+                boundaries.TraceLog, index, boundaries.RuntimeProfiles);
             return new AsyncProfilerStitchResult(output, diagnostics, placements);
         }
 
@@ -837,7 +844,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             List<AsyncProfilerSegmentPlacement> placements,
             Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile> runtimeProfileResolver = null,
             AsyncProfilerRuntimeRuleProfile runtimeProfile = null,
-            TraceLog runtimeTraceLog = null)
+            TraceLog runtimeTraceLog = null,
+            AsyncProfilerCallStacksIndex index = null,
+            AsyncProfilerRuntimeRuleProfileCache runtimeProfiles = null)
         {
             if (syncLeafToRoot is null) throw new ArgumentNullException(nameof(syncLeafToRoot));
             if (classify is null) throw new ArgumentNullException(nameof(classify));
@@ -848,7 +857,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
             StitchInto(syncLeafToRoot, segmentsRootToLeaf, qpc, classify, null, methodCompletionObserved,
                 processIndex, methodOf, trace, output, diagnostics, placements,
-                runtimeProfileResolver, runtimeProfile, runtimeTraceLog);
+                runtimeProfileResolver, runtimeProfile, runtimeTraceLog, index, runtimeProfiles);
         }
 
         private static void StitchInto(
@@ -866,12 +875,16 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             List<AsyncProfilerSegmentPlacement> placements,
             Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile> runtimeProfileResolver,
             AsyncProfilerRuntimeRuleProfile runtimeProfile,
-            TraceLog runtimeTraceLog)
+            TraceLog runtimeTraceLog,
+            AsyncProfilerCallStacksIndex index = null,
+            AsyncProfilerRuntimeRuleProfileCache runtimeProfiles = null)
         {
             output.Clear();
             diagnostics.Clear();
             placements?.Clear();
             runtimeProfile = runtimeProfile ?? AsyncProfilerRuntimeRuleProfile.Common;
+            runtimeProfiles = runtimeProfiles ??
+                (runtimeTraceLog == null ? null : new AsyncProfilerRuntimeRuleProfileCache(runtimeTraceLog.ModuleFiles));
 
             // With no segment there is no suspended ancestry to splice. An empty segment is also unusable: it may
             // identify an active async context, but it has no current frame with which to align a physical boundary.
@@ -894,8 +907,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             // Unavailable target identity or position retains the sync-layout fallback:
             //   * Case 2 - the wrapper is the sampled leaf, but its indexed target cannot be identified.
             //     Retain only the inner entry slice when an enclosing activation is independently verified.
-            //   * Case 3 - no wrapper anywhere, but the sample sits in dispatch-continuation plumbing
-            //     (InstrumentedDispatchContinuations / DispatchContinuations): emit the sync layout unchanged.
+            //   * Case 3 - no wrapper anywhere, but the sample sits in dispatch-continuation plumbing:
+            //     retain the sync layout unless completion counting establishes a unique remaining target.
             // A V2 segment whose sync stack carries no async-boundary frame at all is a different anomaly (e.g. a
             // truncated stack); it falls through to the append-only degradation in the loop below, unchanged.
             if (segmentsRootToLeaf[segmentsRootToLeaf.Count - 1].Frames.Kind == AsyncCallstackKind.RuntimeAsync)
@@ -914,7 +927,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                         AsyncProfilerRuntimeRuleProfile entryProfile = runtimeProfileResolver == null ? runtimeProfile :
                             runtimeProfileResolver(syncLeafToRoot[0].CodeAddress);
                         int entryEnd = 1 + MatchDispatchPlumbing(entryProfile, AsyncCallstackKind.RuntimeAsync,
-                            syncLeafToRoot, 0, 1, classify, runtimeProfileResolver, runtimeTraceLog);
+                            syncLeafToRoot, 0, 1, classify, runtimeProfileResolver, runtimeTraceLog, runtimeProfiles);
 
                         AsyncProfilerCallStack outer = segmentsRootToLeaf[firstSegmentIndex - 1];
                         bool outerVerified = outer.Frames.Kind == AsyncCallstackKind.RuntimeAsync
@@ -951,8 +964,40 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     firstSegmentIndex--;
                 }
 
-                if (!wrapperFound && hasDispatchContinuation) // Case 3: sync layout unchanged.
+                if (!wrapperFound && hasDispatchContinuation)
                 {
+                    AsyncProfilerCallStack segment = segmentsRootToLeaf[0];
+                    if (segmentsRootToLeaf.Count == 1 &&
+                        TryFindV2DispatchTargetWithoutWrapper(
+                            segment, syncLeafToRoot, qpc, classify, methodCompletionObserved,
+                            methodCompletionObservedByProcess, processIndex, methodOf, runtimeTraceLog, runtimeProfiles, index,
+                            out int dispatchStart, out int dispatchEnd, out int completed))
+                    {
+                        for (int i = 0; i < dispatchStart; i++)
+                        {
+                            output.Add(AsyncProfilerStitchedFrame.CreateSync(syncLeafToRoot[i], segment));
+                        }
+                        output.Add(AsyncProfilerStitchedFrame.CreateSync(syncLeafToRoot[dispatchStart], segment)
+                            .WithPresentation(AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames));
+                        output.Add(AsyncProfilerStitchedFrame.CreateAsyncDispatchTarget(segment, completed));
+                        for (int k = completed + 1; k < segment.Frames.FrameCount; k++)
+                        {
+                            output.Add(AsyncProfilerStitchedFrame.CreateAsync(segment, k));
+                        }
+                        placements?.Add(new AsyncProfilerSegmentPlacement(segment, 0, output.Count));
+                        for (int i = dispatchEnd; i < syncLeafToRoot.Count; i++)
+                        {
+                            output.Add(AsyncProfilerStitchedFrame.CreateSync(syncLeafToRoot[i], null));
+                        }
+                        diagnostics.SegmentsProcessed++;
+                        diagnostics.V2PlumbingFramesCollapsed += dispatchEnd - dispatchStart;
+                        if (trace)
+                        {
+                            diagnostics.Note($"V2 dispatch target without wrapper: completed={completed}; represented the verified dispatch pair with an async dispatcher marker.");
+                        }
+                        return;
+                    }
+
                     diagnostics.V2SyncLayoutUsed++;
                     for (int i = 0; i < syncLeafToRoot.Count; i++)
                     {
@@ -1161,7 +1206,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     // until all segments are exhausted. An inner V2 segment may be followed by a preserved bridge
                     // and then an outer V1/V2 segment; leaking these frames into that bridge breaks lockstep alignment.
                     int plumbingCount = MatchDispatchPlumbing(segmentProfile, kind,
-                        syncLeafToRoot, boundaryPos, pSync, classify, runtimeProfileResolver, runtimeTraceLog);
+                        syncLeafToRoot, boundaryPos, pSync, classify, runtimeProfileResolver, runtimeTraceLog, runtimeProfiles);
                     pSync += plumbingCount;
                     if (kind == AsyncCallstackKind.StateMachineAsync)
                     {
@@ -1175,7 +1220,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     // A surviving dispatcher can still have its required callers cut off inside the runtime plumbing.
                     incompleteRoot = segmentIndex == 0 && kind == AsyncCallstackKind.StateMachineAsync &&
                         pSync == syncLeafToRoot.Count &&
-                        IsResolvedRuntimeRootSpan(syncLeafToRoot, boundaryPos, runtimeTraceLog);
+                        IsResolvedRuntimeRootSpan(syncLeafToRoot, boundaryPos, runtimeTraceLog, runtimeProfiles);
                 }
                 if (incompleteRoot)
                 {
@@ -1193,7 +1238,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         private static bool IsResolvedRuntimeRootSpan(
-            IReadOnlyList<AsyncProfilerStitchSyncFrame> frames, int boundaryIndex, TraceLog traceLog)
+            IReadOnlyList<AsyncProfilerStitchSyncFrame> frames, int boundaryIndex, TraceLog traceLog,
+            AsyncProfilerRuntimeRuleProfileCache runtimeProfiles)
         {
             for (int i = boundaryIndex; i < frames.Count; i++)
             {
@@ -1203,13 +1249,14 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 }
             }
             return traceLog == null ||
-                AsyncProfilerRuntimeRuleProfileCache.IsHostModule(traceLog.CodeAddresses.ModuleFile(frames[boundaryIndex].CodeAddress));
+                runtimeProfiles.IsHostModule(traceLog.CodeAddresses.ModuleFileIndex(frames[boundaryIndex].CodeAddress));
         }
 
         private static int MatchDispatchPlumbing(
             AsyncProfilerRuntimeRuleProfile profile, AsyncCallstackKind kind, IReadOnlyList<AsyncProfilerStitchSyncFrame> frames,
             int boundaryIndex, int start, Func<CodeAddressIndex, AsyncProfilerCallStackStitchBoundaryInfo> classify,
-            Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile> runtimeProfileResolver, TraceLog traceLog)
+            Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile> runtimeProfileResolver, TraceLog traceLog,
+            AsyncProfilerRuntimeRuleProfileCache runtimeProfiles)
         {
             AsyncProfilerRuntimeSequenceMatch match = profile.MatchDispatchPlumbing(kind, frames, start, frames.Count, classify);
             if (match.Length > frames.Count - start)
@@ -1220,7 +1267,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             {
                 return 0;
             }
-            TraceModuleFile owner = traceLog?.CodeAddresses.ModuleFile(frames[boundaryIndex].CodeAddress);
+            ModuleFileIndex owner = traceLog == null ? ModuleFileIndex.Invalid :
+                runtimeProfiles.GetHostModuleOwner(traceLog.CodeAddresses.ModuleFileIndex(frames[boundaryIndex].CodeAddress));
             for (int i = start; i < start + match.Length; i++)
             {
                 AsyncProfilerCallStackStitchBoundaryInfo boundary = classify(frames[i].CodeAddress);
@@ -1233,12 +1281,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 }
                 if (traceLog != null)
                 {
-                    TraceModuleFile module = traceLog.CodeAddresses.ModuleFile(frames[i].CodeAddress);
                     if (frames[i].Method == MethodIndex.Invalid ||
-                        !AsyncProfilerRuntimeRuleProfileCache.IsHostModule(owner) ||
-                        !AsyncProfilerRuntimeRuleProfileCache.IsHostModule(module) ||
-                        (owner.ManagedModule ?? owner).ModuleFileIndex !=
-                            (module.ManagedModule ?? module).ModuleFileIndex)
+                        owner == ModuleFileIndex.Invalid ||
+                        owner != runtimeProfiles.GetHostModuleOwner(traceLog.CodeAddresses.ModuleFileIndex(frames[i].CodeAddress)))
                     {
                         return 0;
                     }
@@ -1270,6 +1315,93 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             return completed >= 0 && completed < segment.Frames.FrameCount &&
                 (segment.Frames.CodeAddressAt((int)completed) != CodeAddressIndex.Invalid ||
                  segment.Frames.MethodIdAt((int)completed) != 0);
+        }
+
+        private static bool TryFindV2DispatchTargetWithoutWrapper(
+            AsyncProfilerCallStack segment, IReadOnlyList<AsyncProfilerStitchSyncFrame> sync, long qpc,
+            Func<CodeAddressIndex, AsyncProfilerCallStackStitchBoundaryInfo> classify,
+            Func<AsyncCallstackKind, bool> methodCompletionObserved,
+            Func<ProcessIndex, AsyncCallstackKind, long, bool> methodCompletionObservedByProcess,
+            ProcessIndex processIndex, Func<CodeAddressIndex, MethodIndex> methodOf, TraceLog traceLog,
+            AsyncProfilerRuntimeRuleProfileCache runtimeProfiles, AsyncProfilerCallStacksIndex index,
+            out int dispatchStart, out int dispatchEnd, out int completed)
+        {
+            dispatchStart = -1;
+            dispatchEnd = -1;
+            completed = segment.GetCompletedFrameCount(qpc);
+            bool completionObserved = methodCompletionObserved != null
+                ? methodCompletionObserved(segment.Frames.Kind)
+                : methodCompletionObservedByProcess(processIndex, segment.Frames.Kind, segment.StartQpc);
+            if (!completionObserved || segment.Depth != 0 ||
+                qpc < segment.StartQpc || qpc >= segment.EndQpc ||
+                completed < 0 || completed >= segment.Frames.FrameCount ||
+                segment.Frames.CodeAddressAt(completed) == CodeAddressIndex.Invalid ||
+                methodOf(segment.Frames.CodeAddressAt(completed)) == MethodIndex.Invalid ||
+                index == null || !index.IsLatestActivation(segment, qpc))
+            {
+                return false;
+            }
+
+            // The history guard rules out a later, popped inner context whose dispatcher could still be above
+            // this activation. Earlier, popped dispatchers may remain rootward and are left unassociated.
+            for (int i = 0; i < sync.Count; i++)
+            {
+                AsyncProfilerCallStackStitchBoundaryKind kind = classify(sync[i].CodeAddress).Kind;
+                if (kind == AsyncProfilerCallStackStitchBoundaryKind.V1Dispatcher ||
+                    kind == AsyncProfilerCallStackStitchBoundaryKind.V2ContinuationWrapper)
+                {
+                    return false;
+                }
+                if (dispatchEnd < 0 && kind == AsyncProfilerCallStackStitchBoundaryKind.V2DispatchContinuation)
+                {
+                    dispatchStart = i;
+                    dispatchEnd = i + 2;
+                    if (dispatchEnd >= sync.Count ||
+                        classify(sync[i + 1].CodeAddress).Kind != AsyncProfilerCallStackStitchBoundaryKind.V2DispatchContinuation ||
+                        classify(sync[dispatchEnd].CodeAddress).Kind == AsyncProfilerCallStackStitchBoundaryKind.V2DispatchContinuation ||
+                        sync[i].Method == MethodIndex.Invalid || sync[i + 1].Method == MethodIndex.Invalid ||
+                        sync[i].Method == sync[i + 1].Method)
+                    {
+                        return false;
+                    }
+                    if (traceLog != null)
+                    {
+                        TraceCodeAddress instrumented = traceLog.CodeAddresses[sync[i].CodeAddress];
+                        TraceCodeAddress dispatch = traceLog.CodeAddresses[sync[i + 1].CodeAddress];
+                        ModuleFileIndex instrumentedModule = traceLog.CodeAddresses.ModuleFileIndex(sync[i].CodeAddress);
+                        ModuleFileIndex dispatchModule = traceLog.CodeAddresses.ModuleFileIndex(sync[i + 1].CodeAddress);
+                        ModuleFileIndex owner = runtimeProfiles.GetHostModuleOwner(instrumentedModule);
+                        ModuleFileIndex callerOwner = runtimeProfiles.GetHostModuleOwner(dispatchModule);
+                        string instrumentedName = AsyncProfilerCallStackStitchBoundary.NormalizeMethodName(instrumented.FullMethodName);
+                        string dispatchName = AsyncProfilerCallStackStitchBoundary.NormalizeMethodName(dispatch.FullMethodName);
+                        if (owner == ModuleFileIndex.Invalid || owner != callerOwner ||
+                            !ReferenceEquals(runtimeProfiles.GetProfile(instrumentedModule), runtimeProfiles.GetProfile(dispatchModule)) ||
+                            AsyncProfilerCallStackStitchBoundary.GetBareMethodName(instrumentedName) !=
+                                AsyncProfilerCallStackStitchBoundary.InstrumentedDispatchContinuationsName ||
+                            AsyncProfilerCallStackStitchBoundary.GetBareMethodName(dispatchName) !=
+                                AsyncProfilerCallStackStitchBoundary.DispatchContinuationsName ||
+                            AsyncProfilerCallStackStitchBoundary.GetDeclaringTypeName(instrumentedName) !=
+                                AsyncProfilerCallStackStitchBoundary.GetDeclaringTypeName(dispatchName))
+                        {
+                            return false;
+                        }
+                    }
+                }
+
+                // A physical occurrence of a remaining method needs its own body/activation alignment,
+                // rather than a second representation inferred solely from completion records.
+                if (sync[i].Method != MethodIndex.Invalid)
+                {
+                    for (int k = completed; k < segment.Frames.FrameCount; k++)
+                    {
+                        if (sync[i].Method == methodOf(segment.Frames.CodeAddressAt(k)))
+                        {
+                            return false;
+                        }
+                    }
+                }
+            }
+            return dispatchEnd >= 0;
         }
 
         private static int FindEnclosingV2CurrentSyncFrame(

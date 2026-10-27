@@ -1072,6 +1072,46 @@ concatenation of the entire async stack beneath every physical sample.
 V2 wrappers (`Continuation_Wrapper_0` through `_31`) supply the structural
 splice boundary and wrapper position. Dispatch-continuation plumbing without
 a wrapper is classified but is not itself permission to splice a V2 segment.
+There is one index-backed exception: a single active root V2 segment with
+available method-completion counting can project its entire remaining
+suffix at the innermost complete `InstrumentedDispatchContinuations` /
+`DispatchContinuations` pair. The un-clamped normal-plus-exception count must
+satisfy `0 <= completed < FrameCount` and identify a resolved remaining target.
+Completion-event availability must belong to the activation's configuration
+epoch. Only completions at or before the sample advance the count. Availability
+can be established by another activation or a later event in the same epoch.
+Zero recorded completions identify frame zero; a one-frame chain
+does not need to complete any method before its target can be projected.
+Availability in the activation's epoch is required, not a positive normal
+completion count in that activation. Recorded exceptional unwinds still
+advance the target position.
+
+This projection also checks the thread's start-ordered activation history:
+the active segment must be the unique latest activation begun by the sample.
+A newer, already popped inner context can leave its physical dispatcher above
+the surviving context, so one active context alone is insufficient evidence.
+Equal-QPC competing activations, multiple active segments, incomplete or
+inconsistent dispatch pairs, mixed V1 boundaries, and physically present
+remaining methods retain the original fallback. Production pairs must have
+the correct method order and the same declaring type and captured CoreLib
+owner. Earlier popped outer dispatchers may remain rootward, unassociated
+with the active context; no popped logical chain is resurrected.
+
+Structural projection replaces the verified inner dispatch pair with one
+`[Async dispatcher frames]` marker. It retains the sampled callees and the
+complete rootward physical tail, including any Task/WhenAll completion bridge
+and older dispatchers, in order. The sampled prefix and marker belong to the
+active segment. The marker separates dispatch-owned work from the first
+remaining logical frame, emitted as `AsyncDispatchTarget`, followed by
+`AsyncRemaining` callers. It remains even with no sampled callees, so runtime
+dispatch self-cost does not appear as application-body execution. The captured
+target IP is continuation provenance, not an invented executing instruction.
+The marker is structural and independent of normalization, infrastructure
+cleanup, and frame annotations. Optional infrastructure cleanup can simplify
+the remaining verified spans using its existing ownership rules. Without
+method-completion event availability or a usable target position, the physical
+fallback is unchanged.
+
 V1 uses `MoveNextAsDispatcher` or the type-qualified
 `AsyncStateMachineDispatcher.MoveNext`, plus method/box evidence.
 Classification and using a classification as a splice boundary are distinct.
@@ -1121,6 +1161,8 @@ These allocate output and do not mutate the input lists. The index/cache
 overload selects completion availability per activation epoch; the delegate
 overload is useful for controlled integrations/tests, but its kind-only
 predicate cannot itself distinguish mixed configuration epochs.
+It also lacks activation history, so it does not enable the no-wrapper
+completion-proven projection.
 Callers must provide compatible trace-owned addresses and method identities.
 The internal core does not perform symbol lookup, intern stack-source frames,
 or automatically run presentation transforms. The normal host computers
@@ -1271,6 +1313,16 @@ implementations. Missing, conflicting, or unsupported metadata selects the
 evidence-checked `Common` rules, not an arbitrary "latest runtime." Sequence
 matching still checks frame identity, boundaries, same-module ownership, and
 context. A version match alone never authorizes removal.
+CoreLib membership and ownership use one shared module-indexed table during
+stack generation. Non-CoreLib entries map to an invalid owner; native images
+map through their recorded managed-module link. Separate unload/rundown entries
+share an owner only when their captured full paths and nonempty PDB signatures
+and ages match. Path comparison is ordinal and does not consult local files.
+The metadata comparisons happen when the table is built, not per sampled frame;
+subsequent ownership checks use array lookups and integer comparisons.
+The table refreshes if module entries are added. Runtime profiles remain
+independently selected and checked, so an alias does not hide conflicting
+runtime-version evidence.
 Compiler-generated application-name decoding is a separate convention; the
 captured runtime version does not identify the application's compiler.
 No public custom-pass registration API is exposed yet; a future extension

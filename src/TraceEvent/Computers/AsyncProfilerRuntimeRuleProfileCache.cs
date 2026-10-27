@@ -29,7 +29,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 return profile;
             }
             TraceModuleFile module = m_moduleFiles[moduleIndex];
-            if (!IsHostModule(module))
+            if (!IsHostModule(moduleIndex))
             {
                 m_profiles.Add(moduleIndex, AsyncProfilerRuntimeRuleProfile.Common);
                 return AsyncProfilerRuntimeRuleProfile.Common;
@@ -67,7 +67,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             {
                 foreach (TraceLoadedModule loaded in m_moduleFiles.Log.Processes[processIndex].LoadedModules)
                 {
-                    if (!IsHostModule(loaded.ModuleFile))
+                    if (!IsHostModule(loaded.ModuleFile.ModuleFileIndex))
                     {
                         continue;
                     }
@@ -85,7 +85,30 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             return profile;
         }
 
-        /// <summary>Checks captured module identity rather than accepting an untrusted method-name prefix.</summary>
+        /// <summary>Checks captured CoreLib membership using the module-indexed ownership table.</summary>
+        public bool IsHostModule(ModuleFileIndex moduleIndex) =>
+            GetHostModuleOwner(moduleIndex) != ModuleFileIndex.Invalid;
+
+        /// <summary>
+        /// Gets the captured CoreLib owner, or Invalid for a non-CoreLib module. Native/IL links and duplicate
+        /// unload/rundown entries with the same captured path and PDB identity share an owner.
+        /// </summary>
+        public ModuleFileIndex GetHostModuleOwner(ModuleFileIndex moduleIndex)
+        {
+            if (moduleIndex == ModuleFileIndex.Invalid)
+            {
+                return ModuleFileIndex.Invalid;
+            }
+            if (m_hostModuleOwners == null || m_hostModuleOwners.Length != m_moduleFiles.Count)
+            {
+                m_hostModuleOwners = BuildHostModuleOwners();
+            }
+            return (uint)moduleIndex < (uint)m_hostModuleOwners.Length
+                ? m_hostModuleOwners[(int)moduleIndex]
+                : ModuleFileIndex.Invalid;
+        }
+
+        /// <summary>Examines captured module names when constructing the indexed ownership table.</summary>
         public static bool IsHostModule(TraceModuleFile module) =>
             module != null &&
             (string.Equals(module.Name, AsyncProfilerCallStackStitchBoundary.HostModuleName, StringComparison.OrdinalIgnoreCase) ||
@@ -93,6 +116,36 @@ namespace Microsoft.Diagnostics.Tracing.Computers
               string.Equals(module.ManagedModule.Name, AsyncProfilerCallStackStitchBoundary.HostModuleName, StringComparison.OrdinalIgnoreCase)));
 
         #region private
+
+        private ModuleFileIndex[] BuildHostModuleOwners()
+        {
+            var owners = new ModuleFileIndex[m_moduleFiles.Count];
+            var identities = new Dictionary<(string Path, Guid Signature, int Age), ModuleFileIndex>();
+            foreach (TraceModuleFile captured in m_moduleFiles)
+            {
+                ModuleFileIndex owner = ModuleFileIndex.Invalid;
+                if (IsHostModule(captured))
+                {
+                    TraceModuleFile module = captured.ManagedModule ?? captured;
+                    owner = module.ModuleFileIndex;
+                    if (module.PdbSignature != Guid.Empty && !string.IsNullOrEmpty(module.FilePath))
+                    {
+                        // Naming an initially anonymous rundown entry does not merge it with an unloaded file.
+                        var identity = (module.FilePath, module.PdbSignature, module.PdbAge);
+                        if (identities.TryGetValue(identity, out ModuleFileIndex existing))
+                        {
+                            owner = existing;
+                        }
+                        else
+                        {
+                            identities.Add(identity, owner);
+                        }
+                    }
+                }
+                owners[(int)captured.ModuleFileIndex] = owner;
+            }
+            return owners;
+        }
 
         private Dictionary<ModuleFileIndex, RuntimeSku> GetRuntimeFlavors()
         {
@@ -112,7 +165,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 foreach (TraceLoadedModule loaded in process.LoadedModules)
                 {
                     TraceModuleFile module = loaded.ModuleFile;
-                    if (!IsHostModule(module))
+                    if (!IsHostModule(module.ModuleFileIndex))
                     {
                         continue;
                     }
@@ -164,6 +217,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         private readonly Dictionary<ProcessIndex, AsyncProfilerRuntimeRuleProfile> m_processProfiles =
             new Dictionary<ProcessIndex, AsyncProfilerRuntimeRuleProfile>();
         private Dictionary<ModuleFileIndex, RuntimeSku> m_runtimeFlavors;
+        private ModuleFileIndex[] m_hostModuleOwners;
 
         #endregion
     }
