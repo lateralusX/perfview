@@ -618,6 +618,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     : AsyncProfilerStitchSyncFrameKind.None;
             }
 
+            if (method == "ResumeTaskContinuation" &&
+                IsMethodOnType(frameName,
+                    "System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation+TaskContinuationResume", method))
+            {
+                return AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure;
+            }
+
             if (IsMethodOnType(frameName, "System.Threading.ExecutionContext", method))
             {
                 return method == "RunInternal" ||

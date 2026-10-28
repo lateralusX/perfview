@@ -6267,6 +6267,64 @@ namespace TraceEventTests
 
         [Theory]
         [InlineData(false, false)]
+        [InlineData(false, true)]
+        [InlineData(true, false)]
+        [InlineData(true, true)]
+        public void RuntimeAsync_TaskContinuationResume_CleanupPreservesCalleesParentsAndRejectedBridge(
+            bool helperIsLeaf, bool enableInfrastructureCleanup)
+        {
+            Frame resume = Frame.CoreLib(
+                "System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation+TaskContinuationResume." +
+                "ResumeTaskContinuation(class System.Runtime.CompilerServices.Continuation,unsigned int8&)",
+                "ResumeTaskContinuation");
+            Frame current = Frame.App("Scenario.ChildAsync");
+            Frame parent = Frame.App("Scenario.ParentAsync");
+            Frame owner = Frame.App("Scenario+<OwnerAsync>d__1.MoveNext").Logical("Scenario.OwnerAsync", 0);
+            Frame[] callees = helperIsLeaf ? Array.Empty<Frame>() : new[] { Frame.App("Scenario.HelperCallee") };
+            Frame[] tail =
+            {
+                Frame.CoreLib("System.Threading.Tasks.Task.RunContinuations", "Task.RunContinuations"),
+                Frame.CoreLib("System.Threading.Tasks.Task`1[System.Boolean].TrySetResult(!0)", "Task.TrySetResult"),
+                Frame.CoreLib("System.Threading.Tasks.TaskCompletionSource`1[System.Boolean].SetResult(!0)", "TaskCompletionSource.SetResult"),
+                Frame.App("Scenario.CompleteOnNewThread"),
+                Frame.CoreLib("System.Threading.Thread.StartCallback", "Thread.StartCallback"),
+            };
+            var scenario = new StitchScenario
+            {
+                Sync = callees.Concat(new[]
+                {
+                    resume, Frame.V2Wrapper(0), Frame.V2InstrumentedDispatch, Frame.V2Dispatch,
+                }).Concat(tail).ToArray(),
+                Async = new[] { Frame.Zero, current, parent },
+                ContextParent = AsyncSegment.StateMachine(owner),
+                EnableParentContexts = true,
+                EnableInfrastructureCleanup = enableInfrastructureCleanup,
+                IncludeEventSourceEvents = false,
+                VerifySampleWeights = true,
+                VerifyThreadTimeComputer = true,
+                ExpectedStitched = callees
+                    .Concat(enableInfrastructureCleanup ? Array.Empty<Frame>() : new[] { resume })
+                    .Concat(new[] { current, parent, owner }).Concat(tail).ToArray(),
+                ExpectedDiagnostics = new CallStackDiagnosticsExpectation
+                {
+                    SegmentsProcessed = 2,
+                    V2PlumbingFramesCollapsed = 4,
+                    AsyncInfrastructureFramesCollapsed = enableInfrastructureCleanup ? 2 : 0,
+                },
+                AssertTransformContext = context =>
+                {
+                    Assert.DoesNotContain(context.Frames, frame =>
+                        frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent);
+                    Assert.Single(context.Frames.Where(frame =>
+                        frame.ContextKind == AsyncProfilerStitchedFrameContextKind.HistoricalParent));
+                },
+            };
+
+            scenario.AssertProductionStitch();
+        }
+
+        [Theory]
+        [InlineData(false, false)]
         [InlineData(true, false)]
         [InlineData(true, true)]
         public void RuntimeResumptionBridge_V2WithoutPhysicalBody_FoldsOnlyVerifiedDispatchTarget(

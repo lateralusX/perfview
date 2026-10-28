@@ -291,6 +291,15 @@ namespace TraceEventTests
             "System.Private.CoreLib!System.Threading.Tasks.AwaitTaskContinuation.RunOrScheduleAction(class System.Action,bool)",
             (int)AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure)]
         [InlineData(
+            "System.Private.CoreLib!System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation+TaskContinuationResume.ResumeTaskContinuation(class System.Runtime.CompilerServices.Continuation,unsigned int8&)",
+            (int)AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure)]
+        [InlineData(
+            "System.Private.CoreLib!System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation+Other.ResumeTaskContinuation()",
+            (int)AsyncProfilerStitchSyncFrameKind.None)]
+        [InlineData(
+            "System.Private.CoreLib!System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation+TaskContinuationResume.ResumeTaskContinuationExtra()",
+            (int)AsyncProfilerStitchSyncFrameKind.None)]
+        [InlineData(
             "System.Private.CoreLib!System.Threading.ExecutionContext.RunInternal(class System.Threading.ExecutionContext,class System.Threading.ContextCallback,class System.Object)",
             (int)AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure)]
         [InlineData(
@@ -347,6 +356,9 @@ namespace TraceEventTests
         [InlineData(
             "System.Threading.Tasks.TaskCompletionSource`1[System.Boolean].SetResult(!0)",
             (int)AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskCompletionSourceSetResult)]
+        [InlineData(
+            "System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation+TaskContinuationResume.ResumeTaskContinuation(class System.Runtime.CompilerServices.Continuation,unsigned int8&)",
+            (int)AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure)]
         public void ClassifySynchronousFrame_SplitTraceEventModuleAndMethod_RequiresCoreLib(
             string method, int expectedValue)
         {
