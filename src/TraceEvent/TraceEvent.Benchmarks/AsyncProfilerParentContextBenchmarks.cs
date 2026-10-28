@@ -10,7 +10,7 @@ using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
 namespace TraceEventBenchmarks
 {
     [MemoryDiagnoser]
-    public class AsyncProfilerContextAncestryBenchmarks
+    public class AsyncProfilerParentContextBenchmarks
     {
         private const long Qpc = 1_000;
         private const int ParentCount = 4;
@@ -37,7 +37,7 @@ namespace TraceEventBenchmarks
         private List<AsyncProfilerStitchedFrame> _output;
         private List<AsyncProfilerSegmentPlacement> _placements;
         private AsyncProfilerCallStackDiagnostics _diagnostics;
-        private AsyncProfilerContextAncestryAugmenter _augmenter;
+        private AsyncProfilerParentContextAugmenter _augmenter;
         private Func<CodeAddressIndex, AsyncProfilerCallStackStitchBoundaryInfo> _classify;
         private Func<ProcessIndex, AsyncCallstackKind, long, bool> _methodCompletionObserved;
         private Func<CodeAddressIndex, MethodIndex> _methodOf;
@@ -50,7 +50,7 @@ namespace TraceEventBenchmarks
             _output = new List<AsyncProfilerStitchedFrame>(64);
             _placements = new List<AsyncProfilerSegmentPlacement>(1);
             _diagnostics = new AsyncProfilerCallStackDiagnostics();
-            _augmenter = new AsyncProfilerContextAncestryAugmenter();
+            _augmenter = new AsyncProfilerParentContextAugmenter();
             _classify = Classify;
             _methodCompletionObserved = MethodCompletionObserved;
             _methodOf = MethodOf;
@@ -93,7 +93,7 @@ namespace TraceEventBenchmarks
             if (EnabledWithoutDispatcherInfo() != baselineFrameCount)
             {
                 throw new InvalidOperationException(
-                    "Enabling ancestry without dispatcher metadata changed the stitched stack.");
+                    "Enabling parent contexts without dispatcher metadata changed the stitched stack.");
             }
             if (EnabledWithUnrelatedDispatcherInfo() != baselineFrameCount)
             {
@@ -131,49 +131,53 @@ namespace TraceEventBenchmarks
 
         [Benchmark]
         public int EnabledWithoutDispatcherInfo() =>
-            StitchWithOptionalAncestry(
+            StitchWithOptionalParentContexts(
                 _indexWithoutParents,
                 _segmentsWithoutParents);
 
         [Benchmark]
         public int EnabledWithUnrelatedDispatcherInfo() =>
-            StitchWithOptionalAncestry(
+            StitchWithOptionalParentContexts(
                 _indexWithUnrelatedDispatcherInfo,
                 _segmentsWithUnrelatedDispatcherInfo);
 
         [Benchmark]
         public int EnabledWithOneParent() =>
-            StitchWithOptionalAncestry(
+            StitchWithOptionalParentContexts(
                 _indexWithOneParent,
                 _segmentsWithOneParent);
 
         [Benchmark]
         public int EnabledWithTwoParents() =>
-            StitchWithOptionalAncestry(
+            StitchWithOptionalParentContexts(
                 _indexWithTwoParents,
-                _segmentsWithTwoParents);
+                _segmentsWithTwoParents,
+                maximumDepth: 2);
 
         [Benchmark]
         public int EnabledWithFourParents() =>
-            StitchWithOptionalAncestry(
+            StitchWithOptionalParentContexts(
                 _indexWithParents,
-                _segmentsWithParents);
+                _segmentsWithParents,
+                maximumDepth: ParentCount);
 
         [Benchmark]
         public int EnabledWithEightParents() =>
-            StitchWithOptionalAncestry(
+            StitchWithOptionalParentContexts(
                 _indexWithEightParents,
-                _segmentsWithEightParents);
+                _segmentsWithEightParents,
+                maximumDepth: 8);
 
-        private int StitchWithOptionalAncestry(
+        private int StitchWithOptionalParentContexts(
             AsyncProfilerCallStacksIndex index,
-            IReadOnlyList<AsyncProfilerCallStack> segments)
+            IReadOnlyList<AsyncProfilerCallStack> segments,
+            int maximumDepth = AsyncProfilerParentContextAugmenter.DefaultMaximumDepth)
         {
-            bool ancestryAvailable =
+            bool parentContextsAvailable =
                 index.HasDispatcherRecords &&
                 _augmenter.Prepare(index, segments);
-            Stitch(segments, ancestryAvailable ? _placements : null);
-            if (!ancestryAvailable)
+            Stitch(segments, parentContextsAvailable ? _placements : null);
+            if (!parentContextsAvailable)
             {
                 return _output.Count;
             }
@@ -183,7 +187,7 @@ namespace TraceEventBenchmarks
                 segments,
                 _placements,
                 _output,
-                AsyncProfilerContextAncestryAugmenter.DefaultMaximumDepth);
+                maximumDepth);
             return _output.Count;
         }
 

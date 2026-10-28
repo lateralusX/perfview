@@ -218,7 +218,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// <remarks>
     /// Configure the host computer's pipeline before stack generation. <see cref="Transform"/> applies only
     /// conservative normalization, async-infrastructure cleanup, and custom callbacks to an existing structural result.
-    /// Context ancestry and frame annotations are separate host-builder/emitter options.
+    /// Parent contexts and frame annotations are separate host-builder/emitter options.
     /// Built-in stages are selected from captured runtime profiles without changing their enablement or order.
     /// A profile can replace one complete stage while inheriting the others; missing or ambiguous runtime
     /// ownership retains common implementations. Custom callbacks still run after all enabled built-in stages.
@@ -262,10 +262,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         /// <summary>
         /// Enables the host computer's insertion of missing historical creation-parent contexts before presentation.
-        /// Requires captured creation relationships and parent resume intervals; unavailable ancestry is not inferred.
+        /// Requires captured creation relationships and parent resume intervals; unavailable parents are not inferred.
+        /// Replays recorded resume/append frames, trimming completed frames at child creation only when both normal
+        /// and exceptional completion records were observed for the parent's process, kind, and configuration epoch.
+        /// The first surviving V1 frame then displays inferred running state -1; captured states and IPs are retained.
         /// Disabled by default. This option is not applied by standalone <see cref="Transform"/> calls.
         /// </summary>
-        public bool EnableContextAncestry { get; set; }
+        public bool EnableParentContexts { get; set; }
 
         /// <summary>
         /// Prefixes active async-profiler frames with <c>[Async V1]</c> or <c>[Async V2]</c> when they are
@@ -281,18 +284,18 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         public bool EnableFrameAnnotations { get; set; }
 
         /// <summary>The maximum number of missing parent contexts inserted for one active segment when
-        /// <see cref="EnableContextAncestry"/> is enabled.</summary>
+        /// <see cref="EnableParentContexts"/> is enabled. Defaults to one historical parent context.</summary>
         /// <exception cref="ArgumentOutOfRangeException">The value is not positive.</exception>
-        public int MaximumContextAncestryDepth
+        public int MaximumParentContextDepth
         {
-            get => m_maximumContextAncestryDepth;
+            get => m_maximumParentContextDepth;
             set
             {
                 if (value <= 0)
                 {
-                    throw new ArgumentOutOfRangeException(nameof(MaximumContextAncestryDepth));
+                    throw new ArgumentOutOfRangeException(nameof(MaximumParentContextDepth));
                 }
-                m_maximumContextAncestryDepth = value;
+                m_maximumParentContextDepth = value;
             }
         }
 
@@ -371,7 +374,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <see cref="SampleProfilerThreadTimeComputer"/>. The input frame list is not modified; its frames are
         /// copied into a mutable output list. Presentation diagnostics are added to the result's existing
         /// <see cref="AsyncProfilerStitchResult.Diagnostics"/> instance, which is shared by both results. This method does not
-        /// insert historical ancestry or intern/annotate output frames.
+        /// insert historical parent contexts or intern/annotate output frames.
         /// </summary>
         /// <param name="structuralResult">The result produced by <see cref="AsyncProfilerCallStackStitcher"/>.</param>
         /// <param name="segments">The active async segments used to produce the structural result.</param>
@@ -448,7 +451,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             transform(context);
         }
 
-        private int m_maximumContextAncestryDepth = AsyncProfilerContextAncestryAugmenter.DefaultMaximumDepth;
+        private int m_maximumParentContextDepth = AsyncProfilerParentContextAugmenter.DefaultMaximumDepth;
         private bool m_enableNormalization = true;
         private bool m_enableInfrastructureCleanup;
         private readonly List<AsyncProfilerCallStackTransform> m_customTransforms;

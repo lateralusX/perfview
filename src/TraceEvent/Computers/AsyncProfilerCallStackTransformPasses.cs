@@ -14,7 +14,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// <summary>
     /// Removes a sampled-leaf V2 continuation wrapper when structural stitching selected a V2 synchronous layout
     /// or placed a verified dispatch target immediately beneath that wrapper in the same activation.
-    /// Only the first synchronous frame is removed; logical targets, ancestry, and dispatch plumbing are unchanged.
+    /// Only the first synchronous frame is removed; logical targets, async callers, and dispatch plumbing are unchanged.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -586,7 +586,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// <para>
     /// <b>Edits and protection:</b> first attempts to fold the synchronous resumption bridge between the root
     /// active context and a profile-selected scheduler anchor (ThreadPoolWorkQueue.Dispatch in the common
-    /// profile), retaining that anchor and historical ancestry.
+    /// profile), retaining that anchor and historical parent contexts.
     /// The complete candidate, including the anchor, must resolve to one captured CoreLib module, contain a profile-recognized
     /// bridge layout (containing adjacent Task.RunContinuations/TrySetResult under the common rules), and have no live-context ownership or V1-dispatcher/V2-wrapper
     /// boundary. V2 additionally requires a physically matched current method or a resolved structural dispatch target.
@@ -856,7 +856,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
             int bridgeStart = rootIndex + 1;
             while (bridgeStart < frames.Count &&
-                   frames[bridgeStart].Origin == AsyncProfilerStitchedFrameOrigin.AsyncContextParent)
+                   frames[bridgeStart].ContextKind == AsyncProfilerStitchedFrameContextKind.HistoricalParent)
             {
                 bridgeStart++;
             }

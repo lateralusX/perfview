@@ -250,6 +250,21 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         /// <summary>
+        /// True when an exceptional <c>Unwind</c> event was observed for this activation's process,
+        /// instrumentation kind, and configuration epoch. This is not proof every unwind was captured.
+        /// </summary>
+        public bool ExceptionCompletionObserved(AsyncProfilerCallStack callStack)
+        {
+            if (callStack == null)
+            {
+                throw new ArgumentNullException(nameof(callStack));
+            }
+            CompletionAvailabilityEpoch epoch = FindCompletionEpoch(
+                callStack.Thread.ProcessIndex, callStack.StartQpc);
+            return epoch != null && epoch.ExceptionObserved(callStack.Frames.Kind);
+        }
+
+        /// <summary>
         /// Returns the latest recorded metadata for <paramref name="dispatcherId"/> with a creation QPC at or before
         /// <paramref name="qpc"/> in <paramref name="processIndex"/>, or null when no such metadata was recorded.
         /// </summary>
@@ -394,6 +409,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             candidates.Clear();
             callStacks.Query(
                 dispatcher.CreationQpc, candidates, this, cacheMaterialized: true);
+            candidates.Sort(CompareDepth);
             for (int i = candidates.Count - 1; i >= 0; i--)
             {
                 if (candidates[i].DispatcherId == dispatcher.ParentDispatcherId)

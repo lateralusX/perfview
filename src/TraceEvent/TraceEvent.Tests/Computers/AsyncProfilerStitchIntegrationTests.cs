@@ -157,7 +157,7 @@ namespace TraceEventTests
         [Theory]
         [InlineData((int)AsyncCallstackKind.StateMachineAsync)]
         [InlineData((int)AsyncCallstackKind.RuntimeAsync)]
-        public void PerfMapSymbols_ZeroIpWithoutBoundary_PreservesPhysicalStackAndAppendsAncestry(int kindValue)
+        public void PerfMapSymbols_ZeroIpWithoutBoundary_PreservesPhysicalStackAndAppendsAsyncCallers(int kindValue)
         {
             var kind = (AsyncCallstackKind)kindValue;
             bool stateMachine = kind == AsyncCallstackKind.StateMachineAsync;
@@ -630,7 +630,7 @@ namespace TraceEventTests
         }
 
         [Fact]
-        public void RuntimeAsync_ThreadPoolDispatch_StitchesSuspendedAncestry()
+        public void RuntimeAsync_ThreadPoolDispatch_StitchesSuspendedCallers()
         {
             var scenario = new StitchScenario
             {
@@ -674,8 +674,10 @@ namespace TraceEventTests
             scenario.AssertProductionStitch();
         }
 
-        [Fact]
-        public void RuntimeAsync_ContextAncestry_RendersHistoricalParentMetadata()
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void RuntimeAsync_ParentContexts_RendersHistoricalParentMetadata(bool enableFrameAnnotations)
         {
             Frame current = Frame.App("Scenario.ChildAsync");
             Frame childParent = Frame.App("Scenario.ChildParentAsync");
@@ -699,8 +701,8 @@ namespace TraceEventTests
                     childParent,
                 },
                 ContextParent = AsyncSegment.Runtime(ownerCurrent, ownerRoot),
-                EnableContextAncestry = true,
-                EnableFrameAnnotations = true,
+                EnableParentContexts = true,
+                EnableFrameAnnotations = enableFrameAnnotations,
                 VerifyRemovingParentContextRemovesPresentation = true,
                 ExpectedStitched = new[]
                 {
@@ -722,13 +724,13 @@ namespace TraceEventTests
                     Assert.Equal(
                         new[]
                         {
-                            "[Async parent context transition]",
-                            "[Async parent context transition]",
+                            "[Async resumed parent context]",
+                            "[Async resumed parent context]",
                         },
                         stitched.GroupingFrames.Where(
                             frame => string.Equals(
                                 frame,
-                                "[Async parent context transition]",
+                                "[Async resumed parent context]",
                                 StringComparison.Ordinal)));
                 },
                 AssertStitchedStackSource = stackSource =>
@@ -743,30 +745,142 @@ namespace TraceEventTests
                         {
                             StackSourceFrameIndex frameIndex = stackSource.GetFrameIndex(stack);
                             string name = stackSource.GetFrameName(frameIndex, false);
-                            if (name.IndexOf("[Async parent V2] ", StringComparison.Ordinal) < 0)
+                            if (!stackSource.TryGetAsyncProfilerCallStackFrameInfo(
+                                frameIndex, out AsyncProfilerCallStackSourceFrameInfo info))
                             {
-                                if (name.IndexOf("[Async V2] ", StringComparison.Ordinal) >= 0)
-                                {
-                                    Assert.StartsWith("[Async V2] ", name);
-                                    Assert.DoesNotContain("![Async V2] ", name);
-                                    foundActiveAsync = true;
-                                    Assert.True(stackSource.TryGetAsyncProfilerCallStackFrameInfo(
-                                        frameIndex, out AsyncProfilerCallStackSourceFrameInfo activeInfo));
-                                    Assert.False(activeInfo.IsHistoricalParent);
-                                }
                                 continue;
                             }
 
-                            Assert.StartsWith("[Async parent V2] ", name);
-                            Assert.DoesNotContain("![Async parent V2] ", name);
-                            foundHistoricalParent = true;
-                            Assert.True(stackSource.TryGetAsyncProfilerCallStackFrameInfo(
-                                frameIndex, out AsyncProfilerCallStackSourceFrameInfo info));
-                            Assert.True(info.IsHistoricalParent);
+                            if (info.IsHistoricalParent || enableFrameAnnotations)
+                            {
+                                Assert.StartsWith("[Async V2] ", name);
+                                Assert.DoesNotContain("![Async V2] ", name);
+                            }
+                            else
+                            {
+                                Assert.DoesNotContain("[Async V2] ", name);
+                            }
+                            foundHistoricalParent |= info.IsHistoricalParent;
+                            foundActiveAsync |= !info.IsHistoricalParent;
                         }
                     });
                     Assert.True(foundHistoricalParent);
                     Assert.True(foundActiveAsync);
+                },
+            };
+
+            scenario.AssertProductionStitch();
+        }
+
+        [Theory]
+        [InlineData(false, false, false)]
+        [InlineData(false, false, true)]
+        [InlineData(false, true, false)]
+        [InlineData(false, true, true)]
+        [InlineData(true, false, false)]
+        [InlineData(true, false, true)]
+        [InlineData(true, true, false)]
+        [InlineData(true, true, true)]
+        public void ContextParent_RecordedProgressPreservesCapturedMetadataInBothHosts(
+            bool stateMachineParent, bool enableFrameAnnotations, bool enableInfrastructureCleanup)
+        {
+            Frame current = Frame.App("Scenario.ChildAsync");
+            Frame ownerCurrent = Frame.App(stateMachineParent
+                ? "Scenario+<OwnerCurrentAsync>d__3.MoveNext" : "Scenario.OwnerCurrentAsync");
+            Frame ownerRoot = Frame.App(stateMachineParent
+                ? "Scenario+<OwnerRootAsync>d__2.MoveNext" : "Scenario.OwnerRootAsync");
+            Frame[] parentFrames =
+            {
+                Frame.App("Scenario.CompletedAsync"),
+                Frame.App("Scenario.UnwoundAsync"),
+                ownerCurrent,
+                ownerRoot,
+            };
+            var parentKind = stateMachineParent
+                ? AsyncCallstackKind.StateMachineAsync : AsyncCallstackKind.RuntimeAsync;
+            var scenario = new StitchScenario
+            {
+                Sync = new[]
+                {
+                    current, Frame.V2Wrapper(0), Frame.V2InstrumentedDispatch, Frame.V2Dispatch,
+                    Frame.ThreadPoolDispatch, Frame.WorkerThreadStart,
+                },
+                Async = new[] { current },
+                ContextParent = new AsyncSegment(parentKind, parentFrames, new[] { 0, 1, 4, 7 }),
+                ParentMethodCompletions = 1,
+                ParentExceptionCompletions = 1,
+                ExpectedDiagnostics = new CallStackDiagnosticsExpectation
+                {
+                    SegmentsProcessed = 2,
+                    V2PlumbingFramesCollapsed = 4,
+                },
+                EnableParentContexts = true,
+                EnableFrameAnnotations = enableFrameAnnotations,
+                EnableInfrastructureCleanup = enableInfrastructureCleanup,
+                IncludeEventSourceEvents = false,
+                VerifyThreadTimeComputer = true,
+                VerifySampleWeights = true,
+                ExpectedStitched = new[]
+                {
+                    current,
+                    stateMachineParent ? ownerCurrent.Logical("Scenario.OwnerCurrentAsync", -1) : ownerCurrent,
+                    stateMachineParent ? ownerRoot.Logical("Scenario.OwnerRootAsync", 7) : ownerRoot,
+                    Frame.ThreadPoolDispatch,
+                    Frame.WorkerThreadStart,
+                },
+                AssertTransformContext = context =>
+                {
+                    AsyncProfilerStitchedFrame[] parents = context.Frames.Where(frame =>
+                        frame.ContextKind == AsyncProfilerStitchedFrameContextKind.HistoricalParent).ToArray();
+                    Assert.Equal(new[] { 2, 3 }, parents.Select(frame => frame.SegmentFrameIndex));
+                    Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncContextParentCurrent, parents[0].Origin);
+                    Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncContextParent, parents[1].Origin);
+                },
+                AssertStitchedStackSource = stackSource =>
+                {
+                    int parents = 0;
+                    int runningParents = 0;
+                    for (int i = 0; i < stackSource.CallFrameIndexLimit; i++)
+                    {
+                        var frameIndex = (StackSourceFrameIndex)i;
+                        if (!stackSource.TryGetAsyncProfilerCallStackFrameInfo(
+                            frameIndex, out AsyncProfilerCallStackSourceFrameInfo info) || !info.IsHistoricalParent)
+                        {
+                            continue;
+                        }
+                        parents++;
+                        Assert.Equal(parentKind, info.Kind);
+                        Assert.False(info.IsCurrent);
+                        Assert.False(info.IsCompleting);
+                        Assert.False(info.IsCompletionUnwind);
+                        Assert.False(info.IsDispatchTarget);
+                        Assert.Equal(info.CodeAddress, stackSource.GetFrameCodeAddress(frameIndex));
+                        Assert.Equal(stackSource.TraceLog.CodeAddresses[info.CodeAddress].Address, info.MethodId);
+                        string name = stackSource.GetFrameName(frameIndex, false);
+                        if (info.IsHistoricalParentCurrent)
+                        {
+                            runningParents++;
+                            Assert.Contains(ownerCurrent.SymbolName,
+                                stackSource.TraceLog.CodeAddresses[info.CodeAddress].FullMethodName);
+                            Assert.Equal(stateMachineParent ? 4 : 0, info.State);
+                            if (stateMachineParent)
+                            {
+                                Assert.StartsWith("[Async V1] ", name);
+                                Assert.EndsWith("[ordinal 3, state -1]", name);
+                            }
+                            else
+                            {
+                                Assert.StartsWith("[Async V2] ", name);
+                                Assert.DoesNotContain("state ", name);
+                            }
+                        }
+                        else
+                        {
+                            Assert.Equal(stateMachineParent ? 7 : 0, info.State);
+                        }
+                    }
+                    Assert.Equal(2, parents);
+                    Assert.Equal(1, runningParents);
                 },
             };
 
@@ -807,7 +921,7 @@ namespace TraceEventTests
                 },
                 AssertOutputs = (normal, stitched) =>
                     Assert.DoesNotContain(
-                        "[Async parent context transition]",
+                        "[Async resumed parent context]",
                         stitched.GroupingFrames),
                 AssertStitchedStackSource = stackSource =>
                 {
@@ -870,7 +984,7 @@ namespace TraceEventTests
                 },
                 Async = new[] { current, parent },
                 ContextParent = AsyncSegment.Runtime(current, parent),
-                EnableContextAncestry = true,
+                EnableParentContexts = true,
                 EnableFrameAnnotations = true,
                 ExpectedStitched = new[]
                 {
@@ -890,26 +1004,43 @@ namespace TraceEventTests
                 AssertOutputs = (normal, stitched) =>
                 {
                     Assert.Contains(
-                        "[Async parent context transition]",
+                        "[Async resumed parent context]",
                         stitched.GroupingFrames);
                 },
                 AssertStitchedStackSource = stackSource =>
                 {
-                    bool foundHistoricalParent = false;
                     stackSource.ForEach(sample =>
                     {
+                        StackSourceFrameIndex activeParent = StackSourceFrameIndex.Invalid;
+                        StackSourceFrameIndex historicalParent = StackSourceFrameIndex.Invalid;
                         for (StackSourceCallStackIndex stack = sample.StackIndex;
                              stack != StackSourceCallStackIndex.Invalid;
                              stack = stackSource.GetCallerIndex(stack))
                         {
-                            foundHistoricalParent |=
-                                stackSource.TryGetAsyncProfilerCallStackFrameInfo(
-                                    stackSource.GetFrameIndex(stack),
-                                    out AsyncProfilerCallStackSourceFrameInfo info) &&
-                                info.IsHistoricalParent;
+                            StackSourceFrameIndex frameIndex = stackSource.GetFrameIndex(stack);
+                            if (stackSource.GetFrameName(frameIndex, false).IndexOf(
+                                "Scenario.ParentAsync", StringComparison.Ordinal) < 0 ||
+                                !stackSource.TryGetAsyncProfilerCallStackFrameInfo(
+                                    frameIndex, out AsyncProfilerCallStackSourceFrameInfo info))
+                            {
+                                continue;
+                            }
+                            if (info.IsHistoricalParent)
+                            {
+                                historicalParent = frameIndex;
+                            }
+                            else
+                            {
+                                activeParent = frameIndex;
+                            }
                         }
+                        Assert.NotEqual(StackSourceFrameIndex.Invalid, activeParent);
+                        Assert.NotEqual(StackSourceFrameIndex.Invalid, historicalParent);
+                        Assert.NotEqual(activeParent, historicalParent);
+                        Assert.Equal(
+                            stackSource.GetFrameName(activeParent, false),
+                            stackSource.GetFrameName(historicalParent, false));
                     });
-                    Assert.True(foundHistoricalParent);
                 },
             };
 
@@ -1052,7 +1183,7 @@ namespace TraceEventTests
         }
 
         [Fact]
-        public void RuntimeAsync_DeepResume_StitchesRealCapturedAncestry()
+        public void RuntimeAsync_DeepResume_StitchesRealCapturedAsyncFrames()
         {
             Frame readConsoleInput = Frame.Library(
                 "System.Console", "Interop+Kernel32.ReadConsoleInput", "Interop.Kernel32.ReadConsoleInput");
@@ -1285,7 +1416,7 @@ namespace TraceEventTests
                 EnableFrameAnnotations = enableFrameAnnotations,
                 EnableNormalization = enableNormalization,
                 EnableInfrastructureCleanup = enableInfrastructureCleanup,
-                EnableContextAncestry = true,
+                EnableParentContexts = true,
                 IncludeEventSourceEvents = false,
                 VerifySampleWeights = true,
                 VerifyThreadTimeComputer = true,
@@ -1396,7 +1527,7 @@ namespace TraceEventTests
         [Theory]
         [InlineData(false)]
         [InlineData(true)]
-        public void RuntimeAsync_WrapperIsSampledLeaf_HistoricalAncestryRequiresDispatchTarget(bool targetKnown)
+        public void RuntimeAsync_WrapperIsSampledLeaf_HistoricalParentContextsRequireDispatchTarget(bool targetKnown)
         {
             Frame target = Frame.App("Scenario.InnerAsync");
             Frame parent = Frame.App("Scenario.ParentAsync");
@@ -1411,7 +1542,7 @@ namespace TraceEventTests
                 },
                 Async = new[] { targetKnown ? target : Frame.Zero, parent },
                 ContextParent = AsyncSegment.Runtime(owner),
-                EnableContextAncestry = true,
+                EnableParentContexts = true,
                 EnableFrameAnnotations = true,
                 IncludeEventSourceEvents = false,
                 VerifySampleWeights = true,
@@ -1506,7 +1637,7 @@ namespace TraceEventTests
                 ExpectedStitched = expected,
                 EnableFrameAnnotations = true,
                 EnableNormalization = enableNormalization,
-                EnableContextAncestry = true,
+                EnableParentContexts = true,
                 OnlyManagedCodeStacks = true,
                 IncludeEventSourceEvents = false,
                 SkipNormalStackAssertion = true,
@@ -1655,7 +1786,7 @@ namespace TraceEventTests
                 ExpectedStitched = expected.ToArray(),
                 EnableFrameAnnotations = true,
                 EnableNormalization = enableNormalization,
-                EnableContextAncestry = true,
+                EnableParentContexts = true,
                 OnlyManagedCodeStacks = true,
                 IncludeEventSourceEvents = false,
                 SkipNormalStackAssertion = true,
@@ -2170,7 +2301,7 @@ namespace TraceEventTests
         public void StateMachineAsync_Scenario3Resume_RemovesSchedulingFrames()
         {
             // Captured from AsyncProfilerScenarios scenario 3 after AsyncFoo resumes from Task.Delay and blocks in
-            // Console.ReadKey. The profiler segment contains only AsyncFoo, so there is no suspended ancestry to add.
+            // Console.ReadKey. The profiler segment contains only AsyncFoo, so there are no suspended async callers to add.
             Frame asyncFoo = Frame.App("TestCase3+<AsyncFoo>d__3.MoveNext");
             Frame logicalAsyncFoo = asyncFoo.Logical("TestCase3.AsyncFoo");
             Frame[] sync =
@@ -3633,7 +3764,7 @@ namespace TraceEventTests
         }
 
         [Fact]
-        public void StateMachineAsync_DeepResume_StitchesSuspendedAncestryAndRemovesSchedulingFrames()
+        public void StateMachineAsync_DeepResume_StitchesSuspendedCallersAndRemovesSchedulingFrames()
         {
             Frame readConsoleInput = Frame.Library("System.Console", "Interop+Kernel32.ReadConsoleInput", "Interop.Kernel32.ReadConsoleInput");
             Frame consolePalReadKey = Frame.Library("System.Console", "System.ConsolePal.ReadKey", "ConsolePal.ReadKey");
@@ -5086,16 +5217,16 @@ namespace TraceEventTests
         [InlineData((int)AsyncCallstackKind.RuntimeAsync, true, false)]
         [InlineData((int)AsyncCallstackKind.RuntimeAsync, true, true)]
         public void RuntimeResumptionBridge_FoldsOnlyThePhysicalRootBridge(
-            int kindValue, bool enableNormalization, bool ancestry)
+            int kindValue, bool enableNormalization, bool enableParentContexts)
         {
             var kind = (AsyncCallstackKind)kindValue;
             StitchScenario scenario = CreateRuntimeResumptionBridgeScenario(kind);
             scenario.EnableNormalization = enableNormalization;
-            scenario.EnableContextAncestry = ancestry;
+            scenario.EnableParentContexts = enableParentContexts;
             scenario.VerifyThreadTimeComputer = true;
             scenario.IncludeEventSourceEvents = false;
             scenario.AllowSupplementalSamples = true;
-            if (ancestry)
+            if (enableParentContexts)
             {
                 Frame owner = Frame.App("Scenario.OwnerAsync");
                 scenario.ContextParent = AsyncSegment.Runtime(owner);
@@ -5889,12 +6020,12 @@ namespace TraceEventTests
         }
 
         [Fact]
-        public void ProfilerEnvelope_PreservesHistoricalAncestry()
+        public void ProfilerEnvelope_PreservesHistoricalParentContexts()
         {
             StitchScenario scenario = CreateProfilerEnvelopeScenario();
             Frame owner = Frame.App("Scenario.OwnerAsync");
             scenario.ContextParent = AsyncSegment.Runtime(owner);
-            scenario.EnableContextAncestry = true;
+            scenario.EnableParentContexts = true;
             scenario.ExpectedStitched = scenario.ExpectedStitched.Take(3)
                 .Concat(new[] { owner }).Concat(scenario.ExpectedStitched.Skip(3)).ToArray();
             scenario.ExpectedWithoutInfrastructureCleanup =
@@ -5946,7 +6077,7 @@ namespace TraceEventTests
         [InlineData((int)AsyncCallstackKind.RuntimeAsync, true, false)]
         [InlineData((int)AsyncCallstackKind.RuntimeAsync, true, true)]
         public void RuntimeResumptionBridge_ApplicationCallback_PreservesTheCompleteBridge(
-            int kindValue, bool enableNormalization, bool ancestry)
+            int kindValue, bool enableNormalization, bool enableParentContexts)
         {
             var kind = (AsyncCallstackKind)kindValue;
             StitchScenario scenario = CreateCallbackCompletionBridgeScenario(kind);
@@ -5957,8 +6088,8 @@ namespace TraceEventTests
                 new[] { prefix }.Concat(scenario.ExpectedWithoutInfrastructureCleanup).ToArray();
             scenario.ExpectedDiagnostics.AsyncInfrastructureFramesCollapsed += 2;
             scenario.EnableNormalization = enableNormalization;
-            scenario.EnableContextAncestry = ancestry;
-            if (ancestry)
+            scenario.EnableParentContexts = enableParentContexts;
+            if (enableParentContexts)
             {
                 Frame owner = Frame.App("Scenario.OwnerAsync");
                 scenario.ContextParent = AsyncSegment.Runtime(owner);
@@ -6307,10 +6438,10 @@ namespace TraceEventTests
         [InlineData(true, false)]
         [InlineData(true, true)]
         public void V1AfterV2Completion_CollapsesOnlyTheVerifiedHandoff(
-            bool enableAncestry, bool applicationCaller)
+            bool enableParentContexts, bool applicationCaller)
         {
             StitchScenario scenario = CreateV1AfterV2CompletionScenario();
-            scenario.EnableContextAncestry = enableAncestry;
+            scenario.EnableParentContexts = enableParentContexts;
             scenario.VerifyThreadTimeComputer = true;
             scenario.IncludeEventSourceEvents = false;
             scenario.AllowSupplementalSamples = true;
@@ -7099,6 +7230,8 @@ namespace TraceEventTests
             public Frame[] FilteredOut { get; set; }
             public Frame OmitSymbolFor { get; set; }
             public AsyncSegment ContextParent { get; set; }
+            public int ParentMethodCompletions { get; set; }
+            public int ParentExceptionCompletions { get; set; }
             public CallStackDiagnosticsExpectation ExpectedDiagnostics { get; set; }
             public AsyncCallstackKind Kind { get; set; } = AsyncCallstackKind.RuntimeAsync;
             public long AsyncStartQpc { get; set; } = StartQpc + 10;
@@ -7123,7 +7256,7 @@ namespace TraceEventTests
             public bool IncludeStartStopActivity { get; set; }
             public bool AllowSupplementalSamples { get; set; }
             public bool SkipNormalStackAssertion { get; set; }
-            public bool EnableContextAncestry { get; set; }
+            public bool EnableParentContexts { get; set; }
             public bool EnableFrameAnnotations { get; set; }
             public bool EnableNormalization { get; set; } = true;
             public bool EnableInfrastructureCleanup { get; set; }
@@ -7193,8 +7326,8 @@ namespace TraceEventTests
                             IncludeEventSourceEvents = IncludeEventSourceEvents,
                             GroupByStartStopActivity = GroupByStartStopActivity,
                         };
-                        stitchedComputer.AsyncProfilerCallStackTransformPipeline.EnableContextAncestry =
-                            EnableContextAncestry;
+                        stitchedComputer.AsyncCallStackTransforms.EnableParentContexts =
+                            EnableParentContexts;
                         stitchedComputer.AsyncCallStackTransforms.EnableFrameAnnotations =
                             EnableFrameAnnotations;
                         ConfigurePresentation(stitchedComputer.AsyncCallStackTransforms, stitchedComputer.AsyncProfilerCallStackTransformPipeline,
@@ -7243,7 +7376,7 @@ namespace TraceEventTests
                                     IncludeEventSourceEvents = IncludeEventSourceEvents,
                                     GroupByStartStopActivity = GroupByStartStopActivity,
                                 };
-                            filteredContextComputer.AsyncProfilerCallStackTransformPipeline.EnableContextAncestry = true;
+                            filteredContextComputer.AsyncCallStackTransforms.EnableParentContexts = true;
                             filteredContextComputer.AsyncProfilerCallStackTransformPipeline.Add(context =>
                                 context.Frames.RemoveAll(frame =>
                                     frame.ContextKind ==
@@ -7260,7 +7393,7 @@ namespace TraceEventTests
                                     frame => !parentKeys.Contains(frame.Key))),
                                 filteredContextOutput.ScenarioFrames);
                             Assert.DoesNotContain(
-                                "[Async parent context transition]",
+                                "[Async resumed parent context]",
                                 filteredContextOutput.GroupingFrames);
                         }
 
@@ -7279,7 +7412,7 @@ namespace TraceEventTests
                                 GroupByStartStopActivity = GroupByStartStopActivity,
                                 IncludeEventSourceEvents = false,
                             };
-                            threadTimeComputer.AsyncProfilerCallStackTransformPipeline.EnableContextAncestry = EnableContextAncestry;
+                            threadTimeComputer.AsyncCallStackTransforms.EnableParentContexts = EnableParentContexts;
                             threadTimeComputer.AsyncCallStackTransforms.EnableFrameAnnotations = EnableFrameAnnotations;
                             ConfigurePresentation(threadTimeComputer.AsyncCallStackTransforms, threadTimeComputer.AsyncProfilerCallStackTransformPipeline,
                                 enableNormalization: EnableNormalization, enableInfrastructureCleanup: EnableInfrastructureCleanup);
@@ -7301,7 +7434,7 @@ namespace TraceEventTests
                                 IncludeEventSourceEvents = IncludeEventSourceEvents,
                                 GroupByStartStopActivity = GroupByStartStopActivity,
                             };
-                            defaultComputer.AsyncProfilerCallStackTransformPipeline.EnableContextAncestry = EnableContextAncestry;
+                            defaultComputer.AsyncCallStackTransforms.EnableParentContexts = EnableParentContexts;
                             defaultComputer.AsyncCallStackTransforms.EnableFrameAnnotations = EnableFrameAnnotations;
                             ConfigurePresentation(defaultComputer.AsyncCallStackTransforms, defaultComputer.AsyncProfilerCallStackTransformPipeline,
                                 enableNormalization: EnableNormalization, enableInfrastructureCleanup: false);
@@ -7391,6 +7524,7 @@ namespace TraceEventTests
                 Dictionary<string, ulong> addresses = _addresses = AssignAddresses(mappings);
                 var asyncBufferBuilder = new AsyncProfilerBufferBuilder(OsThreadId, 0x0BADF00D, StartQpc)
                     .Armed(StartQpc);
+                AsyncSegment[] segments = GetAsyncSegments();
                 if (ContextParent != null)
                 {
                     ulong[] ownerFrameAddresses =
@@ -7398,13 +7532,7 @@ namespace TraceEventTests
                     if (ContextParent.Kind == AsyncCallstackKind.RuntimeAsync)
                     {
                         asyncBufferBuilder
-                            .ResumeRuntimeStack(StartQpc + 1, dispatcher: 99, ownerFrameAddresses)
-                            .CreateContext(
-                                AsyncEventID.CreateRuntimeAsyncContext,
-                                StartQpc + 5,
-                                parent: 99,
-                                dispatcher: 1)
-                            .SuspendRuntime(StartQpc + 8);
+                            .ResumeRuntimeStack(StartQpc + 1, dispatcher: 99, ownerFrameAddresses);
                     }
                     else
                     {
@@ -7413,16 +7541,35 @@ namespace TraceEventTests
                                 StartQpc + 1,
                                 dispatcher: 99,
                                 ownerFrameAddresses,
-                                ContextParent.States ?? new int[ownerFrameAddresses.Length])
-                            .CreateContext(
-                                AsyncEventID.CreateStateMachineAsyncContext,
-                                StartQpc + 5,
-                                parent: 99,
-                                dispatcher: 1)
-                            .Suspend(StartQpc + 8);
+                                ContextParent.States ?? new int[ownerFrameAddresses.Length]);
+                    }
+                    for (int i = 0; i < ParentMethodCompletions; i++)
+                    {
+                        asyncBufferBuilder.Method(
+                            ContextParent.Kind == AsyncCallstackKind.RuntimeAsync
+                                ? AsyncEventID.CompleteRuntimeAsyncMethod : AsyncEventID.CompleteStateMachineAsyncMethod,
+                            StartQpc + 2);
+                    }
+                    if (ParentExceptionCompletions > 0)
+                    {
+                        asyncBufferBuilder.Unwind(
+                            ContextParent.Kind == AsyncCallstackKind.RuntimeAsync
+                                ? AsyncEventID.UnwindRuntimeAsyncException : AsyncEventID.UnwindStateMachineAsyncException,
+                            StartQpc + 3, (uint)ParentExceptionCompletions);
+                    }
+                    asyncBufferBuilder.CreateContext(
+                        segments[0].Kind == AsyncCallstackKind.RuntimeAsync
+                            ? AsyncEventID.CreateRuntimeAsyncContext : AsyncEventID.CreateStateMachineAsyncContext,
+                        StartQpc + 5, parent: 99, dispatcher: 1);
+                    if (ContextParent.Kind == AsyncCallstackKind.RuntimeAsync)
+                    {
+                        asyncBufferBuilder.SuspendRuntime(StartQpc + 8);
+                    }
+                    else
+                    {
+                        asyncBufferBuilder.Suspend(StartQpc + 8);
                     }
                 }
-                AsyncSegment[] segments = GetAsyncSegments();
                 for (int i = 0; i < segments.Length; i++)
                 {
                     AsyncSegment segment = segments[i];

@@ -609,7 +609,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             CallStacks state = GetOrCreate(creationThread);
             if (state.Armed)
             {
-                _index.AddDispatcherInfo(creationThread, e.DispatcherId, e.ParentDispatcherId, e.TimestampQpc);
+                state.RecordDispatcherCreation(
+                    _index, creationThread, e.DispatcherId, e.ParentDispatcherId, e.TimestampQpc);
             }
         }
 
@@ -636,9 +637,17 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         private void ProcessCallstack(in AsyncCallstackEvent e, bool reusablePayload)
         {
-            CallStacks state = GetOrCreate(ThreadKeyOf(e.OsThreadId));
+            AsyncProfilerThreadKey thread = ThreadKeyOf(e.OsThreadId);
+            CallStacks state = GetOrCreate(thread);
             if (!state.Armed)
             {
+                return;
+            }
+
+            if (e.EventId == AsyncEventID.CreateRuntimeAsyncCallstack)
+            {
+                state.RecordDispatcherCreation(
+                    _index, thread, e.DispatcherId, e.ParentDispatcherId, e.TimestampQpc);
                 return;
             }
 
@@ -973,7 +982,32 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 return top;
             }
 
+            public void RecordDispatcherCreation(
+                AsyncProfilerCallStacksIndex index,
+                AsyncProfilerThreadKey thread,
+                ulong dispatcherId,
+                ulong parentDispatcherId,
+                long creationQpc)
+            {
+                // Both V2 creation forms describe the same creation at the same QPC, possibly in separate buffers.
+                if (_lastCreatedDispatcherId == dispatcherId &&
+                    _lastCreatedParentDispatcherId == parentDispatcherId &&
+                    _lastCreationQpc == creationQpc)
+                {
+                    return;
+                }
+
+                index.AddDispatcherInfo(thread, dispatcherId, parentDispatcherId, creationQpc);
+                _lastCreatedDispatcherId = dispatcherId;
+                _lastCreatedParentDispatcherId = parentDispatcherId;
+                _lastCreationQpc = creationQpc;
+            }
+
             public void ClearNesting() => _nesting.Clear();
+
+            private ulong _lastCreatedDispatcherId;
+            private ulong _lastCreatedParentDispatcherId;
+            private long _lastCreationQpc;
         }
 
         private sealed class ProcessState

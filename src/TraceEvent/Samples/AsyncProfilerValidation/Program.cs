@@ -24,14 +24,21 @@ namespace AsyncProfilerValidation
 
         private static void Main(string[] args)
         {
+            string[] originalArgs = args;
+            bool enableParentContexts = args.Length > 0 && args[args.Length - 1] == "--parent-contexts";
+            if (enableParentContexts)
+            {
+                args = args.Take(args.Length - 1).ToArray();
+            }
+
             if (!((args.Length == 3 && args[0] == "export") ||
                   (args.Length == 7 && args[0] == "probe") ||
                   (args.Length == 6 && args[0] == "probe-qpc")))
             {
                 throw new ArgumentException(
-                    "Usage:\n  AsyncProfilerValidation export <capture.nettrace> <new-output-directory>\n" +
-                    "  AsyncProfilerValidation probe <capture.etlx> <pid> <os-thread-id> <start-ms> <end-ms> <new-output-directory>\n" +
-                    "  AsyncProfilerValidation probe-qpc <capture.etlx> <pid> <os-thread-id> <qpc> <new-output-directory>");
+                    "Usage:\n  AsyncProfilerValidation export <capture.nettrace> <new-output-directory> [--parent-contexts]\n" +
+                    "  AsyncProfilerValidation probe <capture.etlx> <pid> <os-thread-id> <start-ms> <end-ms> <new-output-directory> [--parent-contexts]\n" +
+                    "  AsyncProfilerValidation probe-qpc <capture.etlx> <pid> <os-thread-id> <qpc> <new-output-directory> [--parent-contexts]");
             }
 
             string input = Path.GetFullPath(args[1]);
@@ -81,7 +88,7 @@ namespace AsyncProfilerValidation
             Directory.CreateDirectory(output);
             WriteJson(Path.Combine(output, "run.json"), new
             {
-                Arguments = args,
+                Arguments = originalArgs,
                 Input = input,
                 InputSha256 = FileHash(input),
                 StartedUtc = DateTime.UtcNow,
@@ -93,22 +100,22 @@ namespace AsyncProfilerValidation
                 OnlyManagedCodeStacks = true,
                 IncludeEventSourceEvents = true,
                 EnableFrameAnnotations = true,
-                EnableContextAncestry = false
+                EnableParentContexts = enableParentContexts
             });
 
             if (export)
             {
                 string etlx = TraceLog.CreateFromEventPipeDataFile(input, Path.Combine(output, "capture.etlx"),
                     new TraceLogOptions { KeepAsyncProfilerEvents = true, ConversionLog = Console.Error });
-                Export(etlx, output);
+                Export(etlx, output, enableParentContexts);
             }
             else
             {
-                Probe(input, output, pid, tid, start, end, exactQpc);
+                Probe(input, output, pid, tid, start, end, exactQpc, enableParentContexts);
             }
         }
 
-        private static void Export(string etlx, string output)
+        private static void Export(string etlx, string output, bool enableParentContexts)
         {
             string baselineHash = null;
             int baselineCount = 0;
@@ -117,7 +124,7 @@ namespace AsyncProfilerValidation
                 using var log = new TraceLog(etlx);
                 using var symbols = new SymbolReader(Console.Error);
                 var source = new MutableTraceEventStackSource(log) { OnlyManagedCodeStacks = true };
-                var computer = CreateComputer(log, symbols, view);
+                var computer = CreateComputer(log, symbols, view, enableParentContexts);
                 computer.GenerateThreadTimeStacks(source);
                 if (view.EnableAsyncCallStacks && !computer.AsyncCallStacksActive)
                 {
@@ -166,6 +173,7 @@ namespace AsyncProfilerValidation
                     Weight = weight,
                     TimestampMetricSha256 = digest,
                     computer.AsyncCallStacksActive,
+                    computer.AsyncCallStackTransforms.EnableParentContexts,
                     computer.UseTasks,
                     computer.GroupByStartStopActivity,
                     SymbolPath = symbols.SymbolPath,
@@ -175,7 +183,8 @@ namespace AsyncProfilerValidation
             }
         }
 
-        private static void Probe(string etlx, string output, int pid, ulong tid, double start, double end, long? exactQpc)
+        private static void Probe(string etlx, string output, int pid, ulong tid, double start, double end,
+            long? exactQpc, bool enableParentContexts)
         {
             var targets = new Dictionary<(long Qpc, ProcessIndex Process, ulong Thread), List<uint>>();
             var times = new Dictionary<double, List<uint>>();
@@ -253,7 +262,7 @@ namespace AsyncProfilerValidation
                 using var transforms = new StreamWriter(Path.Combine(output, view.Name + ".transforms.jsonl"));
                 using var emitted = new StreamWriter(Path.Combine(output, view.Name + ".emitted.jsonl"));
                 var source = new MutableTraceEventStackSource(log) { OnlyManagedCodeStacks = true };
-                var computer = CreateComputer(log, symbols, view);
+                var computer = CreateComputer(log, symbols, view, enableParentContexts);
                 computer.TraceAsyncProfilerCallStackSteps = true;
                 int callbackCount = 0;
                 computer.AsyncProfilerCallStackTransformPipeline.Add(context =>
@@ -331,6 +340,7 @@ namespace AsyncProfilerValidation
                     EmittedTimestampCandidates = count,
                     TransformCallbacks = callbackCount,
                     computer.AsyncCallStacksActive,
+                    computer.AsyncCallStackTransforms.EnableParentContexts,
                     computer.UseTasks,
                     computer.GroupByStartStopActivity,
                     SymbolPath = symbols.SymbolPath,
@@ -352,7 +362,9 @@ namespace AsyncProfilerValidation
         }
 
         private static SampleProfilerThreadTimeComputer CreateComputer(
-            TraceLog log, SymbolReader symbols, (string Name, bool EnableAsyncCallStacks, bool EnableNormalization, bool EnableInfrastructureCleanup) view)
+            TraceLog log, SymbolReader symbols,
+            (string Name, bool EnableAsyncCallStacks, bool EnableNormalization, bool EnableInfrastructureCleanup) view,
+            bool enableParentContexts)
         {
             var computer = new SampleProfilerThreadTimeComputer(log, symbols)
             {
@@ -361,6 +373,8 @@ namespace AsyncProfilerValidation
             computer.AsyncCallStackTransforms.EnableNormalization = view.EnableNormalization;
             computer.AsyncCallStackTransforms.EnableInfrastructureCleanup = view.EnableInfrastructureCleanup;
             computer.AsyncCallStackTransforms.EnableFrameAnnotations = true;
+            computer.AsyncCallStackTransforms.EnableParentContexts =
+                view.EnableAsyncCallStacks && enableParentContexts;
             return computer;
         }
 
@@ -402,6 +416,7 @@ namespace AsyncProfilerValidation
                 activation.ContinuationIndexBase,
                 activation.WrapperCount,
                 MethodCompletionObserved = log.AsyncProfilerMethodCompletionObserved(activation),
+                ExceptionCompletionObserved = log.AsyncProfilerCallStacks.ExceptionCompletionObserved(activation),
                 MethodCompleted = activation.GetMethodCompletedFrameCount(qpc),
                 ExceptionCompleted = activation.GetExceptionCompletedFrameCount(qpc),
                 RecordedCompleted = activation.GetCompletedFrameCount(qpc),

@@ -33,16 +33,21 @@ namespace TraceEventTests
             Assert.Equal(2, diagnostics.V1SynchronousStartupFramesCollapsed);
         }
 
-        [Fact]
-        public void MaximumContextAncestryDepth_MustBePositive()
+        [Theory]
+        [InlineData(0)]
+        [InlineData(-1)]
+        public void MaximumParentContextDepth_MustBePositive(int depth)
         {
             var pipeline = new AsyncProfilerCallStackTransformPipeline();
+            var transforms = new AsyncCallStackTransforms(pipeline)
+            {
+                MaximumParentContextDepth = 3,
+            };
 
-            Assert.Throws<ArgumentOutOfRangeException>(
-                () => pipeline.MaximumContextAncestryDepth = 0);
-            Assert.Equal(
-                AsyncProfilerContextAncestryAugmenter.DefaultMaximumDepth,
-                pipeline.MaximumContextAncestryDepth);
+            ArgumentOutOfRangeException exception = Assert.Throws<ArgumentOutOfRangeException>(
+                () => transforms.MaximumParentContextDepth = depth);
+            Assert.Equal(nameof(AsyncCallStackTransforms.MaximumParentContextDepth), exception.ParamName);
+            Assert.Equal(3, transforms.MaximumParentContextDepth);
         }
 
         [Fact]

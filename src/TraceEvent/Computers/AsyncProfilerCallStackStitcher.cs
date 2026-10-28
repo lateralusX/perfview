@@ -19,7 +19,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// retains the sampled native code address while carrying the segment's logical async identity.</summary>
         AsyncCurrent,
 
-        /// <summary>A suspended-ancestry frame spliced in from an async call stack segment (an async frame that
+        /// <summary>A suspended async caller frame spliced in from an async call stack segment (an async frame that
         /// is <b>not</b> physically present on the native sync stack because it is awaiting).</summary>
         AsyncRemaining,
 
@@ -50,6 +50,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// span is attributed. Does not claim that the root method is physically present or executing.
         /// </summary>
         AsyncCompletionUnwind,
+
+        /// <summary>
+        /// The inferred current logical frame of a historical parent at child creation, based on recorded
+        /// normal completions and exceptional unwinds. Retains its captured IP and compiler state.
+        /// </summary>
+        AsyncContextParentCurrent,
     }
 
     /// <summary>The async-context membership of a <see cref="AsyncProfilerStitchedFrame"/>.</summary>
@@ -220,7 +226,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     }
 
     /// <summary>
-    /// One frame of a stitched call stack: a real sync frame, an async-ancestry frame spliced in for a
+    /// One frame of a stitched call stack: a real sync frame, a logical async frame spliced in for a
     /// suspended await, or an explicit incomplete physical root. For an async frame, <see cref="CodeAddress"/> may be
     /// <see cref="CodeAddressIndex.Invalid"/> (unsymbolized or a synthetic <c>0</c>-IP async frame), in which
     /// case the emitter applies the async leaf policy using <see cref="Segment"/> / <see cref="SegmentFrameIndex"/>.
@@ -273,7 +279,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         public AsyncProfilerStitchedFrameContextKind ContextKind =>
             Context == null
                 ? AsyncProfilerStitchedFrameContextKind.None
-                : (Origin == AsyncProfilerStitchedFrameOrigin.AsyncContextParent
+                : (Origin == AsyncProfilerStitchedFrameOrigin.AsyncContextParent ||
+                   Origin == AsyncProfilerStitchedFrameOrigin.AsyncContextParentCurrent
                     ? AsyncProfilerStitchedFrameContextKind.HistoricalParent
                     : AsyncProfilerStitchedFrameContextKind.Active);
 
@@ -346,7 +353,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 MethodIndex.Invalid, context.Frames, context.Frames.FrameCount - 1,
                 AsyncProfilerStitchSyncFrameKind.None, AsyncProfilerStitchedFramePresentation.LogicalStateMachineMethod, context);
 
-        /// <summary>Creates a suspended-ancestry frame from an async call-stack segment.</summary>
+        /// <summary>Creates a suspended async caller frame from an async call-stack segment.</summary>
         public static AsyncProfilerStitchedFrame CreateAsync(AsyncProfilerCallStack context, int segmentFrameIndex) =>
             new AsyncProfilerStitchedFrame(
                 AsyncProfilerStitchedFrameOrigin.AsyncRemaining,
@@ -360,11 +367,14 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     : AsyncProfilerStitchedFramePresentation.Native,
                 context);
 
-        /// <summary>Creates a historical parent-context frame reached through dispatcher creation ancestry.</summary>
+        /// <summary>Creates a historical parent-context frame reached through dispatcher creation relationships.
+        /// A current parent frame reflects inferred logical progress, not physically matched execution.</summary>
         public static AsyncProfilerStitchedFrame CreateAsyncContextParent(
-            AsyncProfilerCallStack context, int segmentFrameIndex) =>
+            AsyncProfilerCallStack context, int segmentFrameIndex, bool isCurrent = false) =>
             new AsyncProfilerStitchedFrame(
-                AsyncProfilerStitchedFrameOrigin.AsyncContextParent,
+                isCurrent
+                    ? AsyncProfilerStitchedFrameOrigin.AsyncContextParentCurrent
+                    : AsyncProfilerStitchedFrameOrigin.AsyncContextParent,
                 context.Frames.CodeAddressAt(segmentFrameIndex),
                 MethodIndex.Invalid,
                 context.Frames,
@@ -481,7 +491,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <summary>V2 samples whose inner activation retained its sync layout because no continuation-wrapper
         /// sat root-ward of the sampled leaf (at a higher leaf-&gt;root index): either the wrapper was the leaf itself,
         /// or there was no wrapper but the sample sat in dispatch-continuation plumbing. These frames are dispatch
-        /// machinery with no identifiable indexed dispatch target, so no inner ancestry is spliced.
+        /// machinery with no identifiable indexed dispatch target, so no inner logical frames are spliced.
         /// Independently verified enclosing activations may still be stitched.
         /// Enabled presentation transforms may subsequently normalize that layout.</summary>
         public int V2SyncLayoutUsed;
@@ -492,7 +502,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         /// <summary>V2 dispatch-continuation plumbing frames (<c>InstrumentedDispatchContinuations</c> /
         /// <c>DispatchContinuations</c>) collapsed root-ward of a stitched continuation-wrapper, since the spliced
-        /// logical ancestry already represents that machinery.</summary>
+        /// logical async stack already represents that machinery.</summary>
         public int V2PlumbingFramesCollapsed;
 
         /// <summary>V1 CoreLib async-state-machine-box frames collapsed contiguously root-ward of a consumed
@@ -677,14 +687,14 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// <summary>
     /// The pure async-CPU stitch core: merges a native (CPU-sample) sync stack with the async call stack
     /// segments active at the same instant into a single logical call stack, splicing each suspended await's
-    /// ancestry in place of its dispatch machinery.
+    /// logical callers in place of its dispatch machinery.
     /// <para>
     /// This is an interleaved, segment-lockstep, index-aware two-pointer replacement walk:
     /// one pointer down the sync stack (leaf-&gt;root), one down the async segment list (leaf-&gt;root),
     /// consumed in strict lockstep. For each segment the walk (a) finds the sync frame that is the segment's
     /// dispatch boundary, (b) emits the real sync frames leaf-ward of it (they are the segment's already-completed
     /// and currently-running frames, physically present on the native stack), then (c) splices the segment's
-    /// root-ward remaining frames (the suspended ancestry) in place of the dispatch machinery.
+    /// root-ward remaining frames (the suspended async callers) in place of the dispatch machinery.
     /// If a V1 boundary is verified but its indexed current method has no separate physical match, the result
     /// retains that dispatcher and inserts an explicit <see cref="AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget"/>.
     /// This preserves the known logical chain without asserting that the target body is physically executing.
@@ -886,10 +896,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             runtimeProfiles = runtimeProfiles ??
                 (runtimeTraceLog == null ? null : new AsyncProfilerRuntimeRuleProfileCache(runtimeTraceLog.ModuleFiles));
 
-            // With no segment there is no suspended ancestry to splice. An empty segment is also unusable: it may
+            // With no segment there are no suspended async callers to splice. An empty segment is also unusable: it may
             // identify an active async context, but it has no current frame with which to align a physical boundary.
             // In either case emit the sync stack verbatim so no continuation-wrapper or dispatcher frame is removed
-            // without logical ancestry to replace it.
+            // without logical async frames to replace it.
             if (segmentsRootToLeaf is null || segmentsRootToLeaf.Count == 0 || HasEmptySegment(segmentsRootToLeaf))
             {
                 for (int i = 0; i < syncLeafToRoot.Count; i++)
@@ -958,7 +968,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                         return;
                     }
 
-                    // No logical inner anchor or ancestry placement: entry work does not prove body execution.
+                    // No logical inner anchor or async-frame placement: entry work does not prove body execution.
                     diagnostics.SegmentsProcessed++;
                     pSync = physicalEnd;
                     firstSegmentIndex--;
@@ -1028,7 +1038,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     diagnostics.BoundariesNotFound++;
                     if (diagnostics.CanRetainMessage)
                     {
-                        diagnostics.Note($"No {kind} dispatch boundary found at or root-ward of sync frame {pSync}; recovering a unique physical alignment when available, otherwise splicing ancestry append-only.");
+                        diagnostics.Note($"No {kind} dispatch boundary found at or root-ward of sync frame {pSync}; recovering a unique physical alignment when available, otherwise appending logical async frames.");
                     }
                     else
                     {
@@ -1129,7 +1139,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     anchorSyncPos >= 0 && !v1CompletionAmbiguous;
 
                 // Retain the sampled prefix and one physical running/completing anchor. For V1, the older inline
-                // transition tail through the verified dispatcher is represented by the logical ancestry.
+                // transition tail through the verified dispatcher is represented by the logical async stack.
                 int physicalEnd = fullyCompleted
                     ? pSync
                     : (incompleteRoot || recoveredInner ||
@@ -1169,7 +1179,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     output.Add(AsyncProfilerStitchedFrame.CreateAsyncDispatchTarget(segment, completed));
                 }
 
-                // Physical anchors were emitted above; the unexecuted remainder is reconstructed as ancestry.
+                // Physical anchors were emitted above; the unexecuted remainder is reconstructed as logical async callers.
                 for (int k = completed + 1; k < frames.FrameCount; k++)
                 {
                     output.Add(AsyncProfilerStitchedFrame.CreateAsync(segment, k));
@@ -1196,7 +1206,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     diagnostics.MessagesDropped++;
                 }
 
-                // Skip the boundary frame itself (the dispatch machinery the ancestry replaces); keep other frames.
+                // Skip the boundary frame itself (the dispatch machinery the async frames replace); keep other frames.
                 pSync = recoveredInner
                     ? recoveredTailPos
                     : (boundaryFound ? boundaryPos + 1 : syncEnd);
@@ -1811,11 +1821,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// Exceptionally completed frames may be absent or still physically finishing. The known exception count
         /// bounds the number of async frames that may be skipped while aligning the next physical match.
         /// This supports exceptions before or between normally completed inline frames without allowing an
-        /// unbounded search through unrelated async ancestry.
+        /// unbounded search through unrelated async callers.
         /// </para>
         /// <para>
         /// If an async frame cannot be verified (for example a <c>0</c>-IP frame), matching stops conservatively,
-        /// leaving the remaining frames as async ancestry.
+        /// leaving the remaining frames as logical async callers.
         /// </para>
         /// </summary>
         private static int CountV1Completed(

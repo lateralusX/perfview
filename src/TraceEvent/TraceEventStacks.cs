@@ -24,6 +24,7 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
             ulong methodId,
             int state,
             bool isHistoricalParent,
+            bool isHistoricalParentCurrent,
             bool isDispatchTarget,
             bool isCurrent,
             bool isStateMachineBoxCarrier,
@@ -36,6 +37,7 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
             MethodId = methodId;
             State = state;
             IsHistoricalParent = isHistoricalParent;
+            IsHistoricalParentCurrent = isHistoricalParentCurrent;
             IsDispatchTarget = isDispatchTarget;
             IsCurrent = isCurrent;
             IsStateMachineBoxCarrier = isStateMachineBoxCarrier;
@@ -50,8 +52,8 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
         public ProcessIndex ProcessIndex { get; }
 
         /// <summary>The code address in the originating TraceLog, or <see cref="CodeAddressIndex.Invalid"/>.
-        /// A valid address does not guarantee a resolved method. Current, completing, and box-carrier frames retain
-        /// the sampled address.</summary>
+        /// A valid address does not guarantee a resolved method. Physically matched current, completing, and
+        /// box-carrier frames retain the sampled address; historical frames retain the captured continuation IP.</summary>
         public CodeAddressIndex CodeAddress { get; }
 
         /// <summary>The native code IP emitted by the async profiler for either V1 or V2.
@@ -61,12 +63,21 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
         /// <summary>
         /// The raw signed compiler state for <see cref="AsyncCallstackKind.StateMachineAsync"/>, not an IL/native offset. This value is not
         /// meaningful for <see cref="AsyncCallstackKind.RuntimeAsync"/>. This is the captured value, even when
-        /// a current frame displays inferred running state -1 or a completing/unwind frame displays inferred state -2.
+        /// an active or historical current frame displays inferred running state -1, or a completing/unwind frame
+        /// displays inferred state -2.
         /// </summary>
         public int State { get; }
 
-        /// <summary>True when this frame was reconstructed from a historical creation-parent context.</summary>
+        /// <summary>True when this frame comes from a historical creation-parent context's recorded resume/append stack.
+        /// Progress records can trim that stack, but the captured state and code address remain unchanged.</summary>
         public bool IsHistoricalParent { get; }
+
+        /// <summary>
+        /// True when completion and unwind records identify this as the current logical historical parent frame
+        /// at child creation. V1 displays inferred state -1. This does not claim physically matched execution or a
+        /// newly observed execution IP.
+        /// </summary>
+        public bool IsHistoricalParentCurrent { get; }
 
         /// <summary>
         /// True when this is an indexed V1 or V2 dispatch/resumption target without a separately matched physical

@@ -15,7 +15,7 @@ and optional machinery-cleanup views, with capture identities for replay.
 
 **The goal is evidence-based attribution, not the cleanest-looking stack.**
 Keep the original capture, distinguish physical execution from reconstructed
-ancestry, and preserve uncertain work rather than deleting inconvenient frames.
+async callers, and preserve uncertain work rather than deleting inconvenient frames.
 
 ## 1. Choose the validation entry point
 
@@ -788,8 +788,8 @@ generation; `GenerateThreadTimeStacks` is single-use.
 
 Set `computer.AsyncCallStackTransforms.EnableFrameAnnotations = true` for
 diagnosis. It is otherwise off by default. The validation helper keeps the
-unfinished internal ancestry feature disabled for these comparisons; ancestry
-experiments require repository/friend access and separate labeling.
+unfinished internal parent-context feature disabled by default; append
+`--parent-contexts` for a separately labelled historical-context experiment.
 
 "Raw" here means the same stack-source host with async stitching disabled; it is
 not a replacement for dumping the original event's physical stack. Likewise,
@@ -812,7 +812,7 @@ New-Item -ItemType Directory -Path $CliOutputDir | Out-Null
 `--async` enables the custom TraceEvent library's default conservative
 presentation. At the pinned diagnostics revision there are no CLI switches for
 structural-only mode, machinery cleanup, active-frame annotations, or historical
-context ancestry. Use the development helper below for the full four-view
+parent contexts. Use the development helper below for the full four-view
 matrix; do not describe a CLI export as machinery-cleaned.
 
 The CLI converter also sets `IncludeEventSourceEvents=false` and an explicit
@@ -842,8 +842,9 @@ not production signing or a reason to expose those APIs publicly.
 External library consumers use either stack computer's `EnableAsyncCallStacks`,
 `AsyncCallStacksActive`, and getter-only `AsyncCallStackTransforms` settings
 object. Both retain only the original `(TraceLog, SymbolReader)` constructor.
-The three transform settings are `EnableNormalization` (true by default),
-`EnableInfrastructureCleanup` (false), and `EnableFrameAnnotations` (false).
+The settings are `EnableNormalization` (true by default),
+`EnableInfrastructureCleanup` (false), `EnableFrameAnnotations` (false),
+`EnableParentContexts` (false), and `MaximumParentContextDepth` (1).
 See the [public usage example](ARCHITECTURE.md#10-stack-source-hosts-emitted-metadata-and-diagnostics).
 The helper's deeper probes deliberately use internal friend access.
 
@@ -882,10 +883,50 @@ successful summaries and exports before accepting an export run.
 The helper preserves the host's default task/activity settings, enables managed-only
 stacks, and uses `SymbolReader`'s inherited/default symbol policy, recording the
 effective path. Keep the same approved symbol cache/path on export and probe.
-Changing these settings is a separately labelled experiment. It does not expose
-historical-ancestry switches. That feature is unfinished and remains internal;
-investigating it requires a deliberate in-repository experiment, not a public
-configuration setting.
+Changing these settings is a separately labelled experiment.
+
+### Optional historical parent contexts
+
+Append `--parent-contexts` to `export`, `probe`, or `probe-qpc` to enable
+historical creation-parent chains in the stitched views. The raw view is
+unchanged. The helper uses the public
+`computer.AsyncCallStackTransforms.EnableParentContexts` setting. Parent contexts
+remain opt-in; broader parent-selection hardening is still in progress.
+
+```powershell
+$ParentOutputDir = Read-Host 'Full path of a NEW parent-context export directory'
+& $ValidationDotnet $HelperDll export $CapturePath $ParentOutputDir --parent-contexts
+if ($LASTEXITCODE -ne 0) { throw 'Parent-context export failed; do not accept partial results.' }
+```
+
+Use the same trailing flag when probing these exports. `run.json` records
+`EnableParentContexts` and the complete arguments; each view summary records
+whether that view enabled parent contexts. Historical blocks use
+`[Async resumed parent context]` markers and ordinary `[Async V1]` /
+`[Async V2]` frame annotations.
+
+Each parent block starts from the activation's recorded resume/append stack.
+When both normal-completion and exception-unwind records were observed for that
+parent's process, instrumentation kind, and configuration epoch, the block
+removes frames completed at or before child creation. Later progress does not
+affect the block. The first surviving V1 frame displays inferred running state
+`-1`; V2 retains the surviving frame's captured continuation IP. If either record
+type is unavailable, the original snapshot is replayed unchanged.
+
+These observation flags do not prove complete, loss-free collection. Captured
+states and IPs remain unchanged in frame metadata; progress adjustment does not
+establish an exact creation-time execution IP or uncaptured synchronous callees.
+Historical-parent provenance remains distinct even when names match active frames.
+By default, only the immediate historical parent context is included per active
+segment. The public `computer.AsyncCallStackTransforms.MaximumParentContextDepth`
+setting can request deeper history; it must be positive. There is no validation
+CLI depth option.
+
+The capture must contain creation relationships and parent resume intervals;
+unavailable relationships are not inferred. For the external Mixed scenarios,
+provider mask `0x3FFFF` includes creation, normal-completion, and unwind events
+for both versions. The ordinary `--async` collection default omits creation
+records and is insufficient for this experiment.
 
 The timestamp/metric hash is over enumeration-order binary `double` timestamps
 followed by `float` metrics on the analysis host; compare like-for-like
@@ -1154,8 +1195,9 @@ do not infer it solely from a missing body or a familiar generic box name.
 | `AsyncDispatchTarget` / `info.IsDispatchTarget` | Identified resumption target without a separately matched body; a V1 box carrier retains captured state |
 | `AsyncCompleting` / `info.IsCompleting` | Completion records prove a physically present V1 method logically completed; display infers `-2` |
 | `AsyncCompletionUnwind` / `info.IsCompletionUnwind` | Verified return work attributed to the completed activation's logical root; display infers `-2` without claiming the root body is physically present |
-| `AsyncRemaining` | Captured suspended ancestry, not proof of current execution |
+| `AsyncRemaining` | Captured suspended async callers, not proof of current execution |
 | Historical parent / `info.IsHistoricalParent` | Creation causality, not necessarily an active physical caller |
+| `AsyncContextParentCurrent` / `info.IsHistoricalParentCurrent` | First surviving logical parent frame at child creation, inferred with both progress record types; V1 displays `-1`, while captured state/IP remain unchanged and `IsCurrent` stays false |
 | `BROKEN` | Missing physical root evidence, independent of whether the logical activation is complete |
 
 `AsyncProfilerCallStackSourceFrameInfo.State` always retains the captured V1 compiler state,
@@ -1261,5 +1303,5 @@ semantic audit, and a visually plausible stack does not prove the rule.
 
 This workflow validates async-profiler reconstruction; it does not infer missing
 events, provide general Task/TPL causality enrichment, or guarantee complete
-runtime-specific cleanup for unknown runtimes. Historical creation ancestry is
+runtime-specific cleanup for unknown runtimes. Historical parent-context inclusion is
 an explicit separate option, not a default execution claim.

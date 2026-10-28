@@ -8,13 +8,13 @@ using System.Runtime.CompilerServices;
 namespace Microsoft.Diagnostics.Tracing.Computers
 {
     /// <summary>
-    /// Adds dispatcher creation-parent contexts to an already stitched execution stack. Every inserted frame keeps
-    /// its parent activation identity; the instance owns reusable scratch buffers because it runs on the CPU-sample
-    /// hot path.
+    /// Adds recorded dispatcher creation-parent contexts to an already stitched execution stack. Historical frames
+    /// retain captured states and activation identity. When both completion record types were observed for a parent,
+    /// its frames are advanced to child creation time. The instance owns reusable CPU-sample hot-path scratch buffers.
     /// </summary>
-    internal sealed class AsyncProfilerContextAncestryAugmenter
+    internal sealed class AsyncProfilerParentContextAugmenter
     {
-        internal const int DefaultMaximumDepth = 64;
+        internal const int DefaultMaximumDepth = 1;
         private const int ParentCacheSize = 256;
 
         internal bool Prepare(
@@ -24,8 +24,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             for (int i = activeSegments.Count - 1; i >= 0; i--)
             {
                 AsyncProfilerCallStack child = activeSegments[i];
-                if (!TryGetParent(
-                    index, child, out AsyncProfilerCallStack parent, out _))
+                if (!TryGetParent(index, child, out AsyncProfilerCallStack parent, out _))
                 {
                     continue;
                 }
@@ -109,8 +108,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             AsyncProfilerCallStack child = activation;
             for (int depth = 0; depth < maximumDepth; depth++)
             {
-                if (!TryGetParent(
-                    index, child, out AsyncProfilerCallStack parent, out long childCreationQpc))
+                if (!TryGetParent(index, child, out AsyncProfilerCallStack parent, out long creationQpc))
                 {
                     break;
                 }
@@ -122,7 +120,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 }
 
                 m_visited.Add(identity);
-                m_chain.Add(new ParentAtCreation(parent, childCreationQpc));
+                m_chain.Add(new ParentAtCreation(parent, creationQpc));
                 child = parent;
             }
         }
@@ -172,27 +170,16 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         {
             m_parentFrames.Clear();
             AsyncProfilerCallStack parent = parentAtCreation.Parent;
-            int completed = parent.GetExceptionCompletedFrameCount(parentAtCreation.CreationQpc);
-            if (index.MethodCompletionObserved(parent))
-            {
-                completed += parent.GetMethodCompletedFrameCount(parentAtCreation.CreationQpc);
-            }
-
+            bool adjust = index.MethodCompletionObserved(parent) && index.ExceptionCompletionObserved(parent);
             int frameCount = parent.Frames.FrameCount;
-            if (completed < 0)
-            {
-                completed = 0;
-            }
-            else if (completed > frameCount)
-            {
-                completed = frameCount;
-            }
-
-            // The historical parent's current frame has no physical counterpart in the sampled stack.
+            int completed = adjust
+                ? Math.Min(frameCount, Math.Max(0, parent.GetCompletedFrameCount(parentAtCreation.CreationQpc)))
+                : 0;
             for (int frameIndex = completed; frameIndex < frameCount; frameIndex++)
             {
                 m_parentFrames.Add(
-                    AsyncProfilerStitchedFrame.CreateAsyncContextParent(parent, frameIndex));
+                    AsyncProfilerStitchedFrame.CreateAsyncContextParent(
+                        parent, frameIndex, isCurrent: adjust && frameIndex == completed));
             }
         }
 

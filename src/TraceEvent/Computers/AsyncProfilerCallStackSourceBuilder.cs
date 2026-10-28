@@ -9,7 +9,7 @@ using System.Globalization;
 namespace Microsoft.Diagnostics.Tracing.Computers
 {
     /// <summary>
-    /// Projects async-profiler ancestry and a sampled physical stack into a <see cref="MutableTraceEventStackSource"/>.
+    /// Projects async-profiler call stacks and a sampled physical stack into a <see cref="MutableTraceEventStackSource"/>.
     /// The caller supplies the synthetic root policy so the same stitching implementation can be reused by different
     /// CPU and thread-time computers.
     /// </summary>
@@ -38,7 +38,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         internal bool TraceSteps { get; set; }
 
         /// <summary>
-        /// Attempts to stitch the active async-profiler ancestry onto the event's physical call stack.
+        /// Attempts to stitch the active async-profiler call stacks into the event's physical call stack.
         /// Returns false without modifying the stack when the event has no physical stack or no active async segment.
         /// </summary>
         internal bool TryGetCallStack(
@@ -70,16 +70,16 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             AsyncProfilerRuntimeRuleProfile runtimeProfile = m_runtimeProfiles.GetProcessProfile(processIndex);
 
             m_sampleDiagnostics.MessageLimit = m_diagnostics.RemainingMessageCapacity;
-            bool contextAncestryAvailable = false;
-            if (m_transforms.EnableContextAncestry && m_index.HasDispatcherRecords)
+            bool parentContextsAvailable = false;
+            if (m_transforms.EnableParentContexts && m_index.HasDispatcherRecords)
             {
-                if (m_contextAncestryAugmenter == null)
+                if (m_parentContextAugmenter == null)
                 {
-                    m_contextAncestryAugmenter = new AsyncProfilerContextAncestryAugmenter();
+                    m_parentContextAugmenter = new AsyncProfilerParentContextAugmenter();
                 }
-                contextAncestryAvailable =
-                    m_contextAncestryAugmenter.Prepare(m_index, m_segments);
-                if (contextAncestryAvailable && m_segmentPlacements == null)
+                parentContextsAvailable =
+                    m_parentContextAugmenter.Prepare(m_index, m_segments);
+                if (parentContextsAvailable && m_segmentPlacements == null)
                 {
                     m_segmentPlacements = new List<AsyncProfilerSegmentPlacement>();
                 }
@@ -95,16 +95,16 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 TraceSteps,
                 m_stitchedFrames,
                 m_sampleDiagnostics,
-                contextAncestryAvailable ? m_segmentPlacements : null,
+                parentContextsAvailable ? m_segmentPlacements : null,
                 m_runtimeProfileResolver, runtimeProfile, m_eventLog, m_index, m_runtimeProfiles);
-            if (contextAncestryAvailable)
+            if (parentContextsAvailable)
             {
-                m_contextAncestryAugmenter.Augment(
+                m_parentContextAugmenter.Augment(
                     m_index,
                     m_segments,
                     m_segmentPlacements,
                     m_stitchedFrames,
-                    m_transforms.MaximumContextAncestryDepth);
+                    m_transforms.MaximumParentContextDepth);
             }
             var transformContext = new AsyncProfilerCallStackTransformContext(
                 m_eventLog,
@@ -139,8 +139,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             m_syncFrames = null;
             m_stitchedFrames = null;
             m_segmentPlacements = null;
-            m_contextAncestryAugmenter?.Clear();
-            m_contextAncestryAugmenter = null;
+            m_parentContextAugmenter?.Clear();
+            m_parentContextAugmenter = null;
             m_syncFrameMetadata = null;
             m_boxedStateMachineMethods = null;
             m_stateMachineMethodByTypeName = null;
@@ -405,9 +405,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 frame.ContextKind == AsyncProfilerStitchedFrameContextKind.HistoricalParent;
             bool dispatchTarget = frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget;
             bool current = frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent;
+            bool historicalCurrent = frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncContextParentCurrent;
             bool completing = frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCompleting;
             bool completionUnwind = frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCompletionUnwind;
-            int presentationState = completing || completionUnwind ? -2 : (current ? -1 : state);
+            int presentationState = completing || completionUnwind ? -2 : (current || historicalCurrent ? -1 : state);
             bool annotateActive =
                 m_transforms.EnableFrameAnnotations &&
                 frame.ContextKind == AsyncProfilerStitchedFrameContextKind.Active;
@@ -427,11 +428,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             int identityTag = m_outputStackSource.NextAsyncProfilerCallStackFrameIdentityTag();
-            string prefix = historicalParent
-                ? GetAnnotationPrefix(kind, historicalParent: true)
-                : (annotateActive
-                    ? GetAnnotationPrefix(kind, historicalParent: false)
-                    : string.Empty);
+            string prefix = historicalParent || annotateActive
+                ? GetAnnotationPrefix(kind)
+                : string.Empty;
             StackSourceFrameIndex asyncFrame;
             if (frame.Presentation == AsyncProfilerStitchedFramePresentation.LogicalStateMachineMethod &&
                 frame.CodeAddress != CodeAddressIndex.Invalid)
@@ -497,7 +496,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             m_outputStackSource.SetAsyncProfilerCallStackFrameInfo(
                 asyncFrame,
                 new AsyncProfilerCallStackSourceFrameInfo(
-                    kind, processIndex, frame.CodeAddress, methodId, state, historicalParent, dispatchTarget,
+                    kind, processIndex, frame.CodeAddress, methodId, state, historicalParent, historicalCurrent, dispatchTarget,
                     current, frame.IsStateMachineBoxCarrier, completing, completionUnwind));
             return asyncFrame;
         }
@@ -518,16 +517,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 : logicalName + " [ordinal " + ordinal + "]";
         }
 
-        private static string GetAnnotationPrefix(
-            AsyncCallstackKind kind,
-            bool historicalParent)
+        private static string GetAnnotationPrefix(AsyncCallstackKind kind)
         {
             string version = kind == AsyncCallstackKind.StateMachineAsync
                 ? "V1"
                 : "V2";
-            return historicalParent
-                ? "[Async parent " + version + "] "
-                : "[Async " + version + "] ";
+            return "[Async " + version + "] ";
         }
 
         private StackSourceFrameIndex InternAsyncContextTransitionFrame()
@@ -536,7 +531,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             {
                 m_asyncContextTransitionFrame =
                     m_outputStackSource.Interner.FrameIntern(
-                        "[Async parent context transition]");
+                        "[Async resumed parent context]");
             }
             return m_asyncContextTransitionFrame;
         }
@@ -592,7 +587,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         private List<AsyncProfilerStitchSyncFrame> m_syncFrames;
         private List<AsyncProfilerStitchedFrame> m_stitchedFrames;
         private List<AsyncProfilerSegmentPlacement> m_segmentPlacements;
-        private AsyncProfilerContextAncestryAugmenter m_contextAncestryAugmenter;
+        private AsyncProfilerParentContextAugmenter m_parentContextAugmenter;
         private Dictionary<CodeAddressIndex, (AsyncProfilerStitchSyncFrameKind Kind, AsyncProfilerRuntimeRuleProfile Profile)> m_syncFrameMetadata;
         private Dictionary<CodeAddressIndex, MethodIndex> m_boxedStateMachineMethods;
         private Dictionary<string, MethodIndex> m_stateMachineMethodByTypeName;

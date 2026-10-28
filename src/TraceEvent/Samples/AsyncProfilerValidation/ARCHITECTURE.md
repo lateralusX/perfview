@@ -190,7 +190,7 @@ logical context rather than a claim of physical execution.
 
 If matching is ambiguous, the system retains uncertain physical work instead
 of forcing this tidy layout. An independently verified truncated root can be
-shown as `BROKEN`; that reports missing ancestry rather than inventing a
+shown as `BROKEN`; that reports a missing physical root rather than inventing a
 thread-pool or application caller.
 
 ### 8. Choose how much runtime machinery to show
@@ -222,7 +222,7 @@ weight at several ancestor frames; that is shared attribution, not additional
 execution.
 
 The stack can now be displayed or exported. Frame-role metadata distinguishes
-physical execution, awaiting ancestry, dispatch targets, completion, and
+physical execution, awaiting callers, dispatch targets, completion, and
 historical parents even when displayed names look similar. A viewer such as
 Speedscope may not retain all that metadata, which is why the validation
 workflow also preserves investigation sidecars.
@@ -246,8 +246,10 @@ views, not invented stacks or different samples selected for each stage:
 | `machinery` | On | On | On |
 
 Each view is generated independently from the same converted capture.
-Active-frame annotations are enabled and historical creation-parent ancestry
-is disabled. The displayed sample keeps its timestamp and weight in every
+Active-frame annotations are enabled and historical parent contexts
+are disabled by default; `--parent-contexts` opts into a separate historical-context
+experiment. The worked examples below keep it disabled.
+The displayed sample keeps its timestamp and weight in every
 view. Structural stitching already replaces some dispatch scaffolding to
 join the stacks; "structural" does not mean "no runtime frames removed."
 
@@ -353,7 +355,7 @@ ThreadPoolWorkQueue.Dispatch
 ```
 
 The third-level frame represents the physically matched current method.
-The first two represent awaiting ancestry, not additional physical execution.
+The first two represent awaiting callers, not additional physical execution.
 The timer and Task completion bridge remains visible.
 
 **2. Conservative/default result: identical to the structural result above.**
@@ -648,7 +650,7 @@ SampleProfilerThreadTimeComputer or ThreadTimeStackComputer
 AsyncProfilerCallStackSourceBuilder (internal)
   materialize/classify physical frames and canonicalize method identities
   -> AsyncProfilerCallStackStitcher: mandatory structural reconstruction
-  -> optional historical creation-parent ancestry
+  -> optional historical parent contexts
   -> AsyncProfilerCallStackTransformPipeline: enabled built-ins, then custom transforms
   -> intern frames, attach role metadata, preserve the host's root policy
         |
@@ -665,7 +667,7 @@ collect a trace; collection belongs to the producer and diagnostic tool.
 An async interval says what continuation chain was active, not which of its
 methods was physically executing. The physical stack, completion evidence,
 and frame role are needed to distinguish execution, dispatch, awaiting,
-completion, and historical ancestry.
+completion, and historical parent contexts.
 
 ### Terminology and ownership
 
@@ -786,7 +788,7 @@ does not know how to recover activation state.
 
 The decoder exposes zero-frame cached-callstack references through `IsCached`,
 but the current computer does not implement out-of-band cached-frame
-resolution. A zero-frame record must not be assumed to reconstruct ancestry.
+resolution. A zero-frame record must not be assumed to reconstruct async callers.
 
 ## 4. Building activation state
 
@@ -986,7 +988,7 @@ foreach (AsyncProfilerCallStack activation in active)
 ```
 
 This prints captured frames, not the stitcher's inferred executing position.
-Use the stitcher/host when execution-versus-ancestry attribution is required.
+Use the stitcher/host when physical-versus-logical attribution is required.
 
 ### Dispatcher relationships and completion availability
 
@@ -999,9 +1001,13 @@ Use the stitcher/host when execution-versus-ancestry attribution is required.
 | `AsyncProfilerMethodCompletionObserved(AsyncProfilerCallStack callStack)` | Whether normal-completion events were observed for this activation's process, kind, and metadata/configuration epoch. Not proof every completion was captured. |
 
 `AsyncProfilerDispatcherInfo` exposes `CreationThread`, `DispatcherId`,
-`ParentDispatcherId`, and `CreationQpc`. Missing create records or parent resume
-intervals mean missing ancestry, not an inferred relationship.
-Creation-parent ancestry is historical: it does not establish that the parent
+`ParentDispatcherId`, and `CreationQpc`. V2 records can come from either
+`CreateRuntimeAsyncContext` or `CreateRuntimeAsyncCallstack`; when both are
+enabled, their identical creation metadata is recorded once. Creation
+callstacks do not open active resume intervals.
+Missing create records or parent resume intervals mean missing parent contexts,
+not an inferred relationship.
+Creation-parent context is historical: it does not establish that the parent
 was running at the child's sample time or recover intervening synchronous
 frames.
 
@@ -1066,7 +1072,7 @@ during emission, not a mutation of captured data.
 The stitcher walks physical frames leaf-to-root and active segments
 innermost-to-outermost in lockstep. It aligns method identities and verified
 dispatch boundaries, preserves synchronous execution/callees, and replaces
-dispatch plumbing with the appropriate suspended ancestry. It is not a
+dispatch plumbing with the appropriate suspended async callers. It is not a
 concatenation of the entire async stack beneath every physical sample.
 
 V2 wrappers (`Continuation_Wrapper_0` through `_31`) supply the structural
@@ -1200,17 +1206,17 @@ structural identity.
 |---|---|
 | `Sync` | Retained physical frame; it can still belong to an active context. |
 | `AsyncCurrent` | Physically matched current async method, retaining the sampled address. |
-| `AsyncRemaining` | Captured suspended continuation ancestry, not physical execution. |
+| `AsyncRemaining` | Captured suspended continuation callers, not physical execution. |
 | `AsyncDispatchTarget` | Indexed target, possibly represented by a physical V1 box carrier; no body-execution claim. |
 | `AsyncCompleting` | Physically present V1 method established as logically completed, still finishing its invocation. |
 | `AsyncCompletionUnwind` | Verified fully completed V1 return work attributed to the logical root; no claim the root body is physically executing. |
-| `AsyncContextParent` | Historical creation-parent ancestry. |
+| `AsyncContextParent` | Historical creation-parent context. |
 | `IncompleteRoot` | Unavailable physical root, without an async-method or execution-host identity. |
 
 ### Pipeline configuration and ordering
 
 Configure the public `AsyncCallStackTransforms` settings object **before
-generation**. Its three properties forward to the computer-owned internal
+generation**. Its properties forward to the computer-owned internal
 `AsyncProfilerCallStackTransformPipeline`; there is no second configuration state.
 
 | Property | Default | Effect |
@@ -1218,11 +1224,13 @@ generation**. Its three properties forward to the computer-owned internal
 | `EnableNormalization` | true | Strong-signal default presentation normalization; not a switch for structural reconstruction. |
 | `EnableInfrastructureCleanup` | false | Additional ownership-checked attribution/removal of runtime implementation machinery. |
 | `EnableFrameAnnotations` | false | Host emitter labels active frames `[Async V1]` / `[Async V2]` and shows V1 presentation states where names can be decoded. |
+| `EnableParentContexts` | false | Adds recorded creation-parent resume/append contexts. With both scoped progress record types observed, trims completed frames at child creation and displays the first surviving V1 frame as running `-1`. Otherwise replays the captured stack. Requires creation relationships and parent resume intervals. |
+| `MaximumParentContextDepth` | 1 | Limits historical parent contexts per active segment; must be positive. Does not limit frames within a context or active nesting. |
 
-Historical creation-parent ancestry is unfinished and remains internal,
-disabled by default. Its internal `MaximumContextAncestryDepth` (64) limits
-inserted historical parents per active segment, not physical or final stack
-depth. No public ancestry or reconstructed-stack depth control is exposed.
+Historical parent contexts remain opt-in while broader
+parent-selection hardening continues. Both settings are public through
+`AsyncCallStackTransforms`; the parent-context implementation remains internal.
+No general physical or reconstructed-stack depth control is exposed.
 
 Enabled stages execute in this order:
 
@@ -1241,7 +1249,7 @@ Enabled stages execute in this order:
 
 Thus a "structural" view disables both conservative transforms and cleanup,
 not structural boundary replacement. The validation helper also disables
-historical ancestry to keep its four comparison views focused.
+historical parent contexts unless `--parent-contexts` is explicitly supplied.
 
 Default normalization does not assert that every helper with a familiar name
 can be removed. For example, full V1 completion-unwind attribution requires
@@ -1266,10 +1274,23 @@ callees, GC, initialization, or callbacks. That work can then be charged to a
 logical async frame without claiming the suspended method executed it.
 Residual dispatcher spans can become `[Async dispatcher frames]`.
 
-Historical parents remain explicitly labeled `[Async parent V1]` /
-`[Async parent V2]`; crossing those contexts can emit
-`[Async parent context transition]`. They do not become current execution
-because their names appear in the chart.
+Historical parent blocks use `[Async resumed parent context]` markers and
+ordinary `[Async V1]` / `[Async V2]` frame annotations. Each block replays the
+parent activation's recorded resume/append stack. When normal-completion and
+exception-unwind records were both observed for the parent's process, kind,
+and activation-start configuration epoch, completed frames are trimmed using
+deltas through the child's creation QPC (inclusive), not the sample QPC.
+The first surviving V1 frame displays inferred running state `-1`. V2 retains
+its captured continuation IP; neither kind receives a newly observed execution
+location. No frame is synthesized when all captured frames have completed.
+Missing either record type preserves the original snapshot.
+
+Availability means observed records, not proven keyword coverage or loss-free
+collection. Captured states and code addresses remain unchanged. The first
+surviving frame uses `AsyncContextParentCurrent` and
+`IsHistoricalParentCurrent`, not the physically matched `AsyncCurrent` /
+`IsCurrent` role. Historical-parent provenance remains distinct in frame
+metadata even when displayed names match active frames.
 
 ### Internal custom transforms and lifetime
 
@@ -1297,7 +1318,7 @@ Standalone
 copies the result's frame list, applies presentation, and returns a new result.
 The optional trace defaults to null; trace-dependent rules retain work when
 required evidence is absent. Diagnostics are shared with the original result,
-not cloned. This API does not insert historical ancestry or emit annotations.
+not cloned. This API does not insert historical parent contexts or emit annotations.
 
 ### Runtime-specific rules are internal, not a public plug-in API
 
@@ -1344,8 +1365,9 @@ Both publicly expose `EnableAsyncCallStacks`, the getter-only
 `AsyncCallStackTransforms`, `AsyncCallStacksActive`, and their existing
 `GenerateThreadTimeStacks(MutableTraceEventStackSource, TraceEvents = null)`.
 The settings object has no public constructor and belongs to its computer.
-Normalization defaults to true; infrastructure cleanup and annotations default
-to false. `AsyncCallStacksActive` is false before generation and becomes
+Normalization defaults to true; infrastructure cleanup, annotations, and parent
+contexts default to false. Historical parent depth defaults to one.
+`AsyncCallStacksActive` is false before generation and becomes
 meaningful after initialization during generation:
 it means stitching was requested and a usable index exists, not that a
 particular sample matched. `HasAsyncProfilerEvents`, `AsyncCallStacksActive`, and
@@ -1365,6 +1387,9 @@ var computer = new SampleProfilerThreadTimeComputer(log, symbols)
 computer.AsyncCallStackTransforms.EnableNormalization = true;
 computer.AsyncCallStackTransforms.EnableInfrastructureCleanup = false;
 computer.AsyncCallStackTransforms.EnableFrameAnnotations = true;
+// Optional historical parent contexts require captured creation relationships.
+computer.AsyncCallStackTransforms.EnableParentContexts = true;
+computer.AsyncCallStackTransforms.MaximumParentContextDepth = 1;
 computer.GenerateThreadTimeStacks(output);
 
 if (!computer.AsyncCallStacksActive)
@@ -1375,8 +1400,10 @@ if (!computer.AsyncCallStacksActive)
 
 The same controls apply to `ThreadTimeStackComputer`. The transform settings
 affect presentation after structural reconstruction; disabling normalization
-does not disable stitching. No public custom-transform registration, ancestry,
-depth limit, diagnostics, or frame-provenance configuration is exposed.
+does not disable stitching. Parent contexts replay recorded resume/append
+snapshots, not creation-time execution locations. No public custom-transform
+registration, general stack-depth limit, diagnostics, or frame-provenance
+configuration is exposed.
 
 The explicit failure is a caller policy for a run that requires async data;
 the library otherwise keeps the existing non-async generation path.
@@ -1409,7 +1436,7 @@ provides metadata for generated async frames. Ordinary sync and pseudo
 frames return false.
 
 `AsyncProfilerCallStackSourceFrameInfo` exposes `Kind`, `ProcessIndex`, `CodeAddress`,
-`MethodId`, captured `State`, and the flags `IsHistoricalParent`,
+`MethodId`, captured `State`, and the flags `IsHistoricalParent`, `IsHistoricalParentCurrent`,
 `IsDispatchTarget`, `IsCurrent`, `IsStateMachineBoxCarrier`, `IsCompleting`,
 and `IsCompletionUnwind`. Display strings are not a substitute for these
 roles. Distinct frame identities can deliberately have identical names.
@@ -1442,7 +1469,7 @@ members are internal diagnostic hooks, not public configuration.
 | Conversion, address registration, deferred region, internal queries | `TraceLog.cs` | `AsyncProfilerTraceLogTests.cs` |
 | Structural reconstruction and boundary contracts | `Computers\AsyncProfilerCallStackStitcher.cs`, `Computers\AsyncProfilerCallStackStitchBoundary.cs` | `AsyncProfilerCallStackStitcherTests.cs`, `AsyncProfilerCallStackStitchBoundaryTests.cs` |
 | Runtime ownership and implementation layouts | `Computers\AsyncProfilerRuntimeRuleProfile.cs`, `Computers\AsyncProfilerRuntimeRuleProfileCache.cs`, `Computers\AsyncProfilerRuntimeSequenceMatch.cs` | `AsyncProfilerRuntimeRuleProfileTests.cs`, `AsyncProfilerRuntimeSequenceTests.cs`, `AsyncProfilerRuntimeProfileExtensibilityTests.cs` |
-| Historical creation ancestry | `Computers\AsyncProfilerContextAncestryAugmenter.cs` | `AsyncProfilerStitchIntegrationTests.cs` |
+| Historical parent contexts | `Computers\AsyncProfilerParentContextAugmenter.cs` | `AsyncProfilerCallStackStitcherTests.cs`, `AsyncProfilerStitchIntegrationTests.cs` |
 | Public presentation settings | `Computers\AsyncCallStackTransforms.cs` | `AsyncProfilerStitchIntegrationTests.cs` |
 | Internal presentation and callbacks | `Computers\AsyncProfilerCallStackTransformPipeline.cs`, `Computers\AsyncProfilerCallStackTransformPasses.cs` | `AsyncProfilerCallStackTransformPipelineTests.cs` |
 | Projection and emitted roles | `Computers\AsyncProfilerCallStackSourceBuilder.cs`, `TraceEventStacks.cs`, `Computers\SampleProfilerThreadTimeComputer.cs`, `Computers\ThreadTimeComputer.cs` | `AsyncProfilerStitchIntegrationTests.cs` |
