@@ -114,11 +114,14 @@ The following paths are relative to `src\TraceEvent`:
 | Layer | Implementation | Main tests |
 |---|---|---|
 | Buffer decoding and manifest framing | `Parsers\AsyncProfilerTraceEventParser.cs`, `Parsers\AsyncProfilerTypes.cs` | `TraceEvent.Tests\Parsing\AsyncProfilerParsing.cs` |
-| Activation lifecycle and completion timelines | `Computers\AsyncProfilerComputer.cs` | `AsyncProfilerComputerTests.cs` |
+| Activation lifecycle and completion timelines | `Computers\AsyncProfilerIndexBuilder.cs` | `AsyncProfilerIndexBuilderTests.cs` |
+| Public activation and frame views | `Computers\AsyncProfilerCallStack.cs`, `Computers\AsyncProfilerCallStackFrame.cs`, `Computers\AsyncProfilerCallStackKind.cs` | `AsyncProfilerIndexBuilderTests.cs`, `AsyncProfilerStitchIntegrationTests.cs` |
+| Internal frame storage and thread identity | `Computers\AsyncProfilerCallStackFrames.cs`, `Computers\AsyncProfilerThreadKey.cs` | `AsyncProfilerIndexBuilderTests.cs`, `AsyncProfilerTraceLogTests.cs` |
 | Persisted/lazy index and symbol binding | `Computers\AsyncProfilerCallStacksIndex.cs`, `TraceLog.cs` | `AsyncProfilerTraceLogTests.cs` |
+| Public segment queries and standalone reconstruction | `Computers\AsyncProfilerCallStackComputer.cs`, `Computers\AsyncProfilerCallStackSourceBuilder.cs` | `AsyncProfilerTraceLogTests.cs`, `AsyncProfilerStitchIntegrationTests.cs` |
 | Structural matching, boundaries, missing roots | `Computers\AsyncProfilerCallStackStitcher.cs`, `Computers\AsyncProfilerCallStackStitchBoundary.cs` | `AsyncProfilerCallStackStitcherTests.cs`, `AsyncProfilerCallStackStitchBoundaryTests.cs` |
 | Runtime ownership and sequence recognition | `Computers\AsyncProfilerRuntimeRuleProfile*.cs`, `Computers\AsyncProfilerRuntimeSequenceMatch.cs` | `AsyncProfilerRuntimeRuleProfileTests.cs`, `AsyncProfilerRuntimeSequenceTests.cs`, `AsyncProfilerRuntimeProfileExtensibilityTests.cs` |
-| Presentation and provenance emission | `Computers\AsyncCallStackTransforms.cs`, `Computers\AsyncProfilerCallStackTransformPipeline.cs`, `Computers\AsyncProfilerCallStackTransformPasses.cs`, `Computers\AsyncProfilerCallStackSourceBuilder.cs`, `TraceEventStacks.cs` | `AsyncProfilerCallStackTransformPipelineTests.cs`, `AsyncProfilerStitchIntegrationTests.cs` |
+| Presentation and provenance emission | `Computers\AsyncCallStackTransforms.cs`, `Computers\AsyncProfilerCallStackTransformPipeline.cs`, `Computers\AsyncProfilerCallStackTransformPasses.cs`, `Computers\AsyncProfilerCallStackSourceBuilderCore.cs`, `TraceEventStacks.cs` | `AsyncProfilerCallStackTransformPipelineTests.cs`, `AsyncProfilerStitchIntegrationTests.cs` |
 | End-to-end sample projection | `Computers\SampleProfilerThreadTimeComputer.cs`, `Computers\ThreadTimeComputer.cs` | `AsyncProfilerStitchIntegrationTests.cs` |
 | Speedscope output | `Stacks\SpeedScopeStackSourceWriter.cs`, `Stacks\StackSourceWriterHelper.cs` | `TraceEvent.Tests\Speedscope\SpeedScopeExporterTests.cs` |
 
@@ -1119,17 +1122,24 @@ MethodIndex, module identity, full name, and unresolved status distinct.
 
 ### Query the index at that instant
 
-The query and callback recipes below are **internal development APIs**:
-use the signed validation helper or repository tests, not an external public
-API consumer. They do not expand the supported public computer controls.
-
-Prefer `log.GetAsyncProfilerCallStacks(anchorEvent)` for an event from the same capture.
+Use the public `AsyncProfilerCallStackComputer(log)` and prefer
+`computer.GetCallStacks(anchorEvent)` for an event from the same TraceLog.
 For an already identified QPC, use
-`log.GetAsyncProfilerCallStacks(threadIndex, qpc)` or
-`log.GetAsyncProfilerCallStacks(processId, osThreadId, qpc)`.
-The latter can reach async-only OS threads without a `TraceThread` entry.
-Relative-millisecond overloads exist, but conversion can round at a QPC tick;
-use the event/QPC overload when an interval boundary matters.
+`computer.GetCallStacks(processId, osThreadId, timestampQpc)`.
+This also reaches async-only OS threads without a `TraceThread` entry.
+There are no millisecond or ThreadIndex facade overloads; explicitly convert
+through `RelativeMSecToQPC` when necessary, accounting for tick rounding.
+Returned activations and their captured-frame views can be retained across
+later queries. Raw segment queries do not require a stack source.
+`CapturedFrames` is the finalized resume/append list, not a fresh physical
+capture at the query timestamp. Its public frame views expose `CodeAddress`,
+`CapturedInstructionPointer`, and `CapturedState` (null for V2).
+Completion-observed flags summarize the activation-start configuration epoch,
+not loss-free coverage or only events before that query.
+
+The detailed diagnostics below also use **internal development APIs**.
+Use the signed validation helper or repository tests for internal index,
+classifier, runtime-profile, and emitted-provenance access.
 
 For each returned activation, dump:
 
@@ -1140,10 +1150,15 @@ For each returned activation, dump:
 - `GetMethodCompletedFrameCount(qpc)`,
   `GetExceptionCompletedFrameCount(qpc)`, `GetCompletedFrameCount(qpc)`,
   `GetWrapperResetCount(qpc)`, and
-  `log.AsyncProfilerMethodCompletionObserved(activation)`.
+  `activation.MethodCompletionObserved` and `activation.ExceptionCompletionObserved`.
 - Dispatcher metadata and parent/child relationships, if captured, using
-  `GetAsyncProfilerDispatcherInfo`, `GetParentAsyncProfilerCallStack`, and
-  `GetChildAsyncProfilerDispatcherInfos`.
+  the internal index's `GetDispatcherInfo`, `GetParentCallStack`, and
+  `GetChildDispatcherInfos`.
+
+The progress methods count recorded deltas/resets through the timestamp,
+inclusive. They do not validate interval membership or cap counts at the
+captured frame count. The wrapper overload takes a physical wrapper slot for
+that activation, not an ordinal in the captured frame list.
 
 Intervals are half-open `[StartQpc, EndQpc)`; open-at-EOF intervals end at
 `long.MaxValue`. Activations are returned outermost-to-innermost; captured method
@@ -1164,14 +1179,20 @@ structural/default/machinery generations to observe their respective results,
 not one callback that is assumed to run before every stage. Context/frame lists,
 activation objects, and diagnostics supplied to callbacks are reused: serialize
 or copy the needed primitive values immediately. A shallow frame copy still
-references a reusable context. The stable-result internal `TraceLog.GetAsyncProfilerCallStacks` overloads,
+references a reusable context. The public `AsyncProfilerCallStackComputer.GetCallStacks` results,
 in contrast, are stable and may be retained across later queries.
 
 At the emitted stack-source layer,
 `source.TryGetAsyncProfilerCallStackFrameInfo(frameIndex, out info)` exposes captured identity and
 role flags. Speedscope names do not preserve all that provenance. Do not use
-any parser/index queries, custom transform callbacks, frame-provenance hooks,
-or runtime-profile members as if they were public APIs in an external helper.
+internal parser/index queries, frame-provenance hooks, or runtime-profile
+members as if they were public APIs in an external helper. Public presentation
+callbacks use `AsyncCallStackTransforms.Add` and the narrow
+`AsyncProfilerCallStackTransformContext`, without internal diagnostics or
+classifiers. The public `AsyncProfilerCallStackSourceBuilder` shares the
+existing computers' reconstruction core; see ARCHITECTURE.md section 10.
+Its event overload checks the owning TraceLog instance; bare physical/root
+handles carry no owner identity and can only be range-checked.
 
 Inspect neighboring samples and other relevant threads, and correlate resume,
 append, completion, exception, reset, and metadata records at or before the
@@ -1196,8 +1217,8 @@ do not infer it solely from a missing body or a familiar generic box name.
 | `AsyncCompleting` / `info.IsCompleting` | Completion records prove a physically present V1 method logically completed; display infers `-2` |
 | `AsyncCompletionUnwind` / `info.IsCompletionUnwind` | Verified return work attributed to the completed activation's logical root; display infers `-2` without claiming the root body is physically present |
 | `AsyncRemaining` | Captured suspended async callers, not proof of current execution |
-| Historical parent / `info.IsHistoricalParent` | Creation causality, not necessarily an active physical caller |
-| `AsyncContextParentCurrent` / `info.IsHistoricalParentCurrent` | First surviving logical parent frame at child creation, inferred with both progress record types; V1 displays `-1`, while captured state/IP remain unchanged and `IsCurrent` stays false |
+| Historical parent / `info.IsParentContext` | Creation causality, not necessarily an active physical caller |
+| `AsyncContextParentCurrent` / `info.IsParentContextCurrent` | First surviving logical parent frame at child creation, inferred with both progress record types; V1 displays `-1`, while captured state/IP remain unchanged and `IsCurrent` stays false |
 | `BROKEN` | Missing physical root evidence, independent of whether the logical activation is complete |
 
 `AsyncProfilerCallStackSourceFrameInfo.State` always retains the captured V1 compiler state,

@@ -147,7 +147,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
     /// <para>
     /// The runtime emits the metadata only once per configuration revision (not per buffer), so a single
     /// manifest instance must persist across buffers from the same process instance. The caller owns this
-    /// state: <see cref="Computers.AsyncProfilerComputer"/> maintains one manifest per process instance,
+    /// state: <see cref="Computers.AsyncProfilerIndexBuilder"/> maintains one manifest per process instance,
     /// while direct decoder callers must pass their retained manifest to
     /// <see cref="AsyncProfilerTraceEventParser.ParseBuffer(byte[], Manifest, ISubEventSink)"/>.
     /// The overload without a manifest creates fresh defaults for each call. Do not share a manifest between

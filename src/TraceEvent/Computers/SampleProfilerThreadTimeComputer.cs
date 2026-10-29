@@ -527,7 +527,7 @@ namespace Microsoft.Diagnostics.Tracing
                 return;
             }
 
-            m_asyncProfilerCallStackSourceBuilder = AsyncProfilerCallStackSourceBuilder.TryCreate(
+            m_asyncProfilerCallStackSourceBuilder = AsyncProfilerCallStackSourceBuilderCore.TryCreate(
                 m_eventLog,
                 m_outputStackSource,
                 AsyncProfilerCallStackTransformPipeline,
@@ -718,7 +718,7 @@ namespace Microsoft.Diagnostics.Tracing
 
         // Async call stacks (opt-in; only active when the trace has usable async-profiler data).
         private bool m_hasGeneratedThreadTimeStacks;
-        private AsyncProfilerCallStackSourceBuilder m_asyncProfilerCallStackSourceBuilder;
+        private AsyncProfilerCallStackSourceBuilderCore m_asyncProfilerCallStackSourceBuilder;
 
         // These are boring caches of frame names which speed things up a bit.  
         private Dictionary<double, StackSourceFrameIndex> m_nodeNameInternTable;

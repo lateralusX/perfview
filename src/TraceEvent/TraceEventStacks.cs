@@ -23,8 +23,8 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
             CodeAddressIndex codeAddress,
             ulong methodId,
             int state,
-            bool isHistoricalParent,
-            bool isHistoricalParentCurrent,
+            bool isParentContext,
+            bool isParentContextCurrent,
             bool isDispatchTarget,
             bool isCurrent,
             bool isStateMachineBoxCarrier,
@@ -36,8 +36,8 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
             CodeAddress = codeAddress;
             MethodId = methodId;
             State = state;
-            IsHistoricalParent = isHistoricalParent;
-            IsHistoricalParentCurrent = isHistoricalParentCurrent;
+            IsParentContext = isParentContext;
+            IsParentContextCurrent = isParentContextCurrent;
             IsDispatchTarget = isDispatchTarget;
             IsCurrent = isCurrent;
             IsStateMachineBoxCarrier = isStateMachineBoxCarrier;
@@ -70,14 +70,14 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
 
         /// <summary>True when this frame comes from a historical creation-parent context's recorded resume/append stack.
         /// Progress records can trim that stack, but the captured state and code address remain unchanged.</summary>
-        public bool IsHistoricalParent { get; }
+        public bool IsParentContext { get; }
 
         /// <summary>
         /// True when completion and unwind records identify this as the current logical historical parent frame
         /// at child creation. V1 displays inferred state -1. This does not claim physically matched execution or a
         /// newly observed execution IP.
         /// </summary>
-        public bool IsHistoricalParentCurrent { get; }
+        public bool IsParentContextCurrent { get; }
 
         /// <summary>
         /// True when this is an indexed V1 or V2 dispatch/resumption target without a separately matched physical
@@ -847,8 +847,8 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
         /// <summary>
         /// After creating a MutableTraceEventStackSource, you add the samples you want using this AddSample API (you can reuse 'sample' 
         /// used as an argument to this routine.   It makes a copy.  The samples do NOT need to be added in time order (the MutableTraceEventStackSource
-        /// will sort them).   When you done DoneAddingSamples must be called before using the
-        /// the MutableTraceEventStackSource as a stack source.  
+        /// will sort them). Call DoneAddingSamples before passing the completed sample set to consumers.
+        /// Individual stack/frame lookups are available while adding stacks and samples.
         /// </summary>
         public StackSourceSample AddSample(StackSourceSample sample)
         {
@@ -864,11 +864,13 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
         }
         /// <summary>
         /// After calling 'AddSample' to add the samples that should belong to the source, DoneAddingSamples() should be called to
-        /// to complete the construction of the stack source.   Only then can the reading API associated with the stack source be called. 
+        /// complete the sample set and release interning lookup tables. Stack/frame lookups are available before
+        /// this call and remain valid afterward, but no more frames or stacks may be interned after finalization.
         /// </summary>
         public void DoneAddingSamples()
         {
             m_Interner.DoneInterning();
+            IsFinalized = true;
 
             // Ensure that the samples are in sorted order.  
             m_samples.Sort(
@@ -894,6 +896,8 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
         /// The Interner is the class that allows you to make new indexes out of strings and other bits.  
         /// </summary>
         public StackSourceInterner Interner { get { return m_Interner; } }
+
+        internal bool IsFinalized { get; private set; }
 
         internal void SetAsyncProfilerCallStackFrameInfo(
             StackSourceFrameIndex frameIndex,

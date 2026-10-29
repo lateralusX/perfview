@@ -20,7 +20,7 @@ namespace TraceEventTests
     /// Fluent convenience wrappers over <see cref="AsyncProfilerBufferBuilder"/> for the state-machine (V1)
     /// event ids used by the computer tests.
     /// </summary>
-    internal static class AsyncProfilerComputerBuilderExtensions
+    internal static class AsyncProfilerIndexBuilderBuilderExtensions
     {
         public static AsyncProfilerBufferBuilder Reset(this AsyncProfilerBufferBuilder b, long ts) =>
             b.ContextNoPayload(AsyncEventID.ResetAsyncThreadContext, ts);
@@ -71,11 +71,11 @@ namespace TraceEventTests
     }
 
     /// <summary>
-    /// Unit tests for <see cref="AsyncProfilerComputer"/>. Each test synthesizes an <c>AsyncEvents</c> buffer
+    /// Unit tests for <see cref="AsyncProfilerIndexBuilder"/>. Each test synthesizes an <c>AsyncEvents</c> buffer
     /// (via <see cref="AsyncProfilerBufferBuilder"/>) and drives it through the computer's decoder, then
     /// asserts the per-thread active-async-callstack index.
     /// </summary>
-    public class AsyncProfilerComputerTests
+    public class AsyncProfilerIndexBuilderTests
     {
         private const ulong ThreadA = 0x1000;
         private const ulong ThreadB = 0x2000;
@@ -88,14 +88,14 @@ namespace TraceEventTests
         private static AsyncProfilerThreadKey Key(ProcessIndex processIndex, ulong osThreadId) =>
             new AsyncProfilerThreadKey(processIndex, osThreadId);
 
-        private static AsyncProfilerComputer Compute(AsyncProfilerBufferBuilder builder)
+        private static AsyncProfilerIndexBuilder Compute(AsyncProfilerBufferBuilder builder)
         {
-            var computer = new AsyncProfilerComputer();
+            var computer = new AsyncProfilerIndexBuilder();
             computer.Process(builder.Build());
             return computer;
         }
 
-        private static void Process(AsyncProfilerComputer computer, ProcessIndex processIndex, AsyncProfilerBufferBuilder builder) =>
+        private static void Process(AsyncProfilerIndexBuilder computer, ProcessIndex processIndex, AsyncProfilerBufferBuilder builder) =>
             computer.Process(builder.Build(), processIndex);
 
         [Theory]
@@ -114,7 +114,7 @@ namespace TraceEventTests
             AsyncEventID suspend = v1 ? AsyncEventID.SuspendStateMachineAsyncContext : AsyncEventID.SuspendRuntimeAsyncContext;
             AsyncEventID completeMethod = v1 ? AsyncEventID.CompleteStateMachineAsyncMethod : AsyncEventID.CompleteRuntimeAsyncMethod;
             int[] states = v1 ? new[] { 1 } : null;
-            var computer = new AsyncProfilerComputer();
+            var computer = new AsyncProfilerIndexBuilder();
             var errors = new List<ParseError>();
             computer.ParseError += (process, error) =>
             {
@@ -155,7 +155,7 @@ namespace TraceEventTests
         [Fact]
         public void MalformedPayload_FinishDoesNotExtendDamagedStateOrInvalidateOtherThreads()
         {
-            var computer = new AsyncProfilerComputer();
+            var computer = new AsyncProfilerIndexBuilder();
             Process(computer, ProcessA, new AsyncProfilerBufferBuilder(ThreadA)
                 .Armed(Start).ResumeStack(Start + 10, 1, new ulong[] { 0xA }));
             Process(computer, ProcessA, new AsyncProfilerBufferBuilder(ThreadB)
@@ -179,7 +179,7 @@ namespace TraceEventTests
         [InlineData(true)]
         public void UnreadableHeader_DiscardsProcessOpenStateAndRequiresFreshMetadata(bool unsupportedVersion)
         {
-            var computer = new AsyncProfilerComputer();
+            var computer = new AsyncProfilerIndexBuilder();
             Process(computer, ProcessA, new AsyncProfilerBufferBuilder(ThreadA)
                 .Armed(Start)
                 .ResumeStack(Start + 10, 1, new ulong[] { 0xA }).Suspend(Start + 12)
@@ -219,7 +219,7 @@ namespace TraceEventTests
         [Fact]
         public void MalformedMetadata_ClosesProcessPrefixesAndRequiresMetadataPlusPerThreadResets()
         {
-            var computer = new AsyncProfilerComputer();
+            var computer = new AsyncProfilerIndexBuilder();
             Process(computer, ProcessA, new AsyncProfilerBufferBuilder(ThreadA)
                 .Armed(Start).ResumeStack(Start + 10, 1, new ulong[] { 0xA }));
             Process(computer, ProcessA, new AsyncProfilerBufferBuilder(ThreadB)
@@ -281,7 +281,7 @@ namespace TraceEventTests
                 .Armed(Start).ResumeStack(Start + 10, 1, new ulong[] { 0xA })
                 .WrapperReset(Start + 12).CompleteMethod(Start + 15).Build();
             Array.Copy(BitConverter.GetBytes(eventCount), 0, damaged, 17, sizeof(uint));
-            var computer = new AsyncProfilerComputer();
+            var computer = new AsyncProfilerIndexBuilder();
             computer.Process(damaged);
             computer.Finish();
 
@@ -334,7 +334,7 @@ namespace TraceEventTests
             // metadata buffer while its events predate the metadata. Because every valid same-session reset has a
             // QPC >= the first metadata's QPC, the computer must gate on QPC (not merely "metadata seen") and ignore
             // such a reset and its episode. A later reset with a QPC at/after the metadata still arms normally.
-            var computer = new AsyncProfilerComputer();
+            var computer = new AsyncProfilerIndexBuilder();
 
             // Our session on ThreadA: metadata + reset at Start establishes the first-metadata QPC and arms ThreadA.
             computer.Process(new AsyncProfilerBufferBuilder(ThreadA)
@@ -432,9 +432,9 @@ namespace TraceEventTests
                 .Suspend(Start + 40));
 
             AsyncProfilerCallStack outer = computer.Index.GetCallStack(
-                Key(ThreadA), dispatcherId: 1, qpc: Start + 25);
+                Key(ThreadA), dispatcherId: 1, timestampQpc: Start + 25);
             AsyncProfilerCallStack inner = computer.Index.GetCallStack(
-                Key(ThreadA), dispatcherId: 2, qpc: Start + 25);
+                Key(ThreadA), dispatcherId: 2, timestampQpc: Start + 25);
 
             Assert.NotNull(outer);
             Assert.Equal(Key(ThreadA), outer.Thread);
@@ -445,13 +445,13 @@ namespace TraceEventTests
             Assert.Equal(2UL, inner.DispatcherId);
             Assert.Equal(0xBUL, inner.Frames.MethodIdAt(0));
             Assert.Null(computer.Index.GetCallStack(
-                Key(ThreadA), dispatcherId: 3, qpc: Start + 25));
+                Key(ThreadA), dispatcherId: 3, timestampQpc: Start + 25));
         }
 
         [Fact]
         public void DispatcherInfo_ResolvesFireAndForgetParentCallStackAndCreationQpc()
         {
-            var computer = new AsyncProfilerComputer();
+            var computer = new AsyncProfilerIndexBuilder();
             computer.Process(new AsyncProfilerBufferBuilder(ThreadA)
                 .Armed(Start)
                 .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA, 0xB, 0xC })
@@ -470,7 +470,7 @@ namespace TraceEventTests
                 .Build());
 
             AsyncProfilerCallStack child = computer.Index.GetCallStack(
-                Key(ThreadB), dispatcherId: 2, qpc: Start + 35);
+                Key(ThreadB), dispatcherId: 2, timestampQpc: Start + 35);
             Assert.NotNull(child);
 
             AsyncProfilerDispatcherInfo dispatcher = computer.Index.GetDispatcherInfo(child);
@@ -501,7 +501,7 @@ namespace TraceEventTests
 
             AsyncProfilerCallStacksIndex reloaded = RoundTrip(computer.Index);
             AsyncProfilerCallStack reloadedChild = reloaded.GetCallStack(
-                Key(ThreadB), dispatcherId: 2, qpc: Start + 35);
+                Key(ThreadB), dispatcherId: 2, timestampQpc: Start + 35);
             Assert.NotNull(reloadedChild);
             Assert.True(reloaded.TryGetParentCallStack(
                 reloadedChild,
@@ -547,7 +547,7 @@ namespace TraceEventTests
             foreach (AsyncProfilerCallStacksIndex index in new[] { computer.Index, RoundTrip(computer.Index) })
             {
                 AsyncProfilerCallStack child = index.GetCallStack(
-                    Key(ThreadB), dispatcherId: 2, qpc: Start + 55);
+                    Key(ThreadB), dispatcherId: 2, timestampQpc: Start + 55);
                 Assert.NotNull(child);
                 Assert.True(index.TryGetParentCallStack(
                     child, out AsyncProfilerCallStack parent, out long creationQpc));
@@ -580,7 +580,7 @@ namespace TraceEventTests
 
                     Assert.Equal(2, frames.Count);
                     Assert.Same(parent, frames[1].Context);
-                    Assert.Equal(AsyncProfilerStitchedFrameContextKind.HistoricalParent, frames[1].ContextKind);
+                    Assert.Equal(AsyncProfilerStitchedFrameContextKind.ParentContext, frames[1].ContextKind);
                     Assert.Equal(0xBUL, frames[1].Segment.MethodIdAt(frames[1].SegmentFrameIndex));
                 }
             }
@@ -593,7 +593,7 @@ namespace TraceEventTests
         public void DispatcherInfo_RuntimeCreationFormsResolveParentWithoutOpeningActivation(
             bool includeContextCreate, bool includeCallstackCreate)
         {
-            var computer = new AsyncProfilerComputer();
+            var computer = new AsyncProfilerIndexBuilder();
             var creation = new AsyncProfilerBufferBuilder(ThreadA)
                 .Armed(Start)
                 .ResumeRuntimeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA, 0xB })
@@ -625,7 +625,7 @@ namespace TraceEventTests
             Assert.Equal(2, computer.DistinctFramesCount);
             foreach (AsyncProfilerCallStacksIndex index in new[] { computer.Index, RoundTrip(computer.Index) })
             {
-                AsyncProfilerCallStack child = index.GetCallStack(Key(ThreadB), dispatcherId: 2, qpc: Start + 35);
+                AsyncProfilerCallStack child = index.GetCallStack(Key(ThreadB), dispatcherId: 2, timestampQpc: Start + 35);
                 Assert.True(index.TryGetParentCallStack(child, out AsyncProfilerCallStack parent, out long creationQpc));
                 Assert.Equal(Key(ThreadA), parent.Thread);
                 Assert.Equal(1UL, parent.DispatcherId);
@@ -793,7 +793,7 @@ namespace TraceEventTests
         [Fact]
         public void MultipleThreads_AreIsolated()
         {
-            var computer = new AsyncProfilerComputer();
+            var computer = new AsyncProfilerIndexBuilder();
             computer.Process(new AsyncProfilerBufferBuilder(ThreadA)
                 .Armed(Start)
                 .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xAAA })
@@ -816,7 +816,7 @@ namespace TraceEventTests
         [Fact]
         public void Processes_UseIndependentManifestsAndThreadState()
         {
-            var computer = new AsyncProfilerComputer();
+            var computer = new AsyncProfilerIndexBuilder();
 
             // Process A advertises a byte-sized payload length for its resume-callstack event.
             Process(computer, ProcessA, new AsyncProfilerBufferBuilder(ThreadA)
@@ -844,7 +844,7 @@ namespace TraceEventTests
         {
             long utcA = new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc).ToFileTimeUtc();
             long utcB = new DateTime(2026, 7, 2, 12, 0, 0, DateTimeKind.Utc).ToFileTimeUtc();
-            var computer = new AsyncProfilerComputer();
+            var computer = new AsyncProfilerIndexBuilder();
 
             Process(computer, ProcessA, new AsyncProfilerBufferBuilder(ThreadA)
                 .Metadata(Start, qpcFrequency: 10_000_000, qpcSync: (ulong)Start, utcSync: (ulong)utcA, eventBufferSize: 0, wrapperCount: 16, new AsyncManifestEntry[0])
@@ -874,7 +874,7 @@ namespace TraceEventTests
         [Fact]
         public void CompletionAvailabilityAndFrameInterning_AreProcessScoped()
         {
-            var computer = new AsyncProfilerComputer();
+            var computer = new AsyncProfilerIndexBuilder();
 
             Process(computer, ProcessA, new AsyncProfilerBufferBuilder(ThreadA)
                 .Armed(Start)
@@ -899,7 +899,7 @@ namespace TraceEventTests
         [Fact]
         public void WrapperCount_IsCapturedWhenActivationStarts()
         {
-            var computer = new AsyncProfilerComputer();
+            var computer = new AsyncProfilerIndexBuilder();
             Process(computer, ProcessA, new AsyncProfilerBufferBuilder(ThreadA)
                 .Metadata(Start, qpcFrequency: 10_000_000, qpcSync: 1, utcSync: 1, eventBufferSize: 0, wrapperCount: 16, new AsyncManifestEntry[0])
                 .Reset(Start)
@@ -914,7 +914,7 @@ namespace TraceEventTests
         [Fact]
         public void ProcessIsolation_SerializesAndDeserializes()
         {
-            var computer = new AsyncProfilerComputer();
+            var computer = new AsyncProfilerIndexBuilder();
             Process(computer, ProcessA, new AsyncProfilerBufferBuilder(ThreadA)
                 .Armed(Start)
                 .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA })
@@ -1104,6 +1104,47 @@ namespace TraceEventTests
         }
 
         [Fact]
+        public void BorrowedQueries_SkipPublicCompletionObservationsAndPreserveStableResults()
+        {
+            var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
+                .Armed(Start)
+                .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA, 0xB })
+                .CompleteMethod(Start + 15)
+                .UnwindException(Start + 16, 1)
+                .Suspend(Start + 20)
+                .Metadata(Start + 30, qpcFrequency: 10_000_000, qpcSync: 1, utcSync: 1,
+                    eventBufferSize: 0, wrapperCount: 32, new AsyncManifestEntry[0])
+                .Reset(Start + 30)
+                .ResumeStack(Start + 40, dispatcher: 2, new ulong[] { 0xC })
+                .Suspend(Start + 50));
+
+            foreach (AsyncProfilerCallStacksIndex index in new[] { computer.Index, RoundTrip(computer.Index) })
+            {
+                var borrowed = new List<AsyncProfilerCallStack>();
+                IReadOnlyList<AsyncProfilerCallStackFrame> capturedFrames = null;
+                foreach (long timestampQpc in new[] { Start + 18, Start + 45, Start + 18 })
+                {
+                    index.GetCallStacks(Key(ThreadA), timestampQpc, borrowed);
+                    AsyncProfilerCallStack activation = Assert.Single(borrowed);
+                    Assert.False(activation.MethodCompletionObserved);
+                    Assert.False(activation.ExceptionCompletionObserved);
+                    capturedFrames = capturedFrames ?? activation.CapturedFrames;
+                    Assert.Same(capturedFrames, activation.CapturedFrames);
+
+                    bool observed = timestampQpc < Start + 30;
+                    Assert.Equal(observed ? 2 : 1, capturedFrames.Count);
+                    Assert.Equal(observed ? 0xAUL : 0xCUL, capturedFrames[0].CapturedInstructionPointer);
+                    AsyncProfilerCallStack stable = Assert.Single(index.GetCallStacks(Key(ThreadA), timestampQpc));
+                    Assert.NotSame(activation, stable);
+                    Assert.Equal(observed, stable.MethodCompletionObserved);
+                    Assert.Equal(observed, stable.ExceptionCompletionObserved);
+                    Assert.Equal(observed, index.GetCallStacks(Key(ThreadA))[observed ? 0 : 1].MethodCompletionObserved);
+                    Assert.Equal(observed, index.GetCallStacks(Key(ThreadA))[observed ? 0 : 1].ExceptionCompletionObserved);
+                }
+            }
+        }
+
+        [Fact]
         public async Task PublicQueries_AreSafeDuringConcurrentFirstUse()
         {
             var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
@@ -1228,7 +1269,7 @@ namespace TraceEventTests
         [Fact]
         public void DefaultConstructor_ProcessesWithoutThrowing()
         {
-            var computer = new AsyncProfilerComputer();
+            var computer = new AsyncProfilerIndexBuilder();
             computer.Process(new AsyncProfilerBufferBuilder(ThreadA).Reset(Start).Build());
             Assert.Empty(computer.GetCallStacks(Key(ThreadA), Start + 5));
         }

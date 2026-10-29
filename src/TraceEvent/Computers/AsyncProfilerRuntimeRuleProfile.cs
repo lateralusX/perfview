@@ -316,7 +316,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// layout. The context validates captured module/profile identity, and transforms retain activation guards.
         /// </summary>
         public AsyncProfilerRuntimeSequenceMatch MatchSequence(
-            AsyncProfilerRuntimeSequenceKind kind, AsyncProfilerCallStackTransformContext context, int start, int end)
+            AsyncProfilerRuntimeSequenceKind kind, AsyncProfilerCallStackTransformState context, int start, int end)
         {
             switch (kind)
             {
@@ -345,7 +345,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         /// <summary>Matches a generated MoveNext and its root-side builder startup helpers, excluding kickoff.</summary>
         protected virtual AsyncProfilerRuntimeSequenceMatch MatchV1Startup(
-            AsyncProfilerCallStackTransformContext context, int start, int end)
+            AsyncProfilerCallStackTransformState context, int start, int end)
         {
             if (start == end || !IsSyncFrameKind(context.Frames[start], AsyncProfilerStitchSyncFrameKind.V1StateMachineMoveNext))
             {
@@ -361,7 +361,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         /// <summary>Matches the await-registration spine before a V1 method body.</summary>
         protected virtual AsyncProfilerRuntimeSequenceMatch MatchV1AwaitRegistration(
-            AsyncProfilerCallStackTransformContext context, int start, int end)
+            AsyncProfilerCallStackTransformState context, int start, int end)
         {
             int next = start;
             while (next < end &&
@@ -375,7 +375,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         /// <summary>Matches the entry spine immediately before the verified logical anchor at end.</summary>
         protected virtual AsyncProfilerRuntimeSequenceMatch MatchProfilerEntry(
-            AsyncProfilerCallStackTransformContext context, int start, int end)
+            AsyncProfilerCallStackTransformState context, int start, int end)
         {
             if (start == end || end == context.Frames.Count)
             {
@@ -414,7 +414,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// incomplete or changed layouts from individual-helper cleanup.
         /// </summary>
         protected virtual AsyncProfilerRuntimeSequenceMatch MatchRuntimeResumptionBridge(
-            AsyncProfilerCallStackTransformContext context, int start, int end)
+            AsyncProfilerCallStackTransformState context, int start, int end)
         {
             bool anchor = start < end && IsRuntimeResumptionAnchor(context.Frames[end - 1]);
             int helpersEnd = anchor ? end - 1 : end;
@@ -444,7 +444,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// identified helpers and return a longer span; chains and completed-dispatch tails reuse that span.
         /// </summary>
         protected virtual AsyncProfilerRuntimeSequenceMatch MatchTaskCompletionPair(
-            AsyncProfilerCallStackTransformContext context, int start, int end) =>
+            AsyncProfilerCallStackTransformState context, int start, int end) =>
             end - start >= 2 &&
             IsSyncFrameKind(context.Frames[start], AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskRunContinuations) &&
             IsSyncFrameKind(context.Frames[start + 1], AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult)
@@ -453,7 +453,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         /// <summary>The common chain appends the public SetResult trigger to a profile-specific completion pair.</summary>
         protected virtual AsyncProfilerRuntimeSequenceMatch MatchTaskCompletionChain(
-            AsyncProfilerCallStackTransformContext context, int start, int end)
+            AsyncProfilerCallStackTransformState context, int start, int end)
         {
             AsyncProfilerRuntimeSequenceMatch pair = MatchTaskCompletionPair(context, start, end);
             if (!pair.IsMatch)
@@ -474,7 +474,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// dispatch-continuation methods. It does not establish ownership of an active V1 anchor or its caller.
         /// </summary>
         protected virtual AsyncProfilerRuntimeSequenceMatch MatchV2CompletionHandoff(
-            AsyncProfilerCallStackTransformContext context, int start, int end)
+            AsyncProfilerCallStackTransformState context, int start, int end)
         {
             if (start == end ||
                 !IsSyncFrameKind(context.Frames[start], AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure))

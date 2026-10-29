@@ -107,7 +107,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
         /// known layout and append fields rather than change it. Malformed typed payloads are reported to
         /// <see cref="ISubEventSink.OnParseError"/> and decoding continues at their declared end;
         /// header or framing failures stop this buffer. The decoder itself does not recover activation state.
-        /// <see cref="Computers.AsyncProfilerComputer"/> provides that recovery and per-process manifest ownership.
+        /// <see cref="Computers.AsyncProfilerIndexBuilder"/> provides that recovery and per-process manifest ownership.
         /// </remarks>
         public static void ParseBuffer(byte[] buffer, Manifest manifest, ISubEventSink sink)
         {

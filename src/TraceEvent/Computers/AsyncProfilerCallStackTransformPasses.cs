@@ -37,7 +37,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// </remarks>
     internal sealed class AsyncProfilerSampledV2WrapperTransform
     {
-        public void Apply(AsyncProfilerCallStackTransformContext context)
+        public void Apply(AsyncProfilerCallStackTransformState context)
         {
             List<AsyncProfilerStitchedFrame> frames = context.Frames;
 
@@ -108,7 +108,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// </remarks>
     internal sealed class AsyncProfilerV1PresentationTransform
     {
-        public void Apply(AsyncProfilerCallStackTransformContext context)
+        public void Apply(AsyncProfilerCallStackTransformState context)
         {
             List<AsyncProfilerStitchedFrame> frames = context.Frames;
             CollapseCompletedV1Unwinds(context);
@@ -170,7 +170,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         #region private
 
-        private static void CollapseCompletedV1Unwinds(AsyncProfilerCallStackTransformContext context)
+        private static void CollapseCompletedV1Unwinds(AsyncProfilerCallStackTransformState context)
         {
             if (context.TraceLog == null)
             {
@@ -188,7 +188,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 }
                 if (activation != null &&
                     activation.Frames.Kind == AsyncCallstackKind.StateMachineAsync &&
-                    context.TraceLog.AsyncProfilerMethodCompletionObserved(activation) &&
+                    context.TraceLog.AsyncProfilerCallStacks?.MethodCompletionObserved(activation) == true &&
                     activation.GetMethodCompletedFrameCount(context.TimestampQpc) > 0 &&
                     activation.GetCompletedFrameCount(context.TimestampQpc) == activation.Frames.FrameCount &&
                     TryMatchCompletedV1Unwind(context, start, end, activation, out int unwindStart))
@@ -211,7 +211,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         private static bool TryMatchCompletedV1Unwind(
-            AsyncProfilerCallStackTransformContext context, int start, int end, AsyncProfilerCallStack activation, out int unwindStart)
+            AsyncProfilerCallStackTransformState context, int start, int end, AsyncProfilerCallStack activation, out int unwindStart)
         {
             unwindStart = start;
             TraceLog log = context.TraceLog;
@@ -347,7 +347,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 string.Equals(first.FullMethodName, second.FullMethodName, StringComparison.Ordinal);
         }
 
-        private static void CollapseV2CompletionHandoff(AsyncProfilerCallStackTransformContext context, int currentIndex)
+        private static void CollapseV2CompletionHandoff(AsyncProfilerCallStackTransformState context, int currentIndex)
         {
             if (context.TraceLog == null ||
                 context.Diagnostics.BoundariesNotFound != 0 ||
@@ -410,7 +410,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         private static bool TryApplyReentrantV1Deduplication(
-            AsyncProfilerCallStackTransformContext context,
+            AsyncProfilerCallStackTransformState context,
             int currentIndex)
         {
             if (context.TraceLog == null)
@@ -485,7 +485,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         private static bool IsVerifiedReentrantDispatchTarget(
-            AsyncProfilerCallStackTransformContext context, int targetIndex, int kickoffIndex, MethodIndex startupMethod)
+            AsyncProfilerCallStackTransformState context, int targetIndex, int kickoffIndex, MethodIndex startupMethod)
         {
             if (targetIndex == 0 || kickoffIndex + 1 >= context.Frames.Count ||
                 context.Diagnostics.SegmentsProcessed != context.Segments.Count ||
@@ -630,7 +630,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// </remarks>
     internal sealed class AsyncProfilerInfrastructureCleanupTransform
     {
-        public void Apply(AsyncProfilerCallStackTransformContext context)
+        public void Apply(AsyncProfilerCallStackTransformState context)
         {
             List<AsyncProfilerStitchedFrame> frames = context.Frames;
             int cleanupEnd = CollapseRuntimeResumptionBridge(context);
@@ -726,7 +726,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         #region private
 
-        private static int CollapseProfilerOwnedPrefix(AsyncProfilerCallStackTransformContext context, ref int cleanupEnd)
+        private static int CollapseProfilerOwnedPrefix(AsyncProfilerCallStackTransformState context, ref int cleanupEnd)
         {
             if (context.TraceLog == null || context.Segments.Count == 0)
             {
@@ -835,7 +835,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             return 0;
         }
 
-        private static int CollapseRuntimeResumptionBridge(AsyncProfilerCallStackTransformContext context)
+        private static int CollapseRuntimeResumptionBridge(AsyncProfilerCallStackTransformState context)
         {
             List<AsyncProfilerStitchedFrame> frames = context.Frames;
             if (context.Segments.Count == 0)
@@ -856,7 +856,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
             int bridgeStart = rootIndex + 1;
             while (bridgeStart < frames.Count &&
-                   frames[bridgeStart].ContextKind == AsyncProfilerStitchedFrameContextKind.HistoricalParent)
+                   frames[bridgeStart].ContextKind == AsyncProfilerStitchedFrameContextKind.ParentContext)
             {
                 bridgeStart++;
             }
@@ -972,7 +972,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// </remarks>
     internal sealed class AsyncProfilerReentrantHandoffTransform
     {
-        public void Apply(AsyncProfilerCallStackTransformContext context)
+        public void Apply(AsyncProfilerCallStackTransformState context)
         {
             if (context.TraceLog == null ||
                 context.Diagnostics.BoundariesNotFound != 0 ||
@@ -1032,7 +1032,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     internal static class AsyncProfilerCallStackTransformHelpers
     {
         internal static bool HasVerifiedAsyncAnchor(
-            AsyncProfilerCallStackTransformContext context,
+            AsyncProfilerCallStackTransformState context,
             int contextEnd,
             AsyncProfilerCallStack activation)
         {
@@ -1066,7 +1066,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 {
                     verified |= IsSystemPrivateCoreLibSpan(context.TraceLog, frames, i, 1);
                 }
-                else if (context.TraceLog.AsyncProfilerMethodCompletionObserved(activation) &&
+                else if (context.TraceLog.AsyncProfilerCallStacks?.MethodCompletionObserved(activation) == true &&
                     activation.GetCompletedFrameCount(context.TimestampQpc) == frame.SegmentFrameIndex &&
                     i > 0 &&
                     frames[i - 1].Origin == AsyncProfilerStitchedFrameOrigin.Sync &&

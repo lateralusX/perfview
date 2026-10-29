@@ -14,9 +14,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// Per-sample context supplied to an async stack presentation transform. Structural stitching has already
     /// completed, and <see cref="Frames"/> contains the complete stitched stack leaf-to-root.
     /// </summary>
-    internal readonly struct AsyncProfilerCallStackTransformContext
+    internal readonly struct AsyncProfilerCallStackTransformState
     {
-        internal AsyncProfilerCallStackTransformContext(
+        internal AsyncProfilerCallStackTransformState(
             TraceLog traceLog,
             IReadOnlyList<AsyncProfilerCallStack> segments,
             long timestampQpc,
@@ -208,7 +208,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// be retained after the callback returns. Copy any identity values needed later; copying a frame alone does
     /// not detach its <see cref="AsyncProfilerStitchedFrame.Context"/> from the computer's reusable activation object.
     /// </remarks>
-    internal delegate void AsyncProfilerCallStackTransform(AsyncProfilerCallStackTransformContext context);
+    internal delegate void AsyncProfilerCallStackTransform(AsyncProfilerCallStackTransformState context);
 
     /// <summary>
     /// Ordered presentation pipeline for structurally stitched async call stacks. The mandatory structural
@@ -351,13 +351,18 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         /// <summary>Adds a custom transform that runs after all enabled built-in transforms.</summary>
-        public void Add(AsyncProfilerCallStackTransform transform)
+        public void Add(AsyncProfilerCallStackTransform transform, bool requiresCompletionObservations = false)
         {
             if (transform is null)
             {
                 throw new ArgumentNullException(nameof(transform));
             }
 
+            if (requiresCompletionObservations && !m_hasCompletionObservationTransform)
+            {
+                m_customTransforms.Add(PrepareCompletionObservations);
+                m_hasCompletionObservationTransform = true;
+            }
             m_customTransforms.Add(transform);
             m_transforms = null;
         }
@@ -366,6 +371,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         public void ClearCustomTransforms()
         {
             m_customTransforms.Clear();
+            m_hasCompletionObservationTransform = false;
             m_transforms = null;
         }
 
@@ -405,7 +411,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             var frames = new List<AsyncProfilerStitchedFrame>(structuralResult.Frames);
-            var context = new AsyncProfilerCallStackTransformContext(
+            var context = new AsyncProfilerCallStackTransformState(
                 traceLog,
                 segments,
                 timestampQpc,
@@ -416,7 +422,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             return new AsyncProfilerStitchResult(frames, structuralResult.Diagnostics);
         }
 
-        internal void ApplyInPlace(AsyncProfilerCallStackTransformContext context)
+        internal void ApplyInPlace(AsyncProfilerCallStackTransformState context)
         {
             AsyncProfilerCallStackTransform[] transforms = m_transforms ?? (m_transforms = CreateTransforms());
             for (int i = 0; i < transforms.Length; i++)
@@ -444,7 +450,19 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             return transforms.ToArray();
         }
 
-        private static void ApplyRuntimeTransform(AsyncProfilerCallStackTransformContext context, AsyncProfilerRuntimeTransformKind kind)
+        private static void PrepareCompletionObservations(AsyncProfilerCallStackTransformState context)
+        {
+            AsyncProfilerCallStacksIndex index = context.TraceLog?.AsyncProfilerCallStacks;
+            if (index != null)
+            {
+                for (int i = 0; i < context.Segments.Count; i++)
+                {
+                    index.PopulateCompletionObservations(context.Segments[i]);
+                }
+            }
+        }
+
+        private static void ApplyRuntimeTransform(AsyncProfilerCallStackTransformState context, AsyncProfilerRuntimeTransformKind kind)
         {
             AsyncProfilerCallStackTransform transform = context.RuntimeProfile.GetTransform(kind) ??
                 throw new InvalidOperationException("A runtime profile returned a null presentation transform.");
@@ -454,6 +472,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         private int m_maximumParentContextDepth = AsyncProfilerParentContextAugmenter.DefaultMaximumDepth;
         private bool m_enableNormalization = true;
         private bool m_enableInfrastructureCleanup;
+        private bool m_hasCompletionObservationTransform;
         private readonly List<AsyncProfilerCallStackTransform> m_customTransforms;
         // Null until first use or after pass configuration changes; otherwise reused across samples.
         private AsyncProfilerCallStackTransform[] m_transforms;

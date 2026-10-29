@@ -1,6 +1,8 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using System;
+
 namespace Microsoft.Diagnostics.Tracing.Computers
 {
     /// <summary>
@@ -8,6 +10,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// reconstructed async call stacks.
     /// Configure before stack generation. These settings affect presentation, not structural reconstruction.
     /// </summary>
+    /// <remarks>
+    /// Obtain this object from AsyncProfilerCallStackSourceBuilder.Transforms or a stack computer's
+    /// AsyncCallStackTransforms property; it has no public constructor. Settings and callbacks are not
+    /// thread-safe and must not be modified during stack production.
+    /// </remarks>
     public sealed class AsyncCallStackTransforms
     {
         /// <summary>
@@ -36,6 +43,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// state. Disabled by default. Applied when frame names are emitted, without enabling additional
         /// reconstruction or cleanup. Historical parent contexts retain their context markers and V1/V2
         /// annotations independently of this setting.
+        /// Verified current V1 frames display inferred state -1; verified completing/return-unwind frames
+        /// display -2. Other V1 frames retain captured state, which is also preserved in CapturedState.
         /// </summary>
         public bool EnableFrameAnnotations
         {
@@ -51,7 +60,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// time and the first remaining V1 frame displays inferred running state -1. Otherwise the captured
         /// resume/append stack is replayed unchanged. Captured states and IPs remain unchanged in frame metadata;
         /// this does not establish an exact creation-time execution IP or prove every progress record was captured.
-        /// This does not enable async call-stack reconstruction on the owning computer.
+        /// Existing stack computers still require EnableAsyncCallStacks separately.
         /// </summary>
         public bool EnableParentContexts
         {
@@ -70,6 +79,27 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             get => m_pipeline.MaximumParentContextDepth;
             set => m_pipeline.MaximumParentContextDepth = value;
         }
+
+        /// <summary>
+        /// Adds a custom presentation callback after enabled built-in transforms, in registration order.
+        /// Callback views are reused and must not be retained. Configure before producing stacks.
+        /// Callbacks are invoked only when active async segments are available; physical-only fallback is unchanged.
+        /// Parent-context expansion precedes callbacks; output interning, frame-name annotations, generated
+        /// context-transition markers, and grouping roots follow them. Callback exceptions propagate to the caller.
+        /// </summary>
+        /// <exception cref="ArgumentNullException"><paramref name="transform"/> is null.</exception>
+        public void Add(Action<AsyncProfilerCallStackTransformContext> transform)
+        {
+            if (transform == null)
+            {
+                throw new ArgumentNullException(nameof(transform));
+            }
+            var context = new AsyncProfilerCallStackTransformContext(transform);
+            m_pipeline.Add(context.Invoke, requiresCompletionObservations: true);
+        }
+
+        /// <summary>Removes custom callbacks without changing built-in settings.</summary>
+        public void ClearCustomTransforms() => m_pipeline.ClearCustomTransforms();
 
         #region private
 

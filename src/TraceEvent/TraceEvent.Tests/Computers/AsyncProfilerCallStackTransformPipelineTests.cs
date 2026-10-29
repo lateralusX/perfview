@@ -130,7 +130,7 @@ namespace TraceEventTests
             {
                 EnableNormalization = false,
             };
-            AsyncProfilerCallStackTransformContext context = Context(
+            AsyncProfilerCallStackTransformState context = Context(
                 frames,
                 diagnostics,
                 infrastructureCodeAddress: CA(31));
@@ -253,7 +253,7 @@ namespace TraceEventTests
                 Sync(36, AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibThreadPoolDispatch),
             };
             var pipeline = new AsyncProfilerCallStackTransformPipeline();
-            AsyncProfilerCallStackTransformContext context = Context(frames, diagnostics);
+            AsyncProfilerCallStackTransformState context = Context(frames, diagnostics);
 
             pipeline.ApplyInPlace(context);
             Assert.Equal(new[] { CA(34), CA(35), CA(36) }, frames.Select(frame => frame.CodeAddress));
@@ -422,6 +422,137 @@ namespace TraceEventTests
 
             Assert.Equal(new[] { 3, 2 }, observed);
             Assert.Equal(new[] { CA(11), CA(14) }, frames.Select(frame => frame.CodeAddress));
+        }
+
+#if NETCOREAPP
+        [Fact]
+        public void PublicCallbacks_FrameSearchAndRemovalDoNotAllocateAfterWarmup()
+        {
+            var pipeline = new AsyncProfilerCallStackTransformPipeline { EnableNormalization = false };
+            var transforms = new AsyncCallStackTransforms(pipeline);
+            var frames = new List<AsyncProfilerStitchedFrame>();
+            for (int i = 0; i < 8; i++)
+            {
+                frames.Add(AsyncProfilerStitchedFrame.CreateSynthetic("Frame " + i));
+            }
+            var target = new AsyncProfilerCallStackFrame(new string("Frame 7".ToCharArray()));
+            int indexSum = 0;
+            int found = 0;
+            int removed = 0;
+            transforms.Add(context =>
+            {
+                indexSum += context.Frames.IndexOf(target);
+                found += context.Frames.Contains(target) ? 1 : 0;
+                removed += context.Frames.Remove(target) ? 1 : 0;
+                context.Frames.Add(target);
+            });
+            AsyncProfilerCallStackTransformState state = Context(frames, new AsyncProfilerCallStackDiagnostics());
+            const int Warmup = 100;
+            const int Iterations = 1_000;
+            for (int i = 0; i < Warmup; i++)
+            {
+                pipeline.ApplyInPlace(state);
+            }
+
+            long before = GC.GetAllocatedBytesForCurrentThread();
+            for (int i = 0; i < Iterations; i++)
+            {
+                pipeline.ApplyInPlace(state);
+            }
+            long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+            Assert.Equal(0L, allocated);
+            Assert.Equal(7 * (Warmup + Iterations), indexSum);
+            Assert.Equal(Warmup + Iterations, found);
+            Assert.Equal(Warmup + Iterations, removed);
+            Assert.Equal(8, frames.Count);
+        }
+
+        [Fact]
+        public void PublicCallbacks_DoNotAllocateAfterWarmup()
+        {
+            var pipeline = new AsyncProfilerCallStackTransformPipeline { EnableNormalization = false };
+            var transforms = new AsyncCallStackTransforms(pipeline);
+            int calls = 0;
+            CodeAddressIndex observed = CodeAddressIndex.Invalid;
+            transforms.Add(context =>
+            {
+                observed = context.Frames[0].CodeAddress;
+                calls++;
+            });
+            AsyncProfilerCallStackTransformState state = Context(StartupFrames(), new AsyncProfilerCallStackDiagnostics());
+            const int Warmup = 100;
+            const int Iterations = 1_000;
+            for (int i = 0; i < Warmup; i++)
+            {
+                pipeline.ApplyInPlace(state);
+            }
+
+            long before = GC.GetAllocatedBytesForCurrentThread();
+            for (int i = 0; i < Iterations; i++)
+            {
+                pipeline.ApplyInPlace(state);
+            }
+            long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+            Assert.Equal(0L, allocated);
+            Assert.Equal(Warmup + Iterations, calls);
+            Assert.Equal(CA(10), observed);
+        }
+#endif
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void PublicCallbacks_ReuseViewsAndReleaseBorrowedState(bool failFirst)
+        {
+            var pipeline = new AsyncProfilerCallStackTransformPipeline { EnableNormalization = false };
+            var transforms = new AsyncCallStackTransforms(pipeline);
+            var failure = new InvalidOperationException("Public callback failed.");
+            AsyncProfilerCallStackTransformContext reusedContext = null;
+            IList<AsyncProfilerCallStackFrame> reusedFrames = null;
+            AsyncProfilerCallStackTransformState expected = default;
+            int calls = 0;
+            transforms.Add(context =>
+            {
+                if (reusedContext == null)
+                {
+                    reusedContext = context;
+                    reusedFrames = context.Frames;
+                }
+                Assert.Same(reusedContext, context);
+                Assert.Same(reusedFrames, context.Frames);
+                Assert.Same(expected.Segments, context.Segments);
+                Assert.Equal(expected.TimestampQpc, context.TimestampQpc);
+                Assert.Equal(expected.Frames[0].CodeAddress, context.Frames[0].CodeAddress);
+                context.Frames.Add(new AsyncProfilerCallStackFrame("Injected"));
+                context.Frames.RemoveAt(0);
+                calls++;
+                if (failFirst && calls == 1)
+                {
+                    throw failure;
+                }
+            });
+
+            for (int i = 0; i < 2; i++)
+            {
+                List<AsyncProfilerStitchedFrame> frames = StartupFrames();
+                frames[0] = Sync(20 + i);
+                expected = Context(frames, new AsyncProfilerCallStackDiagnostics(), timestampQpc: i + 1);
+                if (failFirst && i == 0)
+                {
+                    Assert.Same(failure, Assert.Throws<InvalidOperationException>(() => pipeline.ApplyInPlace(expected)));
+                }
+                else
+                {
+                    pipeline.ApplyInPlace(expected);
+                }
+
+                Assert.Null(reusedContext.Segments);
+                Assert.Throws<InvalidOperationException>(() => reusedFrames.Count);
+                Assert.Equal("Injected", frames[frames.Count - 1].DisplayName);
+            }
+            Assert.Equal(2, calls);
         }
 
         [Fact]
@@ -623,16 +754,17 @@ namespace TraceEventTests
                 new AsyncProfilerStitchSyncFrame(CA(codeAddress), MethodIndex.Invalid, kind),
                 null);
 
-        private static AsyncProfilerCallStackTransformContext Context(
+        private static AsyncProfilerCallStackTransformState Context(
             List<AsyncProfilerStitchedFrame> frames,
             AsyncProfilerCallStackDiagnostics diagnostics,
             CodeAddressIndex wrapperCodeAddress = CodeAddressIndex.Invalid,
             CodeAddressIndex infrastructureCodeAddress = CodeAddressIndex.Invalid,
-            Func<CodeAddressIndex, AsyncProfilerCallStackStitchBoundaryInfo> classifyBoundary = null) =>
-            new AsyncProfilerCallStackTransformContext(
+            Func<CodeAddressIndex, AsyncProfilerCallStackStitchBoundaryInfo> classifyBoundary = null,
+            long timestampQpc = 1) =>
+            new AsyncProfilerCallStackTransformState(
                 traceLog: null,
                 segments: new List<AsyncProfilerCallStack>(),
-                timestampQpc: 1,
+                timestampQpc,
                 classifyBoundary: classifyBoundary ?? (codeAddress =>
                 {
                     if (codeAddress == wrapperCodeAddress)

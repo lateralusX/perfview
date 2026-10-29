@@ -98,7 +98,7 @@ namespace TraceEventTests
         public void SequenceBounds_DoNotCrossProtectedEndsAndInvalidMatchersThrow()
         {
             var fixture = new SequenceFixture("RHTS");
-            AsyncProfilerCallStackTransformContext context = fixture.Context();
+            AsyncProfilerCallStackTransformState context = fixture.Context();
             Assert.False(context.MatchRuntimeSequence(AsyncProfilerRuntimeSequenceKind.TaskCompletionChain, 0, 3).IsMatch);
             Assert.Equal(0, context.MatchRuntimeSequence(AsyncProfilerRuntimeSequenceKind.TaskCompletionChain, 4, 4).Length);
             Assert.Throws<ArgumentOutOfRangeException>(() =>
@@ -139,8 +139,8 @@ namespace TraceEventTests
             public AsyncProfilerCallStackDiagnostics Diagnostics { get; } = new AsyncProfilerCallStackDiagnostics();
             public string RemainingPattern => new string(Frames.Select(frame => m_pattern[(int)frame.CodeAddress]).ToArray());
 
-            public AsyncProfilerCallStackTransformContext Context(Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile> runtimeProfileResolver = null) =>
-                new AsyncProfilerCallStackTransformContext(null, new List<AsyncProfilerCallStack>(), 1,
+            public AsyncProfilerCallStackTransformState Context(Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile> runtimeProfileResolver = null) =>
+                new AsyncProfilerCallStackTransformState(null, new List<AsyncProfilerCallStack>(), 1,
                     ca => m_pattern[(int)ca] == 'I' || m_pattern[(int)ca] == 'D'
                         ? new AsyncProfilerCallStackStitchBoundaryInfo(AsyncProfilerCallStackStitchBoundaryKind.V2DispatchContinuation, -1)
                         : AsyncProfilerCallStackStitchBoundaryInfo.None,
@@ -156,7 +156,7 @@ namespace TraceEventTests
             }
 
             protected override AsyncProfilerRuntimeSequenceMatch MatchTaskCompletionChain(
-                AsyncProfilerCallStackTransformContext context, int start, int end) =>
+                AsyncProfilerCallStackTransformState context, int start, int end) =>
                 AsyncProfilerRuntimeSequenceMatch.Match(end - start + 1);
         }
     }
@@ -165,7 +165,7 @@ namespace TraceEventTests
     internal sealed class AsyncProfilerExtendedCompletionRuntimeProfile : AsyncProfilerRuntimeRuleProfile
     {
         public AsyncProfilerExtendedCompletionRuntimeProfile(
-            Func<AsyncProfilerCallStackTransformContext, AsyncProfilerStitchedFrame, string> methodName = null)
+            Func<AsyncProfilerCallStackTransformState, AsyncProfilerStitchedFrame, string> methodName = null)
             : base("Test-only extended completion layout")
         {
             m_methodName = methodName ??
@@ -181,7 +181,7 @@ namespace TraceEventTests
                 : base.ClassifySynchronousFrame(frameName, isHostModule);
 
         protected override AsyncProfilerRuntimeSequenceMatch MatchTaskCompletionPair(
-            AsyncProfilerCallStackTransformContext context, int start, int end)
+            AsyncProfilerCallStackTransformState context, int start, int end)
         {
             if (start == end || !IsKind(context.Frames[start], AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskRunContinuations))
             {
@@ -196,7 +196,7 @@ namespace TraceEventTests
         }
 
         protected override AsyncProfilerRuntimeSequenceMatch MatchTaskCompletionChain(
-            AsyncProfilerCallStackTransformContext context, int start, int end)
+            AsyncProfilerCallStackTransformState context, int start, int end)
         {
             AsyncProfilerRuntimeSequenceMatch match = base.MatchTaskCompletionChain(context, start, end);
             return match.Length == 0 && start < end &&
@@ -206,7 +206,7 @@ namespace TraceEventTests
         }
 
         protected override AsyncProfilerRuntimeSequenceMatch MatchV2CompletionHandoff(
-            AsyncProfilerCallStackTransformContext context, int start, int end)
+            AsyncProfilerCallStackTransformState context, int start, int end)
         {
             AsyncProfilerRuntimeSequenceMatch match = base.MatchV2CompletionHandoff(context, start, end);
             return match.Length == 0 && end - start >= 2 &&
@@ -221,7 +221,7 @@ namespace TraceEventTests
         private static bool IsKind(AsyncProfilerStitchedFrame frame, AsyncProfilerStitchSyncFrameKind kind) =>
             frame.Origin == AsyncProfilerStitchedFrameOrigin.Sync && frame.SyncFrameKind == kind;
 
-        private readonly Func<AsyncProfilerCallStackTransformContext, AsyncProfilerStitchedFrame, string> m_methodName;
+        private readonly Func<AsyncProfilerCallStackTransformState, AsyncProfilerStitchedFrame, string> m_methodName;
 
         #endregion
     }

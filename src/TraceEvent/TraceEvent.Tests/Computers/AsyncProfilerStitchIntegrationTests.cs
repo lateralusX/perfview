@@ -2,6 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics.Tracing;
 using System.IO;
@@ -28,6 +29,223 @@ namespace TraceEventTests
     /// </summary>
     public class AsyncProfilerStitchIntegrationTests
     {
+        [Fact]
+        public void PublicBuilder_TransformsRootsAndIncrementalLookup()
+        {
+            Frame work = Frame.App("Scenario.Work");
+            Frame current = Frame.App("Scenario.CurrentAsync");
+            Frame parent = Frame.App("Scenario.ParentAsync");
+            var scenario = new StitchScenario
+            {
+                Sync = new[] { work, current, Frame.V2Wrapper(0), Frame.V2InstrumentedDispatch,
+                    Frame.V2Dispatch, Frame.ThreadPoolDispatch, Frame.WorkerThreadStart },
+                Async = new[] { current, parent },
+                ExpectedStitched = new[] { work, current, parent, Frame.ThreadPoolDispatch, Frame.WorkerThreadStart },
+                ExpectedDiagnostics = new CallStackDiagnosticsExpectation
+                {
+                    SegmentsProcessed = 2,
+                    V2PlumbingFramesCollapsed = 4,
+                },
+                AssertPublicApi = (log, path) =>
+                {
+                    var query = new AsyncProfilerCallStackComputer(log);
+                    var output = new MutableTraceEventStackSource(log);
+                    var builder = new AsyncProfilerCallStackSourceBuilder(output);
+                    TraceEvent data = log.Events.First(e => e.CallStackIndex() != CallStackIndex.Invalid).Clone();
+#pragma warning disable CS0618
+                    long timestampQpc = data.TimeStampQPC;
+#pragma warning restore CS0618
+                    Assert.Throws<ArgumentNullException>(() => new AsyncProfilerCallStackComputer(null));
+                    Assert.Throws<ArgumentNullException>(() => new AsyncProfilerCallStackSourceBuilder(null));
+                    Assert.Throws<ArgumentNullException>(() => query.GetCallStacks(null));
+                    Assert.Throws<ArgumentNullException>(() => builder.GetCallStack((TraceEvent)null));
+                    using (var otherLog = new TraceLog(path))
+                    {
+                        Assert.Throws<ArgumentException>(() => new AsyncProfilerCallStackComputer(otherLog).GetCallStacks(data));
+                        Assert.Throws<ArgumentException>(() =>
+                            new AsyncProfilerCallStackSourceBuilder(new MutableTraceEventStackSource(otherLog)).GetCallStack(data));
+                    }
+
+                    IReadOnlyList<AsyncProfilerCallStack> segments = query.GetCallStacks(data);
+                    AsyncProfilerCallStack retained = Assert.Single(segments);
+                    AsyncProfilerCallStackFrame captured = retained.CapturedFrames[0];
+                    Assert.Equal(retained.Frames.MethodIdAt(0), captured.CapturedInstructionPointer);
+                    Assert.Equal(retained.Frames.CodeAddressAt(0), captured.CodeAddress);
+                    Assert.Null(captured.CapturedState);
+                    Assert.False(captured.IsPhysical);
+                    Assert.False(captured.IsParentContext);
+                    Assert.Empty(query.GetCallStacks(data.ProcessID, (ulong)data.ThreadID, retained.EndQpc));
+                    Assert.Equal(captured.CapturedInstructionPointer, retained.CapturedFrames[0].CapturedInstructionPointer);
+
+                    var order = new List<int>();
+                    builder.Transforms.Add(context =>
+                    {
+                        order.Add(1);
+                        Assert.Equal(timestampQpc, context.TimestampQpc);
+                        Assert.Same(log, context.TraceLog);
+                        Assert.Single(context.Segments);
+                        Assert.DoesNotContain(context.Frames, frame =>
+                            frame.CodeAddress != CodeAddressIndex.Invalid &&
+                            log.CodeAddresses[frame.CodeAddress].FullMethodName.Contains("Continuation_Wrapper_"));
+                        Assert.Throws<InvalidOperationException>(() => builder.GetCallStack(data));
+                        context.Frames.Insert(0, new AsyncProfilerCallStackFrame("Custom label"));
+                    });
+                    builder.Transforms.Add(context =>
+                    {
+                        order.Add(2);
+                        Assert.Equal("Custom label", context.Frames[0].DisplayName);
+                        Assert.False(context.Frames[0].IsPhysical);
+                        Assert.Equal(CodeAddressIndex.Invalid, context.Frames[0].CodeAddress);
+                    });
+                    StackSourceCallStackIndex first = builder.GetCallStack(data);
+                    Assert.Equal(new[] { 1, 2 }, order);
+                    Assert.Equal("Custom label", output.GetFrameName(output.GetFrameIndex(first), false));
+                    Assert.Equal(0, output.SampleIndexLimit);
+                    builder.Transforms.ClearCustomTransforms();
+                    var root = output.Interner.CallStackIntern(output.Interner.FrameIntern("Custom root"),
+                        StackSourceCallStackIndex.Invalid);
+                    var next = builder.GetCallStack(data.CallStackIndex(), timestampQpc, root);
+                    Assert.Equal(new[] { 1, 2 }, order);
+                    Assert.NotEqual("Custom label", output.GetFrameName(output.GetFrameIndex(next), false));
+                    while (output.GetCallerIndex(next) != StackSourceCallStackIndex.Invalid)
+                    {
+                        next = output.GetCallerIndex(next);
+                    }
+                    Assert.Equal("Custom root", output.GetFrameName(output.GetFrameIndex(next), false));
+                    Assert.Equal("Custom label", output.GetFrameName(output.GetFrameIndex(first), false));
+                    var fallback = builder.GetCallStack(data.CallStackIndex(), retained.EndQpc);
+                    Assert.Equal(output.GetCallStackThread(data.CallStackIndex(), data.Thread()), fallback);
+                    Assert.Equal(StackSourceCallStackIndex.Invalid,
+                        builder.GetCallStack(CallStackIndex.Invalid, timestampQpc));
+                    Assert.Throws<ArgumentOutOfRangeException>(() => builder.GetCallStack((CallStackIndex)int.MaxValue, timestampQpc));
+                    Assert.Throws<ArgumentOutOfRangeException>(() =>
+                        builder.GetCallStack(data.CallStackIndex(), timestampQpc, (StackSourceCallStackIndex)int.MaxValue));
+                    output.AddSample(new StackSourceSample(output) { StackIndex = first, Metric = 3, TimeRelativeMSec = 2 });
+                    output.AddSample(new StackSourceSample(output) { StackIndex = fallback, Metric = 7, TimeRelativeMSec = 1 });
+                    output.DoneAddingSamples();
+                    Assert.Equal("Custom label", output.GetFrameName(output.GetFrameIndex(first), false));
+                    Assert.Throws<InvalidOperationException>(() => builder.GetCallStack(data));
+                    Assert.Single(query.GetCallStacks(data));
+                },
+            };
+            scenario.AssertProductionStitch();
+        }
+
+        [Fact]
+        public void PublicBuilder_CompletionObservationsSurviveReusedCallbackSegments()
+        {
+            Frame current = Frame.App("Scenario.CurrentAsync");
+            Frame parent = Frame.App("Scenario.ParentAsync");
+            var scenario = new StitchScenario
+            {
+                Sync = new[] { current, Frame.V2Wrapper(0), Frame.V2InstrumentedDispatch,
+                    Frame.V2Dispatch, Frame.ThreadPoolDispatch, Frame.WorkerThreadStart },
+                Async = new[] { current, parent },
+                MethodCompletions = 1,
+                MethodCompletionQpc = 100_035,
+                ExpectedStitched = new[] { current, parent, Frame.ThreadPoolDispatch, Frame.WorkerThreadStart },
+                ExpectedDiagnostics = new CallStackDiagnosticsExpectation
+                {
+                    SegmentsProcessed = 2,
+                    V2PlumbingFramesCollapsed = 4,
+                },
+                AssertPublicApi = (log, path) =>
+                {
+                    var query = new AsyncProfilerCallStackComputer(log);
+                    var builder = new AsyncProfilerCallStackSourceBuilder(new MutableTraceEventStackSource(log));
+                    int callbacks = 0;
+                    builder.Transforms.Add(context =>
+                    {
+                        AsyncProfilerCallStack activation = Assert.Single(context.Segments);
+                        Assert.True(activation.MethodCompletionObserved);
+                        Assert.False(activation.ExceptionCompletionObserved);
+                        Assert.Equal(0, activation.GetMethodCompletedFrameCount(context.TimestampQpc));
+                        Assert.Contains(context.Frames, frame => ReferenceEquals(frame.Context, activation));
+                        callbacks++;
+                    });
+                    foreach (TraceEvent sample in log.Events.Where(e => e.CallStackIndex() != CallStackIndex.Invalid))
+                    {
+                        AsyncProfilerCallStack activation = Assert.Single(query.GetCallStacks(sample));
+                        Assert.True(activation.MethodCompletionObserved);
+                        Assert.False(activation.ExceptionCompletionObserved);
+                        Assert.NotEqual(StackSourceCallStackIndex.Invalid, builder.GetCallStack(sample));
+                    }
+                    Assert.Equal(2, callbacks);
+                },
+            };
+            scenario.AssertProductionStitch();
+        }
+
+        [Fact]
+        public void PublicCallbacks_PrepareCompletionObservationsOncePerSample()
+        {
+            Frame current = Frame.App("Scenario.CurrentAsync");
+            Frame parent = Frame.App("Scenario.ParentAsync");
+            var scenario = new StitchScenario
+            {
+                Sync = new[] { current, Frame.V2Wrapper(0), Frame.V2InstrumentedDispatch,
+                    Frame.V2Dispatch, Frame.ThreadPoolDispatch, Frame.WorkerThreadStart },
+                Async = new[] { current, parent },
+                ExpectedStitched = new[] { current, parent, Frame.ThreadPoolDispatch, Frame.WorkerThreadStart },
+                ExpectedDiagnostics = new CallStackDiagnosticsExpectation
+                {
+                    SegmentsProcessed = 2,
+                    V2PlumbingFramesCollapsed = 4,
+                },
+                AssertPublicApi = (log, path) =>
+                {
+                    TraceEvent sample = log.Events.First(e => e.CallStackIndex() != CallStackIndex.Invalid);
+                    var segments = new CountingCallStacks(new AsyncProfilerCallStackComputer(log).GetCallStacks(sample));
+                    var pipeline = new AsyncProfilerCallStackTransformPipeline { EnableNormalization = false };
+                    var transforms = new AsyncCallStackTransforms(pipeline);
+                    var state = new AsyncProfilerCallStackTransformState(
+                        log, segments, 0, _ => AsyncProfilerCallStackStitchBoundaryInfo.None,
+                        new AsyncProfilerCallStackDiagnostics(), new List<AsyncProfilerStitchedFrame>(),
+                        runtimeProfile: AsyncProfilerRuntimeRuleProfile.Common);
+                    segments.ReadCount = 0;
+                    pipeline.ApplyInPlace(state);
+                    Assert.Equal(0, segments.ReadCount);
+
+                    int callbacks = 0;
+                    transforms.Add(_ => callbacks++);
+                    transforms.Add(_ => callbacks++);
+                    pipeline.ApplyInPlace(state);
+                    Assert.Equal(segments.Count, segments.ReadCount);
+                    Assert.Equal(2, callbacks);
+
+                    segments.ReadCount = 0;
+                    transforms.Add(_ => callbacks++);
+                    pipeline.ApplyInPlace(state);
+                    Assert.Equal(segments.Count, segments.ReadCount);
+                    Assert.Equal(5, callbacks);
+
+                    segments.ReadCount = 0;
+                    transforms.ClearCustomTransforms();
+                    pipeline.ApplyInPlace(state);
+                    Assert.Equal(0, segments.ReadCount);
+                    Assert.Equal(5, callbacks);
+
+                    transforms.Add(_ => callbacks++);
+                    pipeline.ApplyInPlace(state);
+                    Assert.Equal(segments.Count, segments.ReadCount);
+                    Assert.Equal(6, callbacks);
+                },
+            };
+            scenario.AssertProductionStitch();
+        }
+
+        [Fact]
+        public void PublicBuilder_NoAsyncIndex_PreservesPhysicalInput()
+        {
+            var scenario = new StitchScenario
+            {
+                Sync = new[] { Frame.App("Scenario.Work"), Frame.ThreadPoolDispatch, Frame.WorkerThreadStart },
+                Async = Array.Empty<Frame>(),
+                ExpectedStitched = Array.Empty<Frame>(),
+            };
+            scenario.AssertWithoutAsyncIndex();
+        }
+
         [Theory]
         [InlineData((int)AsyncCallstackKind.RuntimeAsync, false)]
         [InlineData((int)AsyncCallstackKind.RuntimeAsync, true)]
@@ -677,7 +895,7 @@ namespace TraceEventTests
         [Theory]
         [InlineData(false)]
         [InlineData(true)]
-        public void RuntimeAsync_ParentContexts_RendersHistoricalParentMetadata(bool enableFrameAnnotations)
+        public void RuntimeAsync_ParentContexts_RendersParentContextMetadata(bool enableFrameAnnotations)
         {
             Frame current = Frame.App("Scenario.ChildAsync");
             Frame childParent = Frame.App("Scenario.ChildParentAsync");
@@ -735,7 +953,7 @@ namespace TraceEventTests
                 },
                 AssertStitchedStackSource = stackSource =>
                 {
-                    bool foundHistoricalParent = false;
+                    bool foundParentContext = false;
                     bool foundActiveAsync = false;
                     stackSource.ForEach(sample =>
                     {
@@ -751,7 +969,7 @@ namespace TraceEventTests
                                 continue;
                             }
 
-                            if (info.IsHistoricalParent || enableFrameAnnotations)
+                            if (info.IsParentContext || enableFrameAnnotations)
                             {
                                 Assert.StartsWith("[Async V2] ", name);
                                 Assert.DoesNotContain("![Async V2] ", name);
@@ -760,11 +978,11 @@ namespace TraceEventTests
                             {
                                 Assert.DoesNotContain("[Async V2] ", name);
                             }
-                            foundHistoricalParent |= info.IsHistoricalParent;
-                            foundActiveAsync |= !info.IsHistoricalParent;
+                            foundParentContext |= info.IsParentContext;
+                            foundActiveAsync |= !info.IsParentContext;
                         }
                     });
-                    Assert.True(foundHistoricalParent);
+                    Assert.True(foundParentContext);
                     Assert.True(foundActiveAsync);
                 },
             };
@@ -831,7 +1049,7 @@ namespace TraceEventTests
                 AssertTransformContext = context =>
                 {
                     AsyncProfilerStitchedFrame[] parents = context.Frames.Where(frame =>
-                        frame.ContextKind == AsyncProfilerStitchedFrameContextKind.HistoricalParent).ToArray();
+                        frame.ContextKind == AsyncProfilerStitchedFrameContextKind.ParentContext).ToArray();
                     Assert.Equal(new[] { 2, 3 }, parents.Select(frame => frame.SegmentFrameIndex));
                     Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncContextParentCurrent, parents[0].Origin);
                     Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncContextParent, parents[1].Origin);
@@ -844,7 +1062,7 @@ namespace TraceEventTests
                     {
                         var frameIndex = (StackSourceFrameIndex)i;
                         if (!stackSource.TryGetAsyncProfilerCallStackFrameInfo(
-                            frameIndex, out AsyncProfilerCallStackSourceFrameInfo info) || !info.IsHistoricalParent)
+                            frameIndex, out AsyncProfilerCallStackSourceFrameInfo info) || !info.IsParentContext)
                         {
                             continue;
                         }
@@ -857,7 +1075,7 @@ namespace TraceEventTests
                         Assert.Equal(info.CodeAddress, stackSource.GetFrameCodeAddress(frameIndex));
                         Assert.Equal(stackSource.TraceLog.CodeAddresses[info.CodeAddress].Address, info.MethodId);
                         string name = stackSource.GetFrameName(frameIndex, false);
-                        if (info.IsHistoricalParentCurrent)
+                        if (info.IsParentContextCurrent)
                         {
                             runningParents++;
                             Assert.Contains(ownerCurrent.SymbolName,
@@ -954,7 +1172,7 @@ namespace TraceEventTests
                             }
                             Assert.True(stackSource.TryGetAsyncProfilerCallStackFrameInfo(
                                 frameIndex, out AsyncProfilerCallStackSourceFrameInfo info));
-                            Assert.False(info.IsHistoricalParent);
+                            Assert.False(info.IsParentContext);
                         }
                     });
                     Assert.True(foundAnnotatedCurrent);
@@ -1012,7 +1230,7 @@ namespace TraceEventTests
                     stackSource.ForEach(sample =>
                     {
                         StackSourceFrameIndex activeParent = StackSourceFrameIndex.Invalid;
-                        StackSourceFrameIndex historicalParent = StackSourceFrameIndex.Invalid;
+                        StackSourceFrameIndex parentContext = StackSourceFrameIndex.Invalid;
                         for (StackSourceCallStackIndex stack = sample.StackIndex;
                              stack != StackSourceCallStackIndex.Invalid;
                              stack = stackSource.GetCallerIndex(stack))
@@ -1025,9 +1243,9 @@ namespace TraceEventTests
                             {
                                 continue;
                             }
-                            if (info.IsHistoricalParent)
+                            if (info.IsParentContext)
                             {
-                                historicalParent = frameIndex;
+                                parentContext = frameIndex;
                             }
                             else
                             {
@@ -1035,11 +1253,11 @@ namespace TraceEventTests
                             }
                         }
                         Assert.NotEqual(StackSourceFrameIndex.Invalid, activeParent);
-                        Assert.NotEqual(StackSourceFrameIndex.Invalid, historicalParent);
-                        Assert.NotEqual(activeParent, historicalParent);
+                        Assert.NotEqual(StackSourceFrameIndex.Invalid, parentContext);
+                        Assert.NotEqual(activeParent, parentContext);
                         Assert.Equal(
                             stackSource.GetFrameName(activeParent, false),
-                            stackSource.GetFrameName(historicalParent, false));
+                            stackSource.GetFrameName(parentContext, false));
                     });
                 },
             };
@@ -1459,7 +1677,7 @@ namespace TraceEventTests
                         Assert.False(info.IsCurrent);
                         Assert.False(info.IsCompleting);
                         Assert.False(info.IsStateMachineBoxCarrier);
-                        Assert.False(info.IsHistoricalParent);
+                        Assert.False(info.IsParentContext);
                         Assert.NotEqual(0UL, info.MethodId);
                         Assert.Equal(info.CodeAddress, stackSource.GetFrameCodeAddress(frameIndex));
                         string name = stackSource.GetFrameName(frameIndex, false);
@@ -1527,7 +1745,7 @@ namespace TraceEventTests
         [Theory]
         [InlineData(false)]
         [InlineData(true)]
-        public void RuntimeAsync_WrapperIsSampledLeaf_HistoricalParentContextsRequireDispatchTarget(bool targetKnown)
+        public void RuntimeAsync_WrapperIsSampledLeaf_ParentContextContextsRequireDispatchTarget(bool targetKnown)
         {
             Frame target = Frame.App("Scenario.InnerAsync");
             Frame parent = Frame.App("Scenario.ParentAsync");
@@ -3320,6 +3538,7 @@ namespace TraceEventTests
                 SkipNormalStackAssertion = true,
                 ExpectedStitched = new[] { completing, running, captured, target, Frame.ThreadPoolDispatch, Frame.WorkerThreadStart },
                 ExpectedDiagnostics = new CallStackDiagnosticsExpectation { SegmentsProcessed = 2, V1CompletionTailUsed = 2 },
+                VerifyPublicBuilder = false, // This emitter test deliberately fabricates roles through internal factories.
                 AssertTransformContext = context =>
                 {
                     // Exercise emitter cache separation with consumer-added roles sharing the same raw identity.
@@ -3750,7 +3969,7 @@ namespace TraceEventTests
                     frames.InsertRange(10, frames.Skip(6).Take(4).ToArray());
                 }
                 var diagnostics = new AsyncProfilerCallStackDiagnostics { SegmentsProcessed = context.Segments.Count };
-                new AsyncProfilerCallStackTransformPipeline().ApplyInPlace(new AsyncProfilerCallStackTransformContext(
+                new AsyncProfilerCallStackTransformPipeline().ApplyInPlace(new AsyncProfilerCallStackTransformState(
                     context.TraceLog, context.Segments, context.TimestampQpc, context.ClassifyBoundary,
                     diagnostics, frames));
 
@@ -5109,7 +5328,7 @@ namespace TraceEventTests
                             continue;
                         }
                         targets++;
-                        Assert.False(info.IsHistoricalParent);
+                        Assert.False(info.IsParentContext);
                         Assert.Equal(AsyncCallstackKind.StateMachineAsync, info.Kind);
                         Assert.Equal(1, info.State);
                         Assert.NotEqual(CodeAddressIndex.Invalid, info.CodeAddress);
@@ -5400,7 +5619,7 @@ namespace TraceEventTests
                     }
                 }
                 AsyncProfilerCallStackSourceFrameInfo target = Assert.Single(targets);
-                Assert.False(target.IsHistoricalParent);
+                Assert.False(target.IsParentContext);
                 Assert.Equal(AsyncCallstackKind.StateMachineAsync, target.Kind);
                 Assert.Equal(0, target.State);
             };
@@ -5508,7 +5727,7 @@ namespace TraceEventTests
                     AsyncProfilerCallStack owner = unresolved ? frame.Context : null;
                     if (missingEvidence == "different-activation")
                     {
-                        owner = context.TraceLog.GetAsyncProfilerCallStacks(1234, 5000, context.TimestampQpc)[0];
+                        owner = new AsyncProfilerCallStackComputer(context.TraceLog).GetCallStacks(1234, 5000, context.TimestampQpc)[0];
                         Assert.NotSame(frame.Context, owner);
                     }
                     frames[index] = AsyncProfilerStitchedFrame.CreateSync(
@@ -5535,7 +5754,7 @@ namespace TraceEventTests
                     EnableNormalization = false,
                     EnableInfrastructureCleanup = true,
                 };
-                pipeline.ApplyInPlace(new AsyncProfilerCallStackTransformContext(
+                pipeline.ApplyInPlace(new AsyncProfilerCallStackTransformState(
                     missingEvidence == "missing-trace" ? null : context.TraceLog,
                     context.Segments, context.TimestampQpc, context.ClassifyBoundary, diagnostics, frames));
 
@@ -5710,7 +5929,7 @@ namespace TraceEventTests
                 AsyncProfilerCallStack owner = original.Context;
                 if (obstruction == "different-activation")
                 {
-                    owner = context.TraceLog.GetAsyncProfilerCallStacks(1234, 5000, context.TimestampQpc)[0];
+                    owner = new AsyncProfilerCallStackComputer(context.TraceLog).GetCallStacks(1234, 5000, context.TimestampQpc)[0];
                     Assert.NotSame(original.Context, owner);
                 }
                 frames[0] = obstruction == "physical-anchor"
@@ -5729,7 +5948,7 @@ namespace TraceEventTests
                     EnableNormalization = false,
                     EnableInfrastructureCleanup = true,
                 };
-                pipeline.ApplyInPlace(new AsyncProfilerCallStackTransformContext(
+                pipeline.ApplyInPlace(new AsyncProfilerCallStackTransformState(
                     context.TraceLog, context.Segments, context.TimestampQpc,
                     context.ClassifyBoundary, diagnostics, frames));
 
@@ -6020,7 +6239,7 @@ namespace TraceEventTests
         }
 
         [Fact]
-        public void ProfilerEnvelope_PreservesHistoricalParentContexts()
+        public void ProfilerEnvelope_PreservesParentContextContexts()
         {
             StitchScenario scenario = CreateProfilerEnvelopeScenario();
             Frame owner = Frame.App("Scenario.OwnerAsync");
@@ -6316,7 +6535,7 @@ namespace TraceEventTests
                     Assert.DoesNotContain(context.Frames, frame =>
                         frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent);
                     Assert.Single(context.Frames.Where(frame =>
-                        frame.ContextKind == AsyncProfilerStitchedFrameContextKind.HistoricalParent));
+                        frame.ContextKind == AsyncProfilerStitchedFrameContextKind.ParentContext));
                 },
             };
 
@@ -7268,6 +7487,30 @@ namespace TraceEventTests
             return host;
         }
 
+        private sealed class CountingCallStacks : IReadOnlyList<AsyncProfilerCallStack>
+        {
+            public CountingCallStacks(IReadOnlyList<AsyncProfilerCallStack> callStacks) { m_callStacks = callStacks; }
+            public int Count => m_callStacks.Count;
+            public int ReadCount { get; set; }
+            public AsyncProfilerCallStack this[int index]
+            {
+                get
+                {
+                    ReadCount++;
+                    return m_callStacks[index];
+                }
+            }
+            public IEnumerator<AsyncProfilerCallStack> GetEnumerator()
+            {
+                for (int i = 0; i < Count; i++)
+                {
+                    yield return this[i];
+                }
+            }
+            IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+            private readonly IReadOnlyList<AsyncProfilerCallStack> m_callStacks;
+        }
+
         private sealed class StitchScenario
         {
             private const int ProcessId = 1234;
@@ -7322,7 +7565,9 @@ namespace TraceEventTests
             public bool VerifyRemovingParentContextRemovesPresentation { get; set; }
             public Action<MutableTraceEventStackSource> AssertStitchedStackSource { get; set; }
             public Action<EmittedStack, EmittedStack> AssertOutputs { get; set; }
-            public Action<AsyncProfilerCallStackTransformContext> AssertTransformContext { get; set; }
+            public Action<AsyncProfilerCallStackTransformState> AssertTransformContext { get; set; }
+            public Action<TraceLog, string> AssertPublicApi { get; set; }
+            public bool VerifyPublicBuilder { get; set; } = true;
             public Action<TraceLog> ConfigureTraceLog { get; set; } =
                 log => ConfigureCapturedRuntime(log, "11.0.0");
             public Func<TraceModuleFile, AsyncProfilerRuntimeRuleProfile> RuntimeProfileForModule { get; set; }
@@ -7345,17 +7590,26 @@ namespace TraceEventTests
                         ConfigureTraceLog?.Invoke(traceLog);
                         AsyncSegment[] expectedSegments = GetAsyncSegments();
                         long asyncProbeQpc = AsyncStartQpc + expectedSegments.Length;
-                        IReadOnlyList<AsyncProfilerCallStack> segments = traceLog.GetAsyncProfilerCallStacks(ProcessId, OsThreadId, asyncProbeQpc);
+                        IReadOnlyList<AsyncProfilerCallStack> segments = new AsyncProfilerCallStackComputer(traceLog).GetCallStacks(ProcessId, OsThreadId, asyncProbeQpc);
                         Assert.Equal(expectedSegments.Length, segments.Count);
                         for (int i = 0; i < expectedSegments.Length; i++)
                         {
                             Assert.Equal(Labels(expectedSegments[i].Frames),
                                 AsyncFrameLabels(traceLog, segments[i].Frames, expectedSegments[i]));
+                            Assert.Equal(segments[i].Frames.FrameCount, segments[i].CapturedFrames.Count);
+                            for (int j = 0; j < segments[i].CapturedFrames.Count; j++)
+                            {
+                                AsyncProfilerCallStackFrame frame = segments[i].CapturedFrames[j];
+                                Assert.Equal(segments[i].Frames.MethodIdAt(j), frame.CapturedInstructionPointer);
+                                Assert.Equal(segments[i].Frames.CodeAddressAt(j), frame.CodeAddress);
+                                Assert.Equal(segments[i].Frames.Kind == AsyncCallstackKind.StateMachineAsync
+                                    ? segments[i].Frames.FrameStateAt(j) : (int?)null, frame.CapturedState);
+                            }
                         }
                         if (AddForeignProcessActiveSegment)
                         {
-                            Assert.Empty(traceLog.GetAsyncProfilerCallStacks(ProcessId, OsThreadId, SampleQpc));
-                            Assert.Single(traceLog.GetAsyncProfilerCallStacks(ForeignProcessId, OsThreadId, SampleQpc));
+                            Assert.Empty(new AsyncProfilerCallStackComputer(traceLog).GetCallStacks(ProcessId, OsThreadId, SampleQpc));
+                            Assert.Single(new AsyncProfilerCallStackComputer(traceLog).GetCallStacks(ForeignProcessId, OsThreadId, SampleQpc));
                         }
 
                         var syncStackSource = new MutableTraceEventStackSource(traceLog)
@@ -7417,6 +7671,11 @@ namespace TraceEventTests
                         Assert.Equal(Labels(ExpectedStitched), stitchedOutput.ScenarioFrames);
                         AssertStitchedStackSource?.Invoke(stitchedStackSource);
                         AssertOutputs?.Invoke(syncOutput, stitchedOutput);
+                        AssertPublicApi?.Invoke(traceLog, etlxPath);
+                        if (RuntimeProfileForModule == null && VerifyPublicBuilder)
+                        {
+                            AssertPublicBuilderEquivalence(traceLog);
+                        }
 
                         Assert.Equal(syncOutput.RootFrames, stitchedOutput.RootFrames);
                         Assert.True(stitchedComputer.AsyncCallStacksActive);
@@ -7435,10 +7694,16 @@ namespace TraceEventTests
                                     GroupByStartStopActivity = GroupByStartStopActivity,
                                 };
                             filteredContextComputer.AsyncCallStackTransforms.EnableParentContexts = true;
-                            filteredContextComputer.AsyncProfilerCallStackTransformPipeline.Add(context =>
-                                context.Frames.RemoveAll(frame =>
-                                    frame.ContextKind ==
-                                        AsyncProfilerStitchedFrameContextKind.HistoricalParent));
+                            filteredContextComputer.AsyncCallStackTransforms.Add(context =>
+                            {
+                                for (int i = context.Frames.Count - 1; i >= 0; i--)
+                                {
+                                    if (context.Frames[i].IsParentContext)
+                                    {
+                                        context.Frames.RemoveAt(i);
+                                    }
+                                }
+                            });
                             filteredContextComputer.GenerateThreadTimeStacks(
                                 filteredContextStackSource);
 
@@ -7539,7 +7804,7 @@ namespace TraceEventTests
                         {
                             Assert.Equal(
                                 expectedSegments.Length,
-                                traceLog.GetAsyncProfilerCallStacks(ProcessId, OsThreadId, asyncProbeQpc).Count);
+                                new AsyncProfilerCallStackComputer(traceLog).GetCallStacks(ProcessId, OsThreadId, asyncProbeQpc).Count);
                             Assert.True(traceLog.IsAsyncProfilerCallStacksLoaded);
                         }
 
@@ -7553,8 +7818,16 @@ namespace TraceEventTests
                                 IncludeEventSourceEvents = IncludeEventSourceEvents,
                                 GroupByStartStopActivity = GroupByStartStopActivity,
                             };
-                            filteredComputer.AsyncProfilerCallStackTransformPipeline.Add(context =>
-                                context.Frames.RemoveAll(frame => !IncludeFilteredFrame(traceLog, frame)));
+                            filteredComputer.AsyncCallStackTransforms.Add(context =>
+                            {
+                                for (int i = context.Frames.Count - 1; i >= 0; i--)
+                                {
+                                    if (!IncludeFilteredFrame(traceLog, context.Frames[i]))
+                                    {
+                                        context.Frames.RemoveAt(i);
+                                    }
+                                }
+                            });
                             filteredComputer.GenerateThreadTimeStacks(filteredStackSource);
                             EmittedStack filteredOutput = ReadSingleStack(filteredStackSource);
                             Assert.Equal(Labels(ExpectedFilteredFrames()), filteredOutput.ScenarioFrames);
@@ -7576,7 +7849,73 @@ namespace TraceEventTests
                 }
             }
 
-            private byte[] BuildNettrace()
+            public void AssertWithoutAsyncIndex()
+            {
+                string path = Path.Combine(Path.GetTempPath(), $"asyncprofiler_public_{Guid.NewGuid():N}.nettrace");
+                string etlxPath = null;
+                try
+                {
+                    File.WriteAllBytes(path, BuildNettrace(includeAsyncData: false));
+                    etlxPath = TraceLog.CreateFromEventPipeDataFile(path);
+                    using (var log = new TraceLog(etlxPath))
+                    {
+                        Assert.Null(log.AsyncProfilerCallStacks);
+                        var query = new AsyncProfilerCallStackComputer(log);
+                        var output = new MutableTraceEventStackSource(log);
+                        var builder = new AsyncProfilerCallStackSourceBuilder(output);
+                        builder.Transforms.Add(context => throw new InvalidOperationException("Fallback must not run transforms."));
+                        foreach (TraceEvent data in log.Events.Where(e => e.CallStackIndex() != CallStackIndex.Invalid))
+                        {
+                            Assert.Empty(query.GetCallStacks(data));
+                            Assert.Equal(output.GetCallStackThread(data.CallStackIndex(), data.Thread()), builder.GetCallStack(data));
+                        }
+                    }
+                }
+                finally
+                {
+                    File.Delete(path);
+                    if (etlxPath != null)
+                    {
+                        File.Delete(etlxPath);
+                    }
+                }
+            }
+
+            private void AssertPublicBuilderEquivalence(TraceLog log)
+            {
+                var output = new MutableTraceEventStackSource(log) { OnlyManagedCodeStacks = OnlyManagedCodeStacks };
+                var builder = new AsyncProfilerCallStackSourceBuilder(output);
+                builder.Transforms.EnableNormalization = EnableNormalization;
+                builder.Transforms.EnableInfrastructureCleanup = EnableInfrastructureCleanup;
+                builder.Transforms.EnableFrameAnnotations = EnableFrameAnnotations;
+                builder.Transforms.EnableParentContexts = EnableParentContexts;
+                int count = 0;
+                foreach (TraceEvent data in log.Events)
+                {
+#pragma warning disable CS0618
+                    long timestampQpc = data.TimeStampQPC;
+#pragma warning restore CS0618
+                    if (timestampQpc != SampleQpc && timestampQpc != SampleQpc + 1)
+                    {
+                        continue;
+                    }
+                    var stack = builder.GetCallStack(data);
+                    if (!SampleHasStack)
+                    {
+                        Assert.Equal(StackSourceCallStackIndex.Invalid, stack);
+                    }
+                    else
+                    {
+                        Assert.Equal(Labels(ExpectedStitched), ReadStack(output, stack).ScenarioFrames);
+                        Assert.Equal(stack, builder.GetCallStack(data.CallStackIndex(), timestampQpc));
+                    }
+                    count++;
+                }
+                Assert.Equal(2, count);
+                Assert.Equal(0, output.SampleIndexLimit);
+            }
+
+            private byte[] BuildNettrace(bool includeAsyncData = true)
             {
                 Dictionary<string, ModuleMapping> mappings = CreateModuleMappings();
                 Dictionary<string, ulong> addresses = _addresses = AssignAddresses(mappings);
@@ -7869,8 +8208,11 @@ namespace TraceEventTests
                         p => p.Write((int)ClrThreadSampleType.Managed));
                     w.WriteEventBlob(EventOptions(2, sequence++, SampleQpc + 1, stackId),
                         p => p.Write((int)ClrThreadSampleType.Managed));
-                    w.WriteEventBlob(EventOptions(1, sequence, StartQpc + 50),
-                        p => p.Write(AsyncEventsPayload(asyncBuffer)));
+                    if (includeAsyncData)
+                    {
+                        w.WriteEventBlob(EventOptions(1, sequence, StartQpc + 50),
+                            p => p.Write(AsyncEventsPayload(asyncBuffer)));
+                    }
                     if (foreignAsyncBuffer != null)
                     {
                         w.WriteEventBlob(EventOptions(1, ++sequence, StartQpc + 51, threadIndex: ForeignThreadStreamIndex),
@@ -8150,7 +8492,7 @@ namespace TraceEventTests
                 return ExpectedStitched.Where(frame => !filteredKeys.Contains(frame.Key));
             }
 
-            private bool IncludeFilteredFrame(TraceLog traceLog, AsyncProfilerStitchedFrame stitchedFrame)
+            private bool IncludeFilteredFrame(TraceLog traceLog, AsyncProfilerCallStackFrame stitchedFrame)
             {
                 if (stitchedFrame.CodeAddress == CodeAddressIndex.Invalid)
                 {
@@ -8170,7 +8512,7 @@ namespace TraceEventTests
                     pipeline.Add(context =>
                     {
                         Assert.Same(ExpectedRuntimeProfile, context.RuntimeProfile);
-                        var standalone = new AsyncProfilerCallStackTransformContext(context.TraceLog, context.Segments,
+                        var standalone = new AsyncProfilerCallStackTransformState(context.TraceLog, context.Segments,
                             context.TimestampQpc, context.ClassifyBoundary, new AsyncProfilerCallStackDiagnostics(),
                             new List<AsyncProfilerStitchedFrame>(context.Frames));
                         Assert.Same(ExpectedRuntimeProfile, standalone.RuntimeProfile);
@@ -8209,7 +8551,7 @@ namespace TraceEventTests
                             new AsyncProfilerStitchSyncFrame(frame.CodeAddress, frame.Method, kind, frame.BoxedStateMachineMethod),
                             frame.Context);
                     }
-                    presentation.ApplyInPlace(new AsyncProfilerCallStackTransformContext(context.TraceLog, context.Segments,
+                    presentation.ApplyInPlace(new AsyncProfilerCallStackTransformState(context.TraceLog, context.Segments,
                         context.TimestampQpc, context.ClassifyBoundary, context.Diagnostics, context.Frames, runtimeProfileResolver));
                 });
             }

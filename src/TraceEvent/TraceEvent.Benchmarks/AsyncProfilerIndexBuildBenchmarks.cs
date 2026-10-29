@@ -50,7 +50,7 @@ namespace TraceEventBenchmarks
             _manifest = new Manifest();
             _sink = new CountingSink();
 
-            var computer = new AsyncProfilerComputer();
+            var computer = new AsyncProfilerIndexBuilder();
             computer.Process(_buffer, (ProcessIndex)1);
             computer.Finish();
             _index = computer.Index;
@@ -67,7 +67,7 @@ namespace TraceEventBenchmarks
         [Benchmark]
         public int BuildIndex()
         {
-            var computer = new AsyncProfilerComputer();
+            var computer = new AsyncProfilerIndexBuilder();
             computer.Process(_buffer, (ProcessIndex)1);
             computer.Finish();
             return computer.DistinctFramesCount;
@@ -76,7 +76,7 @@ namespace TraceEventBenchmarks
         [Benchmark]
         public int BuildIndexWithDispatcherInfo()
         {
-            var computer = new AsyncProfilerComputer();
+            var computer = new AsyncProfilerIndexBuilder();
             computer.Process(_bufferWithDispatcherInfo, (ProcessIndex)1);
             computer.Finish();
             return computer.DistinctFramesCount;
@@ -230,7 +230,7 @@ namespace TraceEventBenchmarks
         [Benchmark]
         public int BuildIndex()
         {
-            var computer = new AsyncProfilerComputer();
+            var computer = new AsyncProfilerIndexBuilder();
             computer.Process(_buffer, (ProcessIndex)1);
             computer.Finish();
             return computer.DistinctFramesCount;

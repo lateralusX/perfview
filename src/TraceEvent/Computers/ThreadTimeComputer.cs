@@ -981,7 +981,7 @@ namespace Microsoft.Diagnostics.Tracing
                 return;
             }
 
-            m_asyncProfilerCallStackSourceBuilder = AsyncProfilerCallStackSourceBuilder.TryCreate(
+            m_asyncProfilerCallStackSourceBuilder = AsyncProfilerCallStackSourceBuilderCore.TryCreate(
                 m_eventLog,
                 m_outputStackSource,
                 AsyncProfilerCallStackTransformPipeline,
@@ -1569,7 +1569,7 @@ namespace Microsoft.Diagnostics.Tracing
         private MutableTraceEventStackSource m_outputStackSource; // The output source we are generating. 
         private TraceLog m_eventLog;                        // The event log associated with m_stackSource.  
         private SymbolReader m_symbolReader;
-        private AsyncProfilerCallStackSourceBuilder m_asyncProfilerCallStackSourceBuilder;
+        private AsyncProfilerCallStackSourceBuilderCore m_asyncProfilerCallStackSourceBuilder;
 
         // These are boring caches of frame names which speed things up a bit.  
         private Dictionary<double, StackSourceFrameIndex> m_nodeNameInternTable;

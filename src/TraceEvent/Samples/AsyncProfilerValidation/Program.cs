@@ -192,6 +192,7 @@ namespace AsyncProfilerValidation
             using (var events = log.Events.GetSource())
             using (var raw = new StreamWriter(Path.Combine(output, "physical-and-index.jsonl")))
             {
+                var callStackComputer = new AsyncProfilerCallStackComputer(log);
                 var parser = new SampleProfilerTraceEventParser(events);
                 parser.ThreadSample += data =>
                 {
@@ -245,7 +246,7 @@ namespace AsyncProfilerValidation
                         ThreadEndMSec = thread.EndTimeRelativeMSec,
                         CallStackIndex = (int)data.CallStackIndex(),
                         PhysicalFrames = physical,
-                        Activations = log.GetAsyncProfilerCallStacks(data).Select(a => ActivationInfo(log, a, qpc)).ToArray()
+                        Activations = callStackComputer.GetCallStacks(data).Select(a => ActivationInfo(log, a, qpc)).ToArray()
                     });
                 };
                 events.Process();
@@ -409,21 +410,21 @@ namespace AsyncProfilerValidation
 
         private static object ActivationInfo(TraceLog log, AsyncProfilerCallStack activation, long qpc)
         {
-            bool hasParent = log.TryGetParentAsyncProfilerCallStack(activation, out var parent, out long parentQpc);
+            bool hasParent = log.AsyncProfilerCallStacks.TryGetParentCallStack(activation, out var parent, out long parentQpc);
             return new
             {
                 Identity = ActivationIdentity(activation),
                 activation.ContinuationIndexBase,
                 activation.WrapperCount,
-                MethodCompletionObserved = log.AsyncProfilerMethodCompletionObserved(activation),
+                MethodCompletionObserved = log.AsyncProfilerCallStacks.MethodCompletionObserved(activation),
                 ExceptionCompletionObserved = log.AsyncProfilerCallStacks.ExceptionCompletionObserved(activation),
                 MethodCompleted = activation.GetMethodCompletedFrameCount(qpc),
                 ExceptionCompleted = activation.GetExceptionCompletedFrameCount(qpc),
                 RecordedCompleted = activation.GetCompletedFrameCount(qpc),
                 WrapperResets = activation.GetWrapperResetCount(qpc),
-                DispatcherInfo = log.GetAsyncProfilerDispatcherInfo(activation),
+                DispatcherInfo = log.AsyncProfilerCallStacks.GetDispatcherInfo(activation),
                 Parent = hasParent ? new { TimestampQpc = parentQpc, Identity = ActivationIdentity(parent) } : null,
-                Children = log.GetChildAsyncProfilerDispatcherInfos(activation).ToArray(),
+                Children = log.AsyncProfilerCallStacks.GetChildDispatcherInfos(activation).ToArray(),
                 Frames = Enumerable.Range(0, activation.Frames.FrameCount).Select(i => new
                 {
                     Ordinal = i,

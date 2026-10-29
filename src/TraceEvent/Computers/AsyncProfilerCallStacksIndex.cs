@@ -41,7 +41,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     }
 
     /// <summary>
-    /// The recorded, queryable, serializable result of <see cref="AsyncProfilerComputer"/>: an index over all
+    /// The recorded, queryable, serializable result of <see cref="AsyncProfilerIndexBuilder"/>: an index over all
     /// the per-thread <see cref="AsyncProfilerCallStack"/> runs, plus a deduplicated table of
     /// <see cref="AsyncProfilerCallStackFrames"/>.
     /// <para>
@@ -168,23 +168,23 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         /// <summary>
         /// Records that a <c>CompleteMethod</c> (normal completion) event of the given <paramref name="kind"/> was
-        /// seen in the current metadata/configuration epoch. Called by <see cref="AsyncProfilerComputer"/> as it
+        /// seen in the current metadata/configuration epoch. Called by <see cref="AsyncProfilerIndexBuilder"/> as it
         /// processes events. The stitcher selects the epoch containing an activation's start QPC, so observations
         /// from another keyword configuration cannot change that activation's completion-count policy.
         /// </summary>
-        internal void MarkMethodCompletionObserved(ProcessIndex processIndex, AsyncCallstackKind kind, long qpc)
+        internal void MarkMethodCompletionObserved(ProcessIndex processIndex, AsyncCallstackKind kind, long timestampQpc)
         {
-            FindCompletionEpoch(processIndex, qpc)?.MarkMethodObserved(kind);
+            FindCompletionEpoch(processIndex, timestampQpc)?.MarkMethodObserved(kind);
         }
 
         /// <summary>
         /// Records that an <c>Unwind</c> (exceptional completion) event of the given <paramref name="kind"/> was seen
-        /// in the stream. Called by <see cref="AsyncProfilerComputer"/> as it processes events. This uses the same
+        /// in the stream. Called by <see cref="AsyncProfilerIndexBuilder"/> as it processes events. This uses the same
         /// metadata/configuration epoch scoping as normal method-completion observation.
         /// </summary>
-        internal void MarkExceptionCompletionObserved(ProcessIndex processIndex, AsyncCallstackKind kind, long qpc)
+        internal void MarkExceptionCompletionObserved(ProcessIndex processIndex, AsyncCallstackKind kind, long timestampQpc)
         {
-            FindCompletionEpoch(processIndex, qpc)?.MarkExceptionObserved(kind);
+            FindCompletionEpoch(processIndex, timestampQpc)?.MarkExceptionObserved(kind);
         }
 
         /// <summary>Resolves an interned frames handle to its frames (null if out of range).</summary>
@@ -195,17 +195,17 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         /// <summary>
-        /// Returns the nested async call stacks active on <paramref name="thread"/> at <paramref name="qpc"/>,
-        /// ordered bottom-to-top (ascending depth). Intervals are half-open: <c>StartQpc &lt;= qpc &lt; EndQpc</c>.
+        /// Returns the nested async call stacks active on <paramref name="thread"/> at <paramref name="timestampQpc"/>,
+        /// ordered bottom-to-top (ascending depth). Intervals are half-open: <c>StartQpc &lt;= timestampQpc &lt; EndQpc</c>.
         /// Empty if the thread has no recorded async call stack covering that instant.
         /// </summary>
         /// <remarks>The returned list and activation objects are not overwritten by subsequent queries.</remarks>
-        public IReadOnlyList<AsyncProfilerCallStack> GetCallStacks(AsyncProfilerThreadKey thread, long qpc)
+        public IReadOnlyList<AsyncProfilerCallStack> GetCallStacks(AsyncProfilerThreadKey thread, long timestampQpc)
         {
             var result = new List<AsyncProfilerCallStack>();
             if (_threads.TryGetValue(thread, out ThreadCallStacks callStacks))
             {
-                callStacks.Query(qpc, result, this, cacheMaterialized: true);
+                callStacks.Query(timestampQpc, result, this, cacheMaterialized: true);
                 result.Sort(CompareDepth);
             }
             return result;
@@ -213,15 +213,15 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         /// <summary>
         /// Returns the innermost async call stack for <paramref name="dispatcherId"/> that was running on
-        /// <paramref name="thread"/> at <paramref name="qpc"/>, or null when no matching resume interval covers the
+        /// <paramref name="thread"/> at <paramref name="timestampQpc"/>, or null when no matching resume interval covers the
         /// timestamp.
         /// </summary>
         public AsyncProfilerCallStack GetCallStack(
             AsyncProfilerThreadKey thread,
             ulong dispatcherId,
-            long qpc)
+            long timestampQpc)
         {
-            IReadOnlyList<AsyncProfilerCallStack> callStacks = GetCallStacks(thread, qpc);
+            IReadOnlyList<AsyncProfilerCallStack> callStacks = GetCallStacks(thread, timestampQpc);
             for (int i = callStacks.Count - 1; i >= 0; i--)
             {
                 if (callStacks[i].DispatcherId == dispatcherId)
@@ -266,14 +266,14 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         /// <summary>
         /// Returns the latest recorded metadata for <paramref name="dispatcherId"/> with a creation QPC at or before
-        /// <paramref name="qpc"/> in <paramref name="processIndex"/>, or null when no such metadata was recorded.
+        /// <paramref name="timestampQpc"/> in <paramref name="processIndex"/>, or null when no such metadata was recorded.
         /// </summary>
         public AsyncProfilerDispatcherInfo GetDispatcherInfo(
             ProcessIndex processIndex,
             ulong dispatcherId,
-            long qpc)
+            long timestampQpc)
         {
-            int dispatcherIndex = GetDispatcherIndex(processIndex, dispatcherId, qpc);
+            int dispatcherIndex = GetDispatcherIndex(processIndex, dispatcherId, timestampQpc);
             return dispatcherIndex < 0 ? null : MaterializeDispatcherInfo(_dispatchers[dispatcherIndex]);
         }
 
@@ -427,7 +427,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// Allocation-saving query for stack generation. The caller owns and reuses the result list; its activation
         /// slots are overwritten by subsequent queries. Consumers must not retain those activation objects.
         /// </summary>
-        internal void GetCallStacks(AsyncProfilerThreadKey thread, long qpc, List<AsyncProfilerCallStack> result)
+        /// <remarks>Public completion-observation properties are not populated here. Public callback adapters
+        /// populate them before exposing the borrowed activations.</remarks>
+        internal void GetCallStacks(AsyncProfilerThreadKey thread, long timestampQpc, List<AsyncProfilerCallStack> result)
         {
             if (result == null)
             {
@@ -436,7 +438,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
             if (_threads.TryGetValue(thread, out ThreadCallStacks callStacks))
             {
-                callStacks.Query(qpc, result, this, cacheMaterialized: false);
+                callStacks.Query(timestampQpc, result, this, cacheMaterialized: false);
                 result.Sort(CompareDepth);
             }
             else
@@ -448,7 +450,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <summary>All finalized async call stacks for a thread, in the order they were recorded.</summary>
         /// <remarks>
         /// For a recorded thread this is an index-backed view, not a snapshot of its count during construction;
-        /// unknown threads return an empty list. Individual activation objects are stable. Call <see cref="AsyncProfilerComputer.Finish"/> before
+        /// unknown threads return an empty list. Individual activation objects are stable. Call <see cref="AsyncProfilerIndexBuilder.Finish"/> before
         /// querying a computer-built index if open-at-stream-end activations must be included.
         /// </remarks>
         public IReadOnlyList<AsyncProfilerCallStack> GetCallStacks(AsyncProfilerThreadKey thread) =>
@@ -460,13 +462,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// Whether this is the thread's unique latest activation begun by the sample time. A later, already
         /// closed activation can leave its dispatcher physically above the surviving activation.
         /// </summary>
-        internal bool IsLatestActivation(AsyncProfilerCallStack callStack, long qpc) =>
+        internal bool IsLatestActivation(AsyncProfilerCallStack callStack, long timestampQpc) =>
             _threads.TryGetValue(callStack.Thread, out ThreadCallStacks c) &&
-            c.QueryIndex().IsLatestActivation(callStack, qpc);
+            c.QueryIndex().IsLatestActivation(callStack, timestampQpc);
 
         /// <summary>
         /// Records a finalized async call stack, interning its frames.
-        /// Called by <see cref="AsyncProfilerComputer"/> as async call stacks close.
+        /// Called by <see cref="AsyncProfilerIndexBuilder"/> as async call stacks close.
         /// </summary>
         internal void Add(AsyncProfilerThreadKey thread, AsyncCallstackKind kind, ulong[] methodIds, int[] frameStates,
             ulong dispatcherId, int depth, byte continuationIndexBase, byte wrapperCount, long startQpc, long endQpc,
@@ -616,7 +618,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         private int GetDispatcherIndex(
             ProcessIndex processIndex,
             ulong dispatcherId,
-            long qpc)
+            long timestampQpc)
         {
             EnsureDispatcherIndexes();
             var key = new DispatcherKey(processIndex, dispatcherId);
@@ -630,7 +632,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             while (lo < hi)
             {
                 int mid = (lo + hi) >> 1;
-                if (_dispatchers[dispatcherIndices[mid]].CreationQpc <= qpc)
+                if (_dispatchers[dispatcherIndices[mid]].CreationQpc <= timestampQpc)
                 {
                     lo = mid + 1;
                 }
@@ -760,6 +762,14 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
         }
 
+        internal void PopulateCompletionObservations(AsyncProfilerCallStack callStack)
+        {
+            CompletionAvailabilityEpoch epoch = FindCompletionEpoch(callStack.Thread.ProcessIndex, callStack.StartQpc);
+            AsyncCallstackKind kind = callStack.Frames.Kind;
+            callStack.MethodCompletionObserved = epoch != null && epoch.MethodObserved(kind);
+            callStack.ExceptionCompletionObserved = epoch != null && epoch.ExceptionObserved(kind);
+        }
+
         private AsyncProfilerCallStackFrames ResolveFrames(AsyncProfilerCallStackFramesIndex index) => _internedCallStackFrames[(int)index];
 
         private static int CompareDepth(AsyncProfilerCallStack left, AsyncProfilerCallStack right) =>
@@ -775,24 +785,24 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             return epochs;
         }
 
-        private CompletionAvailabilityEpoch FindCompletionEpoch(ProcessIndex processIndex, long qpc)
+        private CompletionAvailabilityEpoch FindCompletionEpoch(ProcessIndex processIndex, long timestampQpc)
         {
             if (!_completionAvailability.TryGetValue(processIndex, out List<CompletionAvailabilityEpoch> epochs))
             {
                 return null;
             }
-            int index = FindCompletionEpochIndex(epochs, qpc);
+            int index = FindCompletionEpochIndex(epochs, timestampQpc);
             return index >= 0 ? epochs[index] : null;
         }
 
-        private static int FindCompletionEpochIndex(List<CompletionAvailabilityEpoch> epochs, long qpc)
+        private static int FindCompletionEpochIndex(List<CompletionAvailabilityEpoch> epochs, long timestampQpc)
         {
             int lo = 0;
             int hi = epochs.Count;
             while (lo < hi)
             {
                 int mid = (lo + hi) >> 1;
-                if (epochs[mid].StartQpc <= qpc)
+                if (epochs[mid].StartQpc <= timestampQpc)
                 {
                     lo = mid + 1;
                 }
@@ -991,26 +1001,26 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
             public AsyncProfilerCallStackFramesIndex FramesIndexAt(int index) => _recorded[index].FramesIndex;
 
-            public void Query(long qpc, List<AsyncProfilerCallStack> result,
+            public void Query(long timestampQpc, List<AsyncProfilerCallStack> result,
                 AsyncProfilerCallStacksIndex owner, bool cacheMaterialized)
             {
                 if (cacheMaterialized)
                 {
                     lock (_queryLock)
                     {
-                        QueryCore(qpc, result, owner, cacheMaterialized: true);
+                        QueryCore(timestampQpc, result, owner, cacheMaterialized: true);
                     }
                     return;
                 }
 
-                QueryCore(qpc, result, owner, cacheMaterialized: false);
+                QueryCore(timestampQpc, result, owner, cacheMaterialized: false);
             }
 
-            private void QueryCore(long qpc, List<AsyncProfilerCallStack> result,
+            private void QueryCore(long timestampQpc, List<AsyncProfilerCallStack> result,
                 AsyncProfilerCallStacksIndex owner, bool cacheMaterialized)
             {
                 int count = 0;
-                QueryIndex().Stab(qpc, this, result, owner, cacheMaterialized, ref count);
+                QueryIndex().Stab(timestampQpc, this, result, owner, cacheMaterialized, ref count);
                 if (result.Count > count)
                 {
                     result.RemoveRange(count, result.Count - count);
@@ -1237,19 +1247,19 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 return max;
             }
 
-            public void Stab(long qpc, ThreadCallStacks callStacks, List<AsyncProfilerCallStack> result,
+            public void Stab(long timestampQpc, ThreadCallStacks callStacks, List<AsyncProfilerCallStack> result,
                 AsyncProfilerCallStacksIndex owner,
                 bool cacheMaterialized, ref int count) =>
-                Stab(0, _byStart.Length - 1, qpc, callStacks, result, owner, cacheMaterialized, ref count);
+                Stab(0, _byStart.Length - 1, timestampQpc, callStacks, result, owner, cacheMaterialized, ref count);
 
-            public bool IsLatestActivation(AsyncProfilerCallStack callStack, long qpc)
+            public bool IsLatestActivation(AsyncProfilerCallStack callStack, long timestampQpc)
             {
                 int lo = 0;
                 int hi = _byStart.Length;
                 while (lo < hi)
                 {
                     int mid = lo + ((hi - lo) >> 1);
-                    if (_records[_byStart[mid]].StartQpc <= qpc)
+                    if (_records[_byStart[mid]].StartQpc <= timestampQpc)
                     {
                         lo = mid + 1;
                     }
@@ -1264,12 +1274,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 }
                 CallStackRecord latest = _records[_byStart[lo - 1]];
                 return latest.StartQpc == callStack.StartQpc && latest.EndQpc == callStack.EndQpc &&
-                    latest.EndQpc > qpc && latest.DispatcherId == callStack.DispatcherId &&
+                    latest.EndQpc > timestampQpc && latest.DispatcherId == callStack.DispatcherId &&
                     latest.Depth == callStack.Depth && latest.FramesIndex == callStack.FramesIndex &&
                     (lo < 2 || _records[_byStart[lo - 2]].StartQpc != latest.StartQpc);
             }
 
-            private void Stab(int lo, int hi, long qpc, ThreadCallStacks callStacks,
+            private void Stab(int lo, int hi, long timestampQpc, ThreadCallStacks callStacks,
                 List<AsyncProfilerCallStack> result, AsyncProfilerCallStacksIndex owner,
                 bool cacheMaterialized, ref int count)
             {
@@ -1278,24 +1288,25 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     return;
                 }
                 int mid = (lo + hi) >> 1;
-                if (_maxEnd[mid] <= qpc)
+                if (_maxEnd[mid] <= timestampQpc)
                 {
-                    return; // nothing in this subtree ends after qpc
+                    return; // nothing in this subtree ends after timestampQpc
                 }
 
-                Stab(lo, mid - 1, qpc, callStacks, result, owner, cacheMaterialized, ref count);
+                Stab(lo, mid - 1, timestampQpc, callStacks, result, owner, cacheMaterialized, ref count);
 
                 int recordIndex = _byStart[mid];
                 CallStackRecord a = _records[recordIndex];
-                if (a.StartQpc <= qpc)
+                if (a.StartQpc <= timestampQpc)
                 {
-                    if (a.EndQpc > qpc)
+                    if (a.EndQpc > timestampQpc)
                     {
                         AsyncProfilerCallStack materialized;
                         if (cacheMaterialized)
                         {
                             materialized = callStacks.GetOrCreateMaterialized(
                                 recordIndex, owner.ResolveFrames(a.FramesIndex));
+                            owner.PopulateCompletionObservations(materialized);
                             result.Add(materialized);
                         }
                         else
@@ -1310,9 +1321,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                         }
                         count++;
                     }
-                    Stab(mid + 1, hi, qpc, callStacks, result, owner, cacheMaterialized, ref count);
+                    Stab(mid + 1, hi, timestampQpc, callStacks, result, owner, cacheMaterialized, ref count);
                 }
-                // else: right subtree all start after qpc, prune it.
+                // else: right subtree all start after timestampQpc, prune it.
             }
 
         }
@@ -1334,8 +1345,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             {
                 get
                 {
-                    return _callStacks.GetOrCreateMaterializedThreadSafe(
+                    AsyncProfilerCallStack result = _callStacks.GetOrCreateMaterializedThreadSafe(
                         index, _owner.ResolveFrames(_callStacks.FramesIndexAt(index)));
+                    _owner.PopulateCompletionObservations(result);
+                    return result;
                 }
             }
 

@@ -248,6 +248,75 @@ namespace TraceEventTests
         }
 
         [Fact]
+        public void StitchedFrame_EqualityPreservesStructuralIdentityAndLabelValues()
+        {
+            var s = new Scenario();
+            AsyncProfilerCallStack activation = s.Segment(AsyncCallstackKind.StateMachineAsync,
+                new[] { 500, 501 }, new[] { 30, 31 });
+            AsyncProfilerCallStack otherActivation = s.Segment(AsyncCallstackKind.StateMachineAsync,
+                new[] { 500, 501 }, new[] { 30, 31 });
+            var sync = new AsyncProfilerStitchSyncFrame(Scenario.CA(40), Scenario.MI(41),
+                AsyncProfilerStitchSyncFrameKind.None, Scenario.MI(30));
+            AsyncProfilerStitchedFrame frame = AsyncProfilerStitchedFrame.CreateSync(sync, activation);
+            AsyncProfilerStitchedFrame equal = AsyncProfilerStitchedFrame.CreateSync(sync, activation);
+            Assert.True(frame.Equals(equal));
+            Assert.True(frame.Equals((object)equal));
+            Assert.Equal(frame.GetHashCode(), equal.GetHashCode());
+            Assert.False(frame.Equals(null));
+            Assert.False(frame.Equals((object)sync));
+
+            var distinct = new[]
+            {
+                AsyncProfilerStitchedFrame.CreateSync(
+                    new AsyncProfilerStitchSyncFrame(Scenario.CA(42), Scenario.MI(41),
+                        AsyncProfilerStitchSyncFrameKind.None, Scenario.MI(30)), activation),
+                AsyncProfilerStitchedFrame.CreateSync(
+                    new AsyncProfilerStitchSyncFrame(Scenario.CA(40), Scenario.MI(42),
+                        AsyncProfilerStitchSyncFrameKind.None, Scenario.MI(30)), activation),
+                AsyncProfilerStitchedFrame.CreateSync(
+                    new AsyncProfilerStitchSyncFrame(Scenario.CA(40), Scenario.MI(41),
+                        AsyncProfilerStitchSyncFrameKind.V1StateMachineMoveNext, Scenario.MI(30)), activation),
+                AsyncProfilerStitchedFrame.CreateSync(
+                    new AsyncProfilerStitchSyncFrame(Scenario.CA(40), Scenario.MI(41),
+                        AsyncProfilerStitchSyncFrameKind.None, Scenario.MI(31)), activation),
+                AsyncProfilerStitchedFrame.CreateSync(sync, otherActivation),
+                frame.WithPresentation(AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames),
+            };
+            Assert.All(distinct, candidate => Assert.False(frame.Equals(candidate)));
+            Assert.False(AsyncProfilerStitchedFrame.CreateAsyncCurrent(Scenario.CA(40), Scenario.MI(41), activation, 0)
+                .Equals(AsyncProfilerStitchedFrame.CreateAsyncCurrent(Scenario.CA(40), Scenario.MI(41), activation, 1)));
+            Assert.False(AsyncProfilerStitchedFrame.CreateAsync(activation, 0)
+                .Equals(AsyncProfilerStitchedFrame.CreateAsyncContextParent(activation, 0)));
+
+            AsyncProfilerStitchedFrame label = AsyncProfilerStitchedFrame.CreateSynthetic("Label");
+            AsyncProfilerStitchedFrame equalLabel =
+                AsyncProfilerStitchedFrame.CreateSynthetic(new string("Label".ToCharArray()));
+            Assert.True(label.Equals(equalLabel));
+            Assert.Equal(label.GetHashCode(), equalLabel.GetHashCode());
+            Assert.False(label.Equals(AsyncProfilerStitchedFrame.CreateSynthetic("label")));
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void StitchedFrame_WithPresentationPreservesReferencePayload(bool synthetic)
+        {
+            var s = new Scenario();
+            AsyncProfilerCallStack activation = s.Segment(AsyncCallstackKind.StateMachineAsync,
+                new[] { 500 }, new[] { 30 });
+            AsyncProfilerStitchedFrame frame = synthetic
+                ? AsyncProfilerStitchedFrame.CreateSynthetic("Label")
+                : AsyncProfilerStitchedFrame.CreateAsyncCurrent(Scenario.CA(40), Scenario.MI(41), activation, 0, Scenario.MI(30));
+            AsyncProfilerStitchedFrame changed =
+                frame.WithPresentation(AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames);
+
+            Assert.Equal(AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames, changed.Presentation);
+            Assert.Same(frame.Segment, changed.Segment);
+            Assert.Same(frame.DisplayName, changed.DisplayName);
+            Assert.Equal(frame, changed.WithPresentation(frame.Presentation));
+        }
+
+        [Fact]
         public void StitchedFrame_CurrentFactory_BoxIdentityCreatesAResumptionTarget()
         {
             var s = new Scenario();
@@ -2145,12 +2214,12 @@ namespace TraceEventTests
                 {
                     AsyncProfilerStitchedFrameContextKind.Active,
                     AsyncProfilerStitchedFrameContextKind.Active,
-                    AsyncProfilerStitchedFrameContextKind.HistoricalParent,
-                    AsyncProfilerStitchedFrameContextKind.HistoricalParent,
-                    AsyncProfilerStitchedFrameContextKind.HistoricalParent,
-                    AsyncProfilerStitchedFrameContextKind.HistoricalParent,
-                    AsyncProfilerStitchedFrameContextKind.HistoricalParent,
-                    AsyncProfilerStitchedFrameContextKind.HistoricalParent,
+                    AsyncProfilerStitchedFrameContextKind.ParentContext,
+                    AsyncProfilerStitchedFrameContextKind.ParentContext,
+                    AsyncProfilerStitchedFrameContextKind.ParentContext,
+                    AsyncProfilerStitchedFrameContextKind.ParentContext,
+                    AsyncProfilerStitchedFrameContextKind.ParentContext,
+                    AsyncProfilerStitchedFrameContextKind.ParentContext,
                     AsyncProfilerStitchedFrameContextKind.Active,
                     AsyncProfilerStitchedFrameContextKind.Active,
                     AsyncProfilerStitchedFrameContextKind.None,
@@ -2192,7 +2261,7 @@ namespace TraceEventTests
                     .Select(frame => frame.CodeAddress));
             Assert.DoesNotContain(
                 limitedFrames,
-                frame => frame.ContextKind == AsyncProfilerStitchedFrameContextKind.HistoricalParent &&
+                frame => frame.ContextKind == AsyncProfilerStitchedFrameContextKind.ParentContext &&
                          ReferenceEquals(frame.Context, p3));
 
             var defaultFrames = structural.Frames.ToList();
@@ -2311,7 +2380,7 @@ namespace TraceEventTests
 
             AsyncProfilerStitchedFrame[] historical = frames
                 .Where(frame =>
-                    frame.ContextKind == AsyncProfilerStitchedFrameContextKind.HistoricalParent)
+                    frame.ContextKind == AsyncProfilerStitchedFrameContextKind.ParentContext)
                 .ToArray();
             Assert.Equal(2, historical.Length);
             Assert.All(historical, frame => Assert.Same(parent, frame.Context));
@@ -2356,7 +2425,7 @@ namespace TraceEventTests
             Assert.Equal(
                 2,
                 frames.Count(frame =>
-                    frame.ContextKind == AsyncProfilerStitchedFrameContextKind.HistoricalParent));
+                    frame.ContextKind == AsyncProfilerStitchedFrameContextKind.ParentContext));
         }
 
         [Fact]
@@ -2400,7 +2469,7 @@ namespace TraceEventTests
             Assert.Equal(
                 2,
                 frames.Count(frame =>
-                    frame.ContextKind == AsyncProfilerStitchedFrameContextKind.HistoricalParent));
+                    frame.ContextKind == AsyncProfilerStitchedFrameContextKind.ParentContext));
         }
 
         [Fact]
@@ -2540,35 +2609,35 @@ namespace TraceEventTests
             switch (availability)
             {
                 case "normal-only":
-                    index.MarkMethodCompletionObserved(process, parentKind, qpc: 20);
+                    index.MarkMethodCompletionObserved(process, parentKind, timestampQpc: 20);
                     break;
                 case "neither":
                     break;
                 case "unwind-only":
-                    index.MarkExceptionCompletionObserved(process, parentKind, qpc: 30);
+                    index.MarkExceptionCompletionObserved(process, parentKind, timestampQpc: 30);
                     break;
                 case "other-kind":
-                    index.MarkMethodCompletionObserved(process, parentKind, qpc: 20);
+                    index.MarkMethodCompletionObserved(process, parentKind, timestampQpc: 20);
                     index.MarkExceptionCompletionObserved(
                         process,
                         parentKind == AsyncCallstackKind.RuntimeAsync
                             ? AsyncCallstackKind.StateMachineAsync : AsyncCallstackKind.RuntimeAsync,
-                        qpc: 30);
+                        timestampQpc: 30);
                     break;
                 case "other-process":
-                    index.MarkMethodCompletionObserved(process, parentKind, qpc: 20);
+                    index.MarkMethodCompletionObserved(process, parentKind, timestampQpc: 20);
                     index.StartCompletionAvailabilityEpoch((ProcessIndex)2, startQpc: 0);
-                    index.MarkExceptionCompletionObserved((ProcessIndex)2, parentKind, qpc: 30);
+                    index.MarkExceptionCompletionObserved((ProcessIndex)2, parentKind, timestampQpc: 30);
                     break;
                 case "previous-epoch":
-                    index.MarkMethodCompletionObserved(process, parentKind, qpc: 1);
-                    index.MarkExceptionCompletionObserved(process, parentKind, qpc: 1);
+                    index.MarkMethodCompletionObserved(process, parentKind, timestampQpc: 1);
+                    index.MarkExceptionCompletionObserved(process, parentKind, timestampQpc: 1);
                     index.StartCompletionAvailabilityEpoch(process, startQpc: 5);
                     break;
                 case "later-epoch":
-                    index.MarkMethodCompletionObserved(process, parentKind, qpc: 20);
+                    index.MarkMethodCompletionObserved(process, parentKind, timestampQpc: 20);
                     index.StartCompletionAvailabilityEpoch(process, startQpc: 40);
-                    index.MarkExceptionCompletionObserved(process, parentKind, qpc: 45);
+                    index.MarkExceptionCompletionObserved(process, parentKind, timestampQpc: 45);
                     break;
                 default:
                     throw new ArgumentOutOfRangeException(nameof(availability));
@@ -2625,7 +2694,7 @@ namespace TraceEventTests
                 frame =>
                 {
                     Assert.Same(parent, frame.Context);
-                    Assert.Equal(AsyncProfilerStitchedFrameContextKind.HistoricalParent, frame.ContextKind);
+                    Assert.Equal(AsyncProfilerStitchedFrameContextKind.ParentContext, frame.ContextKind);
                 });
         }
 
@@ -2651,8 +2720,8 @@ namespace TraceEventTests
             var parentThread = new AsyncProfilerThreadKey(process, 100);
             var childThread = new AsyncProfilerThreadKey(process, 200);
             index.StartCompletionAvailabilityEpoch(process, startQpc: 0);
-            index.MarkMethodCompletionObserved(process, parentKind, qpc: 20);
-            index.MarkExceptionCompletionObserved(process, parentKind, qpc: 50);
+            index.MarkMethodCompletionObserved(process, parentKind, timestampQpc: 20);
+            index.MarkExceptionCompletionObserved(process, parentKind, timestampQpc: 50);
             int[] states = { 0, 1, 4, 7 };
             AsyncProfilerCallStack parent = AddIndexedSegment(
                 s, index, parentThread, dispatcherId: 10, depth: 0,
@@ -2691,7 +2760,7 @@ namespace TraceEventTests
                     index, new[] { child }, structural.SegmentPlacements, frames,
                     AsyncProfilerParentContextAugmenter.DefaultMaximumDepth);
                 AsyncProfilerStitchedFrame[] parents = frames.Where(frame =>
-                    frame.ContextKind == AsyncProfilerStitchedFrameContextKind.HistoricalParent).ToArray();
+                    frame.ContextKind == AsyncProfilerStitchedFrameContextKind.ParentContext).ToArray();
 
                 Assert.Equal(
                     Enumerable.Range(completed, states.Length - completed).Select(i => Scenario.CA(100 + i)),
@@ -2712,7 +2781,7 @@ namespace TraceEventTests
                 Assert.Equal(
                     structural.Frames.Select(frame => frame.CodeAddress),
                     frames.Where(frame => frame.ContextKind !=
-                        AsyncProfilerStitchedFrameContextKind.HistoricalParent).Select(frame => frame.CodeAddress));
+                        AsyncProfilerStitchedFrameContextKind.ParentContext).Select(frame => frame.CodeAddress));
             }
         }
 
@@ -2730,8 +2799,8 @@ namespace TraceEventTests
             var parentThread = new AsyncProfilerThreadKey(process, 200);
             var childThread = new AsyncProfilerThreadKey(process, 300);
             index.StartCompletionAvailabilityEpoch(process, startQpc: 0);
-            index.MarkMethodCompletionObserved(process, parentKind, qpc: 20);
-            index.MarkExceptionCompletionObserved(process, parentKind, qpc: 30);
+            index.MarkMethodCompletionObserved(process, parentKind, timestampQpc: 20);
+            index.MarkExceptionCompletionObserved(process, parentKind, timestampQpc: 30);
             AddIndexedSegment(
                 s, index, rootThread, dispatcherId: 20, depth: 0,
                 startQpc: 0, endQpc: 40, firstCodeAddress: 100, frameCount: 4,
@@ -2766,7 +2835,7 @@ namespace TraceEventTests
                 index, new[] { child }, structural.SegmentPlacements, frames, maximumDepth: 2);
 
             AsyncProfilerStitchedFrame[] parents = frames.Where(frame =>
-                frame.ContextKind == AsyncProfilerStitchedFrameContextKind.HistoricalParent).ToArray();
+                frame.ContextKind == AsyncProfilerStitchedFrameContextKind.ParentContext).ToArray();
             Assert.Equal(
                 new[] { Scenario.CA(202), Scenario.CA(102), Scenario.CA(103) },
                 parents.Select(frame => frame.CodeAddress));
