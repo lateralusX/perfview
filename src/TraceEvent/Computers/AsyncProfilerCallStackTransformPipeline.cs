@@ -25,7 +25,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             List<AsyncProfilerStitchedFrame> frames,
             Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile> runtimeProfileResolver = null,
             AsyncProfilerRuntimeRuleProfile runtimeProfile = null,
-            AsyncProfilerRuntimeRuleProfileCache runtimeProfiles = null)
+            AsyncProfilerRuntimeRuleProfileCache runtimeProfiles = null,
+            IReadOnlyList<AsyncProfilerSegmentPlacement> segmentPlacements = null)
         {
             TraceLog = traceLog;
             Segments = segments;
@@ -33,6 +34,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             m_classifyBoundary = classifyBoundary;
             Diagnostics = diagnostics;
             Frames = frames;
+            m_segmentPlacements = segmentPlacements;
             m_runtimeProfiles = runtimeProfiles ??
                 (traceLog == null ? null : new AsyncProfilerRuntimeRuleProfileCache(traceLog.ModuleFiles));
             m_runtimeProfileResolver = runtimeProfileResolver ?? CreateRuntimeProfileResolver(traceLog, m_runtimeProfiles);
@@ -78,6 +80,32 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             TraceLog == null || codeAddress == CodeAddressIndex.Invalid
                 ? ModuleFileIndex.Invalid
                 : m_runtimeProfiles.GetHostModuleOwner(TraceLog.CodeAddresses.ModuleFileIndex(codeAddress));
+
+        internal bool IsV2DispatchPair(CodeAddressIndex instrumented, CodeAddressIndex dispatch) =>
+            TraceLog != null &&
+            AsyncProfilerCallStackStitcher.IsV2DispatchPair(TraceLog, m_runtimeProfiles, instrumented, dispatch);
+
+        internal bool HasVerifiedV2DispatchPair(AsyncProfilerCallStack activation, CodeAddressIndex bridge)
+        {
+            if (TraceLog == null || m_segmentPlacements == null)
+            {
+                return false;
+            }
+            ModuleFileIndex owner = GetHostModuleOwner(bridge);
+            foreach (AsyncProfilerSegmentPlacement placement in m_segmentPlacements)
+            {
+                if (ReferenceEquals(placement.Activation, activation) &&
+                    owner != ModuleFileIndex.Invalid &&
+                    owner == GetHostModuleOwner(placement.InstrumentedDispatch) &&
+                    ReferenceEquals(GetRuntimeProfile(bridge), GetRuntimeProfile(placement.InstrumentedDispatch)) &&
+                    AsyncProfilerCallStackStitcher.IsV2DispatchPair(
+                        TraceLog, m_runtimeProfiles, placement.InstrumentedDispatch, placement.Dispatch))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
 
         /// <summary>
         /// Matches using captured candidate ownership. Application-led startup layouts use the owning sample's
@@ -198,6 +226,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         private readonly Func<CodeAddressIndex, AsyncProfilerCallStackStitchBoundaryInfo> m_classifyBoundary;
         private readonly Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile> m_runtimeProfileResolver;
         private readonly AsyncProfilerRuntimeRuleProfileCache m_runtimeProfiles;
+        private readonly IReadOnlyList<AsyncProfilerSegmentPlacement> m_segmentPlacements;
 
         #endregion
     }
@@ -309,7 +338,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// V1 requires a verified dispatcher boundary; V2 requires a physically matched current async method
         /// or a resolved structurally verified dispatch target.
         /// Bridges require a runtime-profile completion pair (adjacent
-        /// <c>Task.RunContinuations -&gt; Task.TrySetResult</c> under the common rules). Interrupted,
+        /// <c>Task.RunContinuations -&gt; Task.TrySetResult</c> under the common rules), or a profile-matched V2
+        /// helper span after that activation's verified dispatch pair. The common V2 helper span consists
+        /// entirely of <c>YieldAwaitable</c> or nested-type methods, independent of method/lambda names. Interrupted,
         /// unresolved, non-CoreLib, or unverified candidates remain intact and protected from all subsequent
         /// helper cleanup, including completion-chain removal. Exact completion chains can still be removed
         /// independently outside protected candidates.
@@ -417,7 +448,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 timestampQpc,
                 classifyBoundary,
                 structuralResult.Diagnostics,
-                frames);
+                frames,
+                segmentPlacements: structuralResult.SegmentPlacements);
             ApplyInPlace(context);
             return new AsyncProfilerStitchResult(frames, structuralResult.Diagnostics);
         }

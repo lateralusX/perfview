@@ -49,7 +49,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// No samples are added, timestamps or weights assigned, or output finalization performed.
         /// </summary>
         /// <param name="physicalStack">A physical CallStackIndex from the output's TraceLog.</param>
-        /// <param name="timestampQpc">The reconstruction time in that trace's QPC domain, not relative milliseconds.</param>
+        /// <param name="timestampQpc">The reconstruction time for the physical stack's user-mode frames in that trace's
+        /// QPC domain, not relative milliseconds. For an event's stack, obtain this from
+        /// <see cref="TraceLogExtensions.TryGetCallStackIndex"/> when user frames may have been borrowed.
+        /// The supplied timestamp is used unchanged.</param>
         /// <param name="root">A grouping stack in the output, or Invalid for the normal thread/process root.</param>
         /// <remarks>
         /// Bare stack handles carry no owner identity. Range checks cannot detect a same-valued handle from a
@@ -109,7 +112,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         /// <summary>
-        /// Reconstructs an event's physical stack using its exact QPC timestamp. The event must belong to the
+        /// Reconstructs an event's physical stack using the exact QPC timestamp of its user-mode frames.
+        /// This can differ from the event timestamp when TraceLog borrowed user frames from another event.
+        /// The event must belong to the
         /// output's TraceLog instance; opening the same file twice does not make the instances interchangeable.
         /// Events without a physical stack return Invalid when the root and builder state are valid, regardless
         /// of provider. The event is not retained. Root, fallback, and output semantics are the same as the
@@ -123,9 +128,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             TraceEvent data, StackSourceCallStackIndex root = StackSourceCallStackIndex.Invalid)
         {
             AsyncProfilerCallStackComputer.ValidateEvent(data, m_log, nameof(data));
-#pragma warning disable CS0618 // Keep exact event QPC access inside TraceEvent.
-            return GetCallStack(data.CallStackIndex(), data.TimeStampQPC, root);
-#pragma warning restore CS0618
+            // On failure the index is Invalid; delegation still validates the root and builder state.
+            data.TryGetCallStackIndex(out CallStackIndex stack, out long timestampQpc);
+            return GetCallStack(stack, timestampQpc, root);
         }
 
         #region private

@@ -883,10 +883,104 @@ Full JSONL can be large; keep it with the trace, not in source control or on an
 unapproved service. Failed runs can leave partial artifacts; require all four
 successful summaries and exports before accepting an export run.
 
-The helper preserves the host's default task/activity settings, enables managed-only
-stacks, and uses `SymbolReader`'s inherited/default symbol policy, recording the
+The helper preserves sample coverage gaps by default: every frame closes when
+coverage ends and reopens at the next sample. Blank intervals mean no represented
+sample coverage, not proven off-CPU time. Add `--legacy-sample-timing` to `export`
+to use the library's default accumulated-weight/continuity behavior instead.
+`run.json` and each view summary record `PreserveSampleGaps`.
+
+The public Speedscope and Chromium writers retain their existing overloads and
+legacy behavior by default. Library callers opt into gaps with the additional
+`preserveSampleGaps: true` argument; this does not change source samples or weights.
+
+For EventPipe, the helper preserves the host's default task/activity settings and enables managed-only
+stacks. It uses `SymbolReader`'s inherited/default symbol policy, recording the
 effective path. Keep the same approved symbol cache/path on export and probe.
 Changing these settings is a separately labelled experiment.
+
+### ETW/kernel CPU: manually coordinated PerfView capture
+
+The helper also accepts a **merged `.etl`**. Capture in a separate elevated
+PowerShell; the helper does not launch or elevate PerfView. Keep normal PerfView
+kernel/CLR providers, stack walks, and rundown, and add async events with
+`/Providers`, **not `/OnlyProviders`**. Explicit TPL defaults retain causality
+events alongside the profiler. Start collection before launching the producer.
+
+After defining an absolute `$PerfViewExe` path to the standalone PerfView collector,
+run this in the elevated shell and keep its variables for stopping:
+
+```powershell
+$EtwDir = Read-Host 'Full path of a NEW ETW capture directory'
+if (Test-Path -LiteralPath $EtwDir) { throw 'Preserve earlier captures; choose a new directory.' }
+New-Item -ItemType Directory -Path $EtwDir | Out-Null
+$EtwSession = 'AsyncProfilerValidation-' + [Guid]::NewGuid().ToString('N')
+$PerfViewCommon = @(
+    '/AcceptEULA', '/NoView', '/Merge:true', '/Zip:false',
+    "/SessionName:$EtwSession", "/DataFile:$EtwDir\capture.etl",
+    '/TplEvents:Default',
+    '/Providers:*System.Runtime.CompilerServices.AsyncProfilerEventSource:0x3FFFF:5'
+)
+Start-Process $PerfViewExe -Wait -ArgumentList (
+    $PerfViewCommon + @("/LogFile:$EtwDir\perfview-start.log", 'start')
+)
+Get-Content "$EtwDir\perfview-start.log" -Tail 20
+```
+
+Check the log's success line and enabled kernel/CLR/async providers. Then run the
+matching external scenario binary on the explicitly selected instrumented runtime
+as in section 4, using `--trace-capture V2`, `V1`, or `Mixed`. Send Enter only
+after collection starts. Record the producer PID and full phase output. Let the
+producer finish its two-second periodic-buffer-flush wait before stopping normal
+captures; disabling the provider is not a substitute for that wait.
+
+Stop only this capture's sessions from the same elevated shell:
+
+```powershell
+Start-Process $PerfViewExe -Wait -ArgumentList (
+    $PerfViewCommon + @("/LogFile:$EtwDir\perfview-stop.log", 'stop')
+)
+Get-Content "$EtwDir\perfview-stop.log" -Tail 20
+```
+
+Wait for stop, rundown, merge, and NGen PDB generation to finish. A large
+machine-wide capture can take minutes to merge; `Start-Process -Wait` waits for
+that work, whereas `Get-Content -Tail` without `-Wait` just prints the log.
+Keep both logs and the original ETL, runtime/compiler/scenario identities and
+hashes, exact commands, PID, and phase windows with the exports.
+
+In the analysis shell, set `_NT_SYMBOL_PATH` to an approved symbol path containing
+the **matching native CoreLib PDB** (`System.Private.CoreLib.ni.pdb` for the
+development runtime). ETW defaults use these symbols for precompiled CoreLib
+frames; CLR JIT events alone need not name them. Export with the recorded PID:
+
+```powershell
+$ProducerPid = [int](Read-Host 'Recorded scenario PID')
+& $ValidationDotnet $HelperDll export "$EtwDir\capture.etl" "$EtwDir\views" --pid $ProducerPid
+if ($LASTEXITCODE -ne 0) { throw 'ETW export failed; preserve logs and partial artifacts.' }
+```
+
+ETW exports use `ThreadTimeStackComputer` with only kernel `PerfInfoSample`
+events selected, no task/activity grouping or wait-time inference, and **full
+native/managed physical stacks**. CoreLib symbol lookup runs before reconstruction.
+These are intentional differences from the EventPipe host, not changes to production
+stack-computer defaults. All four views must conserve CPU timestamps, weights,
+and counts. Append `--parent-contexts` into a separate new output directory for
+the opt-in historical-parent comparison.
+
+`input-quality.json` reports loss/truncation, raw async decode errors and event
+counts, physical/async sample coverage, captured runtime modules, and hashes of
+sample queries against the persisted, independently rebuilt, and reopened index.
+`cpu-anchors.jsonl` and `cpu-activations.jsonl` retain exact QPC/process/thread
+evidence. The existing `probe` and `probe-qpc` commands also select kernel CPU
+anchors from these ETLX files. Missing physical stacks or unsampled phases are
+gaps to report, not passes; no active async interval must preserve the raw stack.
+
+Use `0xF04C` and `0x2F04C` only in separately labelled minimal/completion captures.
+For a deliberate no-profiler control, omit the async provider and append
+`--allow-no-index` to export; that permits ordinary-stack fallback, not a claim
+that async reconstruction was exercised. Live-at-end validation separately requires
+stopping collection *during* the producer's logged live CPU window, after periodic
+async flushing; an ordinary completed run does not cover that boundary.
 
 ### Optional historical parent contexts
 

@@ -46,6 +46,34 @@ namespace TraceEventTests
         }
 
         [Theory]
+        [InlineData("System.Boolean System.Threading.Tasks.Task::TrySetResult()",
+                    "System.Threading.Tasks.Task.TrySetResult()")]
+        [InlineData("System.Threading.ThreadPoolWorkQueue+DispatchResult System.Threading.ThreadPoolWorkQueue::Dispatch()",
+                    "System.Threading.ThreadPoolWorkQueue.Dispatch()")]
+        [InlineData("System.Boolean System.Threading.Tasks.Task.TrySetResult()",
+                    "System.Threading.Tasks.Task.TrySetResult()")]
+        [InlineData("System.Private.CoreLib!System.Boolean System.Threading.Tasks.Task::TrySetResult()",
+                    "System.Private.CoreLib!System.Threading.Tasks.Task.TrySetResult()")]
+        [InlineData("Other.CoreLib!System.Boolean System.Threading.Tasks.Task::TrySetResult()",
+                    "Other.CoreLib!System.Threading.Tasks.Task.TrySetResult()")]
+        [InlineData("System.Collections.Generic.Dictionary`2[System.Int32, System.String] Namespace.Type::Method(class Other::Parameter)",
+                    "Namespace.Type.Method(class Other::Parameter)")]
+        [InlineData("System.Boolean System.Threading.Tasks.Task`1[System.Collections.Generic.Dictionary`2[System.Int32, System.String]]::TrySetResult(!0)",
+                    "System.Threading.Tasks.Task`1[System.Collections.Generic.Dictionary`2[System.Int32, System.String]].TrySetResult(!0)")]
+        [InlineData("System.Threading.Tasks.Task`1[System.Int32, System.String]::TrySetResult(!0)",
+                    "System.Threading.Tasks.Task`1[System.Int32, System.String].TrySetResult(!0)")]
+        [InlineData("!!0 Namespace.Type`1[!0, !!0]::Method(!!0&)",
+                    "Namespace.Type`1[!0, !!0].Method(!!0&)")]
+        [InlineData("unsigned int8 Namespace.Type::Method(unsigned int8&,class Other::Parameter)",
+                    "Namespace.Type.Method(unsigned int8&,class Other::Parameter)")]
+        public void NormalizeMethodName_RemovesPdbReturnTypesWithoutChangingTypeArgumentsOrParameters(string name, string expected)
+        {
+            string normalized = AsyncProfilerCallStackStitchBoundary.NormalizeMethodName(name);
+            Assert.Equal(expected, normalized);
+            Assert.Same(normalized, AsyncProfilerCallStackStitchBoundary.NormalizeMethodName(normalized));
+        }
+
+        [Theory]
         [InlineData("Namespace.Type+<RunAsync>d__1::MoveNext()", "Namespace.Type+<RunAsync>d__1")]
         [InlineData("Namespace.Type`1+<RunAsync>d__1`1[System.Int64,System.String]::MoveNext()",
                     "Namespace.Type`1+<RunAsync>d__1`1[System.Int64,System.String]")]

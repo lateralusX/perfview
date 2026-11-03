@@ -75,6 +75,33 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             return new AsyncProfilerCallStackStitchBoundaryInfo(kind, wrapperIndex);
         }
 
+        /// <summary>Recognizes captured native runtime images that can execute while a V2 wrapper prepares its target.</summary>
+        public virtual bool IsV2NativeDispatchModule(TraceModuleFile module, TraceModuleFile hostModule)
+        {
+            if (module == null || hostModule == null || module.ImageBase == 0 || module.ManagedModule != null)
+            {
+                return false;
+            }
+            string name = module.Name;
+            if (!string.Equals(name, "coreclr", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(name, "clrjit", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(name, "libcoreclr.so", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(name, "libclrjit.so", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(name, "libcoreclr.dylib", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(name, "libclrjit.dylib", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            // Use captured paths, including when a trace is opened on a different operating system.
+            string path = module.FilePath;
+            string hostPath = hostModule.FilePath;
+            int directoryEnd = Math.Max(path.LastIndexOf('\\'), path.LastIndexOf('/'));
+            int hostDirectoryEnd = Math.Max(hostPath.LastIndexOf('\\'), hostPath.LastIndexOf('/'));
+            return directoryEnd > 0 && directoryEnd == hostDirectoryEnd &&
+                string.Compare(path, 0, hostPath, 0, directoryEnd + 1, StringComparison.OrdinalIgnoreCase) == 0;
+        }
+
         /// <summary>Classifies generated application methods and CoreLib helpers for stitching and presentation.</summary>
         public virtual AsyncProfilerStitchSyncFrameKind ClassifySynchronousFrame(string frameName, bool isHostModule)
         {
@@ -86,6 +113,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             if (IsStateMachineMoveNext(frameName, method))
             {
                 return AsyncProfilerStitchSyncFrameKind.V1StateMachineMoveNext;
+            }
+
+            // Generated resume stubs can belong to the application's module rather than CoreLib.
+            if (method == "IL_STUB_AsyncResume" && IsMethodOnType(frameName, "dynamicClass", method))
+            {
+                return AsyncProfilerStitchSyncFrameKind.V2ResumeStub;
             }
 
             if (!isHostModule)
@@ -295,6 +328,24 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         public virtual bool IsRuntimeResumptionAnchor(AsyncProfilerStitchedFrame frame) =>
             IsSyncFrameKind(frame, AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibThreadPoolDispatch);
 
+        /// <summary>Recognizes profiler-owned helper types above a verified wrapperless V2 dispatch pair.
+        /// Captured runtime ownership, physical contiguity, and context identity are checked by cleanup.</summary>
+        public virtual bool IsProfilerDispatchInfrastructure(string frameName)
+        {
+            if (string.IsNullOrEmpty(frameName))
+            {
+                return false;
+            }
+            const string profilerType = "System.Runtime.CompilerServices.AsyncProfiler";
+            string method = GetBareMethodName(frameName);
+            int typeStart = IsHostModuleQualifiedFrame(frameName) ? HostModuleName.Length + 1 : 0;
+            int typeEnd = typeStart + profilerType.Length;
+            return IsMethodOnType(frameName, profilerType, method) ||
+                IsMethodOnType(frameName, "System.Runtime.CompilerServices.AsyncProfilerEventSource", method) ||
+                (frameName.Length > typeEnd && frameName[typeEnd] == '+' &&
+                 string.CompareOrdinal(frameName, typeStart, profilerType, 0, profilerType.Length) == 0);
+        }
+
         /// <summary>Optional individual-helper policy, applied only outside protected/rejected spans.</summary>
         public virtual bool IsOptionalInfrastructureFrame(AsyncProfilerStitchedFrame frame, AsyncProfilerCallStackStitchBoundaryKind boundary) =>
             boundary == AsyncProfilerCallStackStitchBoundaryKind.V1Dispatcher ||
@@ -433,9 +484,46 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 pairMatched |= pair.IsMatch;
                 pairRejected |= pair.IsRejected;
             }
-            return !candidate ? default :
-                anchor && pairMatched && !pairRejected
-                    ? AsyncProfilerRuntimeSequenceMatch.Match(end - start)
+            if (anchor && pairMatched && !pairRejected)
+            {
+                return AsyncProfilerRuntimeSequenceMatch.Match(end - start);
+            }
+            if (context.TraceLog != null && context.Segments.Count != 0 &&
+                context.Segments[0].Frames.Kind == AsyncCallstackKind.RuntimeAsync)
+            {
+                AsyncProfilerRuntimeSequenceMatch helpers =
+                    MatchV2DispatchResumptionHelpers(context, start, helpersEnd);
+                if (helpers.Length != 0)
+                {
+                    return anchor && !pairRejected && helpers.IsMatch && helpers.Length == helpersEnd - start &&
+                        context.HasVerifiedV2DispatchPair(context.Segments[0], context.Frames[start].CodeAddress)
+                            ? AsyncProfilerRuntimeSequenceMatch.Match(end - start)
+                            : AsyncProfilerRuntimeSequenceMatch.Reject(end - start);
+                }
+            }
+            return candidate ? AsyncProfilerRuntimeSequenceMatch.Reject(end - start) : default;
+        }
+
+        /// <summary>
+        /// Supplies the removable helper span before the scheduler anchor. The caller verifies the root
+        /// activation's consumed dispatch pair; the common rule recognizes contiguous YieldAwaitable-family methods.
+        /// </summary>
+        protected virtual AsyncProfilerRuntimeSequenceMatch MatchV2DispatchResumptionHelpers(
+            AsyncProfilerCallStackTransformState context, int start, int end)
+        {
+            int matched = 0;
+            for (int i = start; i < end; i++)
+            {
+                CodeAddressIndex address = context.Frames[i].CodeAddress;
+                if (address != CodeAddressIndex.Invalid &&
+                    IsYieldAwaitableMethod(context.TraceLog.CodeAddresses[address].FullMethodName))
+                {
+                    matched++;
+                }
+            }
+            return matched == 0 ? default :
+                matched == end - start
+                    ? AsyncProfilerRuntimeSequenceMatch.Match(matched)
                     : AsyncProfilerRuntimeSequenceMatch.Reject(end - start);
         }
 
@@ -502,6 +590,28 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         #region private
+
+        private static bool IsYieldAwaitableMethod(string methodName)
+        {
+            string name = AsyncProfilerCallStackStitchBoundary.NormalizeMethodName(methodName);
+            if (string.IsNullOrEmpty(name))
+            {
+                return false;
+            }
+            int start = name.IndexOf('!') + 1;
+            const string typeName = "System.Runtime.CompilerServices.YieldAwaitable";
+            int typeEnd = start + typeName.Length;
+            if (name.Length <= typeEnd ||
+                string.CompareOrdinal(name, start, typeName, 0, typeName.Length) != 0)
+            {
+                return false;
+            }
+            int parameters = name.IndexOf('(');
+            int end = parameters >= 0 ? parameters : name.Length;
+            int member = name.LastIndexOf('.', end - 1, end);
+            return (name[typeEnd] == '+' && member > typeEnd + 1) ||
+                (name[typeEnd] == '.' && member == typeEnd);
+        }
 
         // Carrier/helper defaults remain independent of overrides to boundary-plumbing recognition.
         private static bool IsCommonV1DispatcherInfrastructure(string frameName)

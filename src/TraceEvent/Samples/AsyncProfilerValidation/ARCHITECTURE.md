@@ -325,7 +325,7 @@ ThreadPoolWorkQueue.Dispatch
 ```text
 ResumeRuntimeAsyncCallstack (QPC 2471080224563, dispatcher 0x6)
 ContinuationIndex = 0
-[0] 0x0 (sentinel; no method)
+[0] 0x0 (runtime continuation with no diagnostic IP)
 [1] V2TraceScenarios.ValueTaskLevel3Async
 [2] V2TraceScenarios.ValueTaskLevel2Async
 [3] V2TraceScenarios.ValueTaskLevel1Async
@@ -579,6 +579,37 @@ ValueTask examples. The resolved, structurally verified dispatch target is
 sufficient for attribution; it is not evidence that the method's body was
 executing. If the complete bridge cannot be verified, cleanup keeps the
 candidate intact rather than removing just its Task completion pair.
+
+If the verified wrapper instead selects **captured position 0 with diagnostic
+IP 0**, that entry still occupies a real continuation slot. With a physical
+entry above the wrapper, structural stitching preserves sampled callees and
+presents the entry as `[Async dispatcher frames]`, consuming the wrapper and
+its verified dispatch plumbing as usual. It does not project this activation's
+pending logical frames or historical creation parents. No continuation-entry
+name matching is needed, and completion progress is not advanced. This rule
+uses the captured position, not merely wrapper number 0; known targets and
+later captured positions keep their existing behavior.
+
+Without a wrapper, optional machinery cleanup can group contiguous
+`AsyncProfiler` (including nested types) and `AsyncProfilerEventSource` helpers
+immediately above a verified V2 dispatch pair into the same
+`[Async dispatcher frames]` marker. The pair may remain physical or be recorded
+by structural stitching behind its marker. Helpers must resolve to the same
+captured CoreLib and runtime profile and belong to the same context. Native or
+unresolved callees, application callbacks, other CoreLib helpers, and context
+boundaries stop the span and remain visible. Method-completion events are not
+required; existing structural targets and completion counts are unchanged.
+
+For a Yield resumption, the common profile instead matches a contiguous span of
+`System.Runtime.CompilerServices.YieldAwaitable` or nested-type methods between
+the consumed `InstrumentedDispatchContinuations` / `DispatchContinuations` pair
+and retained `ThreadPoolWorkQueue.Dispatch`. It does not depend on a particular
+lambda name. Structural stitching carries the pair's identity per activation;
+an inner activation's pair cannot authorize cleanup of the root's bridge.
+The profile supplies the removable helper count, while shared cleanup verifies
+the async anchor, captured CoreLib ownership, and complete span. Interrupted or
+unverified spans remain intact. Structural/default views and leaf-side
+application work retain Yield frames.
 
 The `[Async V2]` label alone cannot distinguish a dispatch target from a
 physically current method. The probe's role metadata makes that distinction.
@@ -1108,6 +1139,31 @@ concatenation of the entire async stack beneath every physical sample.
 V2 wrappers (`Continuation_Wrapper_0` through `_31`) supply the structural
 splice boundary and wrapper position. Dispatch-continuation plumbing without
 a wrapper is classified but is not itself permission to splice a V2 segment.
+Runtime profiles also recognize `dynamicClass.IL_STUB_AsyncResume`, including
+stubs in application modules. A single recognized stub immediately leafward
+of a verified wrapper is transparent to current-method identity matching.
+When the body matches, structural stitching consumes that stub with the wrapper;
+it does not scan through unknown frames or treat the stub as a boundary.
+When the stub itself is sampled, an identifiable indexed target replaces the
+stub/wrapper as `AsyncDispatchTarget`, never `AsyncCurrent`. Missing async data,
+an unavailable target, or an unverified body alignment retains the uncertain
+physical frames. This implementation-dependent name belongs to the runtime
+profile, not the shared boundary-name contract.
+
+When the frame immediately leafward of a verified V2 wrapper (skipping one
+recognized resume stub) belongs to a captured native CoreCLR/JIT image, stitching
+can project a resolved `AsyncDispatchTarget`. Only that adjacent image needs
+native-module evidence: it must share the captured CoreLib directory and have
+no managed-module association. All its callees remain physical work, including
+OS helpers and managed callbacks. A physical occurrence of the indexed current
+body, another dispatch entry, or an extra resume stub in that slice blocks this
+projection. The un-clamped activation position must identify a remaining target.
+Native PDB symbols do not turn entry work into a managed-body adjacency mismatch,
+and this case never claims `AsyncCurrent`. Unknown or foreign adjacent images
+and application frames adjacent to the wrapper retain conservative alignment.
+Optional machinery cleanup can use the verified target while retaining the
+sampled callee prefix.
+
 There is one index-backed exception: a single active root V2 segment with
 available method-completion counting can project its entire remaining
 suffix at the innermost complete `InstrumentedDispatchContinuations` /

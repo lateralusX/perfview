@@ -48,15 +48,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         {
             stitchedStack = StackSourceCallStackIndex.Invalid;
 
-            CallStackIndex callStackIndex = data.CallStackIndex();
-            if (callStackIndex == CallStackIndex.Invalid)
+            if (!data.TryGetCallStackIndex(out CallStackIndex callStackIndex, out long timestampQpc))
             {
                 return false;
             }
-
-#pragma warning disable CS0618 // Exact QPC alignment is required and remains internal to TraceEvent.
-            long timestampQpc = data.TimeStampQPC;
-#pragma warning restore CS0618
 
             return TryGetCallStack(callStackIndex, timestampQpc, thread,
                 StackSourceCallStackIndex.Invalid, out stitchedStack, data);
@@ -97,10 +92,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 }
                 parentContextsAvailable =
                     m_parentContextAugmenter.Prepare(m_index, m_segments);
-                if (parentContextsAvailable && m_segmentPlacements == null)
-                {
-                    m_segmentPlacements = new List<AsyncProfilerSegmentPlacement>();
-                }
+            }
+            bool collectPlacements = parentContextsAvailable || m_transforms.EnableInfrastructureCleanup;
+            if (collectPlacements && m_segmentPlacements == null)
+            {
+                m_segmentPlacements = new List<AsyncProfilerSegmentPlacement>();
             }
             AsyncProfilerCallStackStitcher.StitchInto(
                 m_syncFrames,
@@ -113,7 +109,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 TraceSteps,
                 m_stitchedFrames,
                 m_sampleDiagnostics,
-                parentContextsAvailable ? m_segmentPlacements : null,
+                collectPlacements ? m_segmentPlacements : null,
                 m_runtimeProfileResolver, runtimeProfile, m_eventLog, m_index, m_runtimeProfiles);
             if (parentContextsAvailable)
             {
@@ -131,7 +127,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 m_classify,
                 m_sampleDiagnostics,
                 m_stitchedFrames,
-                m_runtimeProfileResolver, runtimeProfile, m_runtimeProfiles);
+                m_runtimeProfileResolver, runtimeProfile, m_runtimeProfiles,
+                collectPlacements ? m_segmentPlacements : null);
             m_transforms.ApplyInPlace(transformContext);
             m_sampleDiagnostics.AddTo(m_diagnostics);
 

@@ -15,16 +15,28 @@ namespace Microsoft.Diagnostics.Tracing.Stacks.Formats
         /// schema: https://www.speedscope.app/file-format-schema.json
         /// </summary>
         public static void WriteStackViewAsJson(StackSource source, string filePath)
+            => WriteStackViewAsJson(source, filePath, preserveSampleGaps: false);
+
+        /// <summary>
+        /// Exports a StackSource to Speedscope format with optional preservation of sample coverage gaps.
+        /// </summary>
+        /// <param name="source">The stack source to export.</param>
+        /// <param name="filePath">The output file path.</param>
+        /// <param name="preserveSampleGaps">
+        /// If true, closes all frames between nonoverlapping sample intervals.
+        /// If false, uses legacy sample-continuity and accumulated-weight behavior.
+        /// </param>
+        public static void WriteStackViewAsJson(StackSource source, string filePath, bool preserveSampleGaps)
         {
             if (File.Exists(filePath))
                 File.Delete(filePath);
 
             using (var writeStream = File.CreateText(filePath))
-                Export(source, writeStream, Path.GetFileNameWithoutExtension(filePath));
+                Export(source, writeStream, Path.GetFileNameWithoutExtension(filePath), preserveSampleGaps);
         }
 
         #region private
-        private static void Export(StackSource source, TextWriter writer, string name)
+        private static void Export(StackSource source, TextWriter writer, string name, bool preserveSampleGaps)
         {
             var samplesPerThread = GetSortedSamplesPerThread(source);
 
@@ -34,7 +46,8 @@ namespace Microsoft.Diagnostics.Tracing.Stacks.Formats
 
             foreach (var pair in samplesPerThread)
             {
-                var sortedProfileEvents = GetProfileEvents(source, pair.Value, exportedFrameNameToExportedFrameId, exportedFrameIdToFrameTuple);
+                var sortedProfileEvents = GetProfileEvents(source, pair.Value, exportedFrameNameToExportedFrameId,
+                    exportedFrameIdToFrameTuple, preserveSampleGaps);
 
                 Debug.Assert(Validate(sortedProfileEvents), "The output should be always valid");
 

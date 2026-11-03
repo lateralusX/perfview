@@ -590,7 +590,15 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// The complete candidate, including the anchor, must resolve to one captured CoreLib module, contain a profile-recognized
     /// bridge layout (containing adjacent Task.RunContinuations/TrySetResult under the common rules), and have no live-context ownership or V1-dispatcher/V2-wrapper
     /// boundary. V2 additionally requires a physically matched current method or a resolved structural dispatch target.
+    /// Alternatively, a profile-matched V2 helper span can follow that activation's structurally consumed,
+    /// verified dispatch pair. The common rule accepts contiguous YieldAwaitable-family methods of the same
+    /// captured CoreLib before the scheduler anchor, without relying on a particular generated callback name.
     /// Rejected candidates stay intact and protected, including their completion chains.
+    /// </para>
+    /// <para>
+    /// A leaf-side wrapperless V2 dispatch pair can also own a contiguous span of resolved profiler-type
+    /// helpers. Cleanup represents that span and the pair with one dispatcher marker, preserving native
+    /// callees and logical targets. This needs physical runtime ownership, not method-completion events.
     /// </para>
     /// <para>
     /// Next, a resolved CoreLib AsyncProfiler.ResumeAsyncContext.Resume entry spine must establish ownership
@@ -633,6 +641,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         public void Apply(AsyncProfilerCallStackTransformState context)
         {
             List<AsyncProfilerStitchedFrame> frames = context.Frames;
+            CollapseProfilerDispatchSpan(context);
             int cleanupEnd = CollapseRuntimeResumptionBridge(context);
             int cleanupStart = CollapseProfilerOwnedPrefix(context, ref cleanupEnd);
             List<(int Start, int End)> rejectedSpans = null;
@@ -725,6 +734,88 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         #region private
+
+        private static void CollapseProfilerDispatchSpan(AsyncProfilerCallStackTransformState context)
+        {
+            if (context.TraceLog == null)
+            {
+                return;
+            }
+            List<AsyncProfilerStitchedFrame> frames = context.Frames;
+            for (int i = 0; i < frames.Count; i++)
+            {
+                AsyncProfilerStitchedFrame dispatcher = frames[i];
+                if (dispatcher.Origin != AsyncProfilerStitchedFrameOrigin.Sync ||
+                    dispatcher.ContextKind == AsyncProfilerStitchedFrameContextKind.ParentContext)
+                {
+                    return;
+                }
+                AsyncProfilerCallStackStitchBoundaryKind boundary = context.ClassifyBoundary(dispatcher.CodeAddress).Kind;
+                if (boundary == AsyncProfilerCallStackStitchBoundaryKind.None)
+                {
+                    if (dispatcher.Presentation != AsyncProfilerStitchedFramePresentation.Native)
+                    {
+                        return;
+                    }
+                    continue;
+                }
+                if (boundary != AsyncProfilerCallStackStitchBoundaryKind.V2DispatchContinuation)
+                {
+                    return;
+                }
+
+                bool marker = dispatcher.Presentation == AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames;
+                if (marker
+                    ? dispatcher.Context == null ||
+                      !context.HasVerifiedV2DispatchPair(dispatcher.Context, dispatcher.CodeAddress)
+                    : i + 1 >= frames.Count ||
+                      frames[i + 1].Origin != AsyncProfilerStitchedFrameOrigin.Sync ||
+                      frames[i + 1].Presentation != AsyncProfilerStitchedFramePresentation.Native ||
+                      !ReferenceEquals(dispatcher.Context, frames[i + 1].Context) ||
+                      !context.IsV2DispatchPair(dispatcher.CodeAddress, frames[i + 1].CodeAddress) ||
+                      (i + 2 < frames.Count &&
+                       context.ClassifyBoundary(frames[i + 2].CodeAddress).Kind ==
+                           AsyncProfilerCallStackStitchBoundaryKind.V2DispatchContinuation))
+                {
+                    return;
+                }
+
+                AsyncProfilerRuntimeRuleProfile profile = context.GetRuntimeProfile(dispatcher.CodeAddress);
+                if (!profile.IsOptionalInfrastructureFrame(dispatcher, boundary) ||
+                    (!marker && !profile.IsOptionalInfrastructureFrame(frames[i + 1], boundary)))
+                {
+                    return;
+                }
+                ModuleFileIndex owner = context.GetHostModuleOwner(dispatcher.CodeAddress);
+                int start = i;
+                while (start > 0)
+                {
+                    AsyncProfilerStitchedFrame helper = frames[start - 1];
+                    if (helper.Origin != AsyncProfilerStitchedFrameOrigin.Sync ||
+                        helper.Presentation != AsyncProfilerStitchedFramePresentation.Native ||
+                        helper.Method == MethodIndex.Invalid ||
+                        !ReferenceEquals(helper.Context, dispatcher.Context) ||
+                        owner == ModuleFileIndex.Invalid || owner != context.GetHostModuleOwner(helper.CodeAddress) ||
+                        !ReferenceEquals(profile, context.GetRuntimeProfile(helper.CodeAddress)) ||
+                        context.ClassifyBoundary(helper.CodeAddress).Kind != AsyncProfilerCallStackStitchBoundaryKind.None ||
+                        !profile.IsProfilerDispatchInfrastructure(
+                            AsyncProfilerCallStackStitchBoundary.NormalizeMethodName(
+                                context.TraceLog.CodeAddresses[helper.CodeAddress].FullMethodName)))
+                    {
+                        break;
+                    }
+                    start--;
+                }
+                if (start < i)
+                {
+                    // Retain the leafmost physical identity; the marker does not imply a logical method owner.
+                    frames[start] = frames[start].WithPresentation(AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames);
+                    frames.RemoveRange(start + 1, i - start + (marker ? 0 : 1));
+                    context.Diagnostics.AsyncInfrastructureFramesCollapsed += i - start + (marker ? 0 : 2);
+                }
+                return;
+            }
+        }
 
         private static int CollapseProfilerOwnedPrefix(AsyncProfilerCallStackTransformState context, ref int cleanupEnd)
         {

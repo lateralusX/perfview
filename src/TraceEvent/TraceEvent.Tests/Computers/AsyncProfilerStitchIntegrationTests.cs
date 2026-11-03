@@ -29,6 +29,108 @@ namespace TraceEventTests
     /// </summary>
     public class AsyncProfilerStitchIntegrationTests
     {
+        [Theory]
+        [InlineData(100_015, 100_010, 100_020)]
+        [InlineData(100_035, 100_030, 100_040)]
+        public void BorrowedUserStack_UsesSourceTimeForReconstruction(long userQpc, long asyncStart, long asyncEnd)
+        {
+            Frame work = Frame.App("Scenario.Work");
+            Frame current = Frame.App("Scenario.CurrentAsync");
+            Frame parent = Frame.App("Scenario.ParentAsync");
+            var scenario = new StitchScenario
+            {
+                Sync = new[] { work, current, Frame.V2Wrapper(0), Frame.V2InstrumentedDispatch,
+                    Frame.V2Dispatch, Frame.ThreadPoolDispatch, Frame.WorkerThreadStart },
+                Async = new[] { current, parent },
+                AsyncStartQpc = asyncStart,
+                AsyncEndQpc = asyncEnd,
+                ExpectedStitched = new[] { work, current, parent, Frame.ThreadPoolDispatch, Frame.WorkerThreadStart },
+                VerifyThreadTimeComputer = true,
+                IncludeEventSourceEvents = false,
+                AllowSupplementalSamples = true,
+                VerifySampleWeights = true,
+                ExpectedDiagnostics = new CallStackDiagnosticsExpectation
+                {
+                    SegmentsProcessed = 2,
+                    V2PlumbingFramesCollapsed = 4,
+                },
+                ConfigureTraceLog = log =>
+                {
+                    ConfigureCapturedRuntime(log, "11.0.0");
+                    foreach (TraceEvent data in log.Events.Where(e => e.CallStackIndex() != CallStackIndex.Invalid))
+                    {
+                        log.AddStackUserModeTimeStampQPC(data.EventIndex, userQpc);
+                    }
+                },
+                AssertTransformContext = context => Assert.Equal(userQpc, context.TimestampQpc),
+                AssertPublicApi = (log, path) =>
+                {
+                    var query = new AsyncProfilerCallStackComputer(log);
+                    var output = new MutableTraceEventStackSource(log);
+                    var builder = new AsyncProfilerCallStackSourceBuilder(output);
+                    foreach (TraceEvent data in log.Events.Where(e => e.CallStackIndex() != CallStackIndex.Invalid))
+                    {
+                        Assert.True(data.TryGetCallStackIndex(out var physical, out long timestamp));
+                        Assert.Equal(userQpc, timestamp);
+                        Assert.Empty(query.GetCallStacks(data));
+                        Assert.Single(query.GetCallStacks(data.ProcessID, (ulong)data.ThreadID, timestamp));
+#pragma warning disable CS0618
+                        Assert.Equal(output.GetCallStackThread(physical, data.Thread()),
+                            builder.GetCallStack(physical, data.TimeStampQPC));
+#pragma warning restore CS0618
+                        Assert.Equal(builder.GetCallStack(physical, timestamp), builder.GetCallStack(data));
+                    }
+                },
+            };
+            scenario.AssertProductionStitch();
+        }
+
+        [Theory]
+        [InlineData(false, false)]
+        [InlineData(false, true)]
+        [InlineData(true, false)]
+        [InlineData(true, true)]
+        public void RuntimeAsync_ResumeStub_IsConsumedStructurallyWithHonestBodyProvenance(
+            bool sampledStub, bool enableNormalization)
+        {
+            Frame work = Frame.App("Scenario.Work");
+            Frame current = Frame.App("Scenario.CurrentAsync");
+            Frame parent = Frame.App("Scenario.ParentAsync");
+            Frame stub = Frame.App("dynamicClass.IL_STUB_AsyncResume(class System.Object,unsigned int8&)");
+            Frame[] entry = { stub, Frame.V2Wrapper(0), Frame.V2InstrumentedDispatch,
+                Frame.V2Dispatch, Frame.ThreadPoolDispatch, Frame.WorkerThreadStart };
+            var scenario = new StitchScenario
+            {
+                Sync = sampledStub ? entry : new[] { work, current }.Concat(entry).ToArray(),
+                Async = new[] { current, parent },
+                ExpectedStitched = (sampledStub ? Array.Empty<Frame>() : new[] { work })
+                    .Concat(new[] { current, parent, Frame.ThreadPoolDispatch, Frame.WorkerThreadStart }).ToArray(),
+                EnableNormalization = enableNormalization,
+                EnableFrameAnnotations = true,
+                IncludeEventSourceEvents = false,
+                VerifyThreadTimeComputer = true,
+                AllowSupplementalSamples = true,
+                VerifySampleWeights = true,
+                ConfigureTraceLog = log => ConfigureCapturedRuntime(log, "12.0.0"),
+                ExpectedDiagnostics = new CallStackDiagnosticsExpectation
+                {
+                    SegmentsProcessed = 2,
+                    V2PlumbingFramesCollapsed = 6,
+                },
+                AssertTransformContext = context =>
+                {
+                    AsyncProfilerStitchedFrame anchor = Assert.Single(context.Frames.Where(frame =>
+                        frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent ||
+                        frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget));
+                    Assert.Equal(sampledStub ? AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget :
+                        AsyncProfilerStitchedFrameOrigin.AsyncCurrent, anchor.Origin);
+                    Assert.Equal(0, anchor.SegmentFrameIndex);
+                    Assert.DoesNotContain(context.Frames, frame => frame.SyncFrameKind == AsyncProfilerStitchSyncFrameKind.V2ResumeStub);
+                },
+            };
+            scenario.AssertProductionStitch();
+        }
+
         [Fact]
         public void PublicBuilder_TransformsRootsAndIncrementalLookup()
         {
@@ -1693,6 +1795,60 @@ namespace TraceEventTests
         }
 
         [Theory]
+        [InlineData(false, false)]
+        [InlineData(false, true)]
+        [InlineData(true, false)]
+        [InlineData(true, true)]
+        public void RuntimeAsync_ZeroIpInitialEntry_IsStructuralAndPreservesNativeCallees(
+            bool enableNormalization, bool enableInfrastructureCleanup)
+        {
+            Frame native = Frame.Library("coreclr", "Runtime.NativeWork", "NativeWork");
+            Frame entry = Frame.CoreLib(
+                "System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation+TaskContinuationResume.ResumeTaskContinuation",
+                "ResumeTaskContinuation");
+            Frame[] tail =
+            {
+                Frame.CoreLib("System.Threading.Tasks.Task.RunContinuations", "Task.RunContinuations"),
+                Frame.CoreLib("System.Threading.Tasks.Task`1.TrySetResult", "Task.TrySetResult"),
+                Frame.V2InstrumentedDispatch, Frame.V2Dispatch,
+                Frame.ThreadPoolDispatch, Frame.WorkerThreadStart,
+            };
+            var scenario = new StitchScenario
+            {
+                Sync = new[] { native, entry, Frame.V2Wrapper(0), Frame.V2InstrumentedDispatch, Frame.V2Dispatch }
+                    .Concat(tail).ToArray(),
+                Async = new[] { Frame.Zero, Frame.App("Scenario.ParallelWhenAllAsync") },
+                ContextParent = AsyncSegment.Runtime(Frame.App("Scenario.OwnerAsync")),
+                ExpectedStitched = new[] { native, entry.DispatcherFrames() }.Concat(tail).ToArray(),
+                EnableNormalization = enableNormalization,
+                EnableInfrastructureCleanup = enableInfrastructureCleanup,
+                EnableFrameAnnotations = true,
+                EnableParentContexts = true,
+                IncludeEventSourceEvents = false,
+                VerifySampleWeights = true,
+                VerifyThreadTimeComputer = true,
+                ExpectedDiagnostics = new CallStackDiagnosticsExpectation
+                {
+                    SegmentsProcessed = 2,
+                    V2PlumbingFramesCollapsed = 4,
+                },
+                AssertTransformContext = context =>
+                {
+                    Assert.All(context.Frames, frame =>
+                        Assert.Equal(AsyncProfilerStitchedFrameOrigin.Sync, frame.Origin));
+                    AsyncProfilerStitchedFrame marker = Assert.Single(context.Frames.Where(frame =>
+                        frame.Presentation == AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames));
+                    Assert.NotEqual(CodeAddressIndex.Invalid, marker.CodeAddress);
+                    Assert.NotEqual(MethodIndex.Invalid, marker.Method);
+                    Assert.Same(context.Segments[0], marker.Context);
+                    Assert.Equal(0, marker.Context.GetCompletedFrameCount(context.TimestampQpc));
+                },
+            };
+
+            scenario.AssertProductionStitch();
+        }
+
+        [Theory]
         [InlineData(2, 3, 0, 0, 0, 1)]
         [InlineData(0, 0, 1, 0, 0, 1)]
         [InlineData(0, 2, 0, 2, 0, 2)]
@@ -2070,8 +2226,10 @@ namespace TraceEventTests
                     Frame.App("Scenario.Level2Async"),
                     Frame.App("Program.Main"),
                 },
-                ExpectedStitched = callees.Concat(enableInfrastructureCleanup
-                    ? new[] { Frame.V2InstrumentedDispatch.DispatcherFrames() } : dispatch).Concat(root).ToArray(),
+                ExpectedStitched = (enableInfrastructureCleanup && flush ? callees.Take(2) : callees)
+                    .Concat(enableInfrastructureCleanup
+                        ? new[] { (flush ? callees[2] : Frame.V2InstrumentedDispatch).DispatcherFrames() }
+                        : dispatch).Concat(root).ToArray(),
                 EnableInfrastructureCleanup = enableInfrastructureCleanup,
                 IncludeEventSourceEvents = false,
                 VerifySampleWeights = true,
@@ -2101,11 +2259,167 @@ namespace TraceEventTests
                 ExpectedDiagnostics = new CallStackDiagnosticsExpectation
                 {
                     V2SyncLayoutUsed = 2,
-                    AsyncInfrastructureFramesCollapsed = enableInfrastructureCleanup ? 4 : 0,
+                    AsyncInfrastructureFramesCollapsed = enableInfrastructureCleanup ? (flush ? 6 : 4) : 0,
                 },
             };
 
             scenario.AssertProductionStitch();
+        }
+
+        [Theory]
+        [InlineData(false, false)]
+        [InlineData(false, true)]
+        [InlineData(true, false)]
+        [InlineData(true, true)]
+        public void RuntimeAsync_ProfilerDispatchWithoutWrapper_GroupsOnlyMachinery(
+            bool normalization, bool completionEvents)
+        {
+            Frame native = Frame.Library("coreclr", "SampledNativeCallee", "NativeCallee");
+            Frame[] helpers =
+            {
+                Frame.CoreLib("System.Runtime.CompilerServices.AsyncProfiler+AsyncThreadContext.Acquire", "Acquire"),
+                Frame.CoreLib("System.Runtime.CompilerServices.AsyncProfilerEventSource.WriteAsyncEventBuffer", "WriteAsyncEventBuffer"),
+                Frame.CoreLib("System.Runtime.CompilerServices.AsyncProfiler+AsyncCallstack.EmitEvent", "EmitEvent"),
+                Frame.CoreLib("System.Runtime.CompilerServices.AsyncProfiler+CompleteAsyncMethod.Complete", "CompleteAsyncMethod.Complete"),
+            };
+            Frame completed = Frame.App("Scenario.BurnCpuAsync");
+            Frame pending = Frame.App("Scenario.ParallelBranchAsync");
+            Frame[] dispatch = { Frame.V2InstrumentedDispatch, Frame.V2Dispatch };
+            Frame[] root = { Frame.ThreadPoolDispatch, Frame.WorkerThreadStart };
+            Frame[] logical = completionEvents ? new[] { pending } : Array.Empty<Frame>();
+            Frame[] structural = new[] { native }.Concat(helpers)
+                .Concat(completionEvents ? new[] { Frame.V2InstrumentedDispatch.DispatcherFrames() } : dispatch)
+                .Concat(logical).Concat(root).ToArray();
+            var scenario = new StitchScenario
+            {
+                Sync = new[] { native }.Concat(helpers).Concat(dispatch).Concat(root).ToArray(),
+                Async = new[] { completed, pending },
+                OmitSymbolFor = native,
+                MethodCompletions = completionEvents ? 1 : 0,
+                ExpectedStitched = new[] { native, helpers[0].DispatcherFrames() }.Concat(logical).Concat(root).ToArray(),
+                ExpectedWithoutNormalization = structural,
+                ExpectedWithoutInfrastructureCleanup = structural,
+                EnableNormalization = normalization,
+                EnableInfrastructureCleanup = true,
+                IncludeEventSourceEvents = false,
+                VerifySampleWeights = true,
+                VerifyThreadTimeComputer = true,
+                ExpectedDiagnostics = new CallStackDiagnosticsExpectation
+                {
+                    SegmentsProcessed = completionEvents ? 2 : 0,
+                    V2SyncLayoutUsed = completionEvents ? 0 : 2,
+                    V2PlumbingFramesCollapsed = completionEvents ? 4 : 0,
+                    AsyncInfrastructureFramesCollapsed = (helpers.Length + (completionEvents ? 0 : 2)) * 2,
+                },
+                AssertTransformContext = context =>
+                {
+                    Assert.Equal(completionEvents ? 1 : 0, context.Segments[0].GetCompletedFrameCount(context.TimestampQpc));
+                    AsyncProfilerStitchedFrame marker = Assert.Single(context.Frames.Where(frame =>
+                        frame.Presentation == AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames));
+                    Assert.Equal(context.Frames[1], marker);
+                    Assert.Contains("AsyncThreadContext.Acquire", context.TraceLog.CodeAddresses[marker.CodeAddress].FullMethodName);
+                    Assert.Equal(AsyncProfilerStitchedFrameOrigin.Sync, marker.Origin);
+                    Assert.DoesNotContain(context.Frames, frame =>
+                        frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent ||
+                        frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCompleting);
+                    if (completionEvents)
+                    {
+                        AsyncProfilerStitchedFrame target = Assert.Single(context.Frames.Where(frame =>
+                            frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget));
+                        Assert.Equal(1, target.SegmentFrameIndex);
+                        Assert.Same(target.Context, marker.Context);
+                    }
+                    else
+                    {
+                        Assert.All(context.Frames, frame => Assert.Null(frame.Context));
+                    }
+                },
+            };
+
+            scenario.AssertProductionStitch();
+        }
+
+        [Theory]
+        [InlineData("foreign-helper")]
+        [InlineData("unresolved-helper")]
+        [InlineData("unknown-helper")]
+        [InlineData("lookalike-profiler")]
+        [InlineData("reversed-pair")]
+        [InlineData("different-dispatch-type")]
+        [InlineData("foreign-dispatch")]
+        public void RuntimeAsync_ProfilerDispatchWithoutWrapper_RejectsUnverifiedHelpersOrPairs(string obstruction)
+        {
+            const string completeName = "System.Runtime.CompilerServices.AsyncProfiler+CompleteAsyncMethod.Complete";
+            Frame helper = obstruction == "foreign-helper"
+                ? Frame.Library("OtherRuntime", completeName, "ForeignComplete")
+                : Frame.CoreLib(obstruction == "unknown-helper"
+                    ? "System.Runtime.CompilerServices.UnknownHelper.Complete"
+                    : obstruction == "lookalike-profiler"
+                        ? "System.Runtime.CompilerServices.AsyncProfilerExtra+CompleteAsyncMethod.Complete"
+                        : completeName, "Complete");
+            Frame[] dispatch = { Frame.V2InstrumentedDispatch, Frame.V2Dispatch };
+            if (obstruction == "reversed-pair")
+            {
+                Array.Reverse(dispatch);
+            }
+            else if (obstruction == "different-dispatch-type")
+            {
+                dispatch[1] = Frame.CoreLib("System.Threading.Tasks.OtherRuntimeAsyncTask.DispatchContinuations", "OtherDispatch");
+            }
+            else if (obstruction == "foreign-dispatch")
+            {
+                dispatch[1] = Frame.Library("OtherRuntime", Frame.V2Dispatch.SymbolName, "ForeignDispatch");
+            }
+            Frame[] root = { Frame.ThreadPoolDispatch, Frame.WorkerThreadStart };
+            Frame[] sync = new[] { helper }.Concat(dispatch).Concat(root).ToArray();
+            var scenario = new StitchScenario
+            {
+                Sync = sync,
+                Async = new[] { Frame.App("Scenario.PendingAsync") },
+                OmitSymbolFor = obstruction == "unresolved-helper" ? helper : null,
+                ExpectedStitched = new[] { helper, dispatch[0].DispatcherFrames() }
+                    .Concat(obstruction == "foreign-dispatch" ? new[] { dispatch[1] } : Array.Empty<Frame>())
+                    .Concat(root).ToArray(),
+                ExpectedWithoutNormalization = sync,
+                ExpectedWithoutInfrastructureCleanup = sync,
+                EnableInfrastructureCleanup = true,
+                IncludeEventSourceEvents = false,
+                VerifySampleWeights = true,
+                ExpectedDiagnostics = new CallStackDiagnosticsExpectation
+                {
+                    V2SyncLayoutUsed = 2,
+                    AsyncInfrastructureFramesCollapsed = obstruction == "foreign-dispatch" ? 2 : 4,
+                },
+            };
+
+            scenario.AssertProductionStitch();
+        }
+
+        [Fact]
+        public void RuntimeAsync_ProfilerDispatchWithoutWrapper_DoesNotCrossApplicationCallbacks()
+        {
+            Frame emission = Frame.CoreLib("System.Runtime.CompilerServices.AsyncProfiler+AsyncCallstack.EmitEvent", "EmitEvent");
+            Frame callback = Frame.App("Scenario.SynchronousCallback");
+            Frame complete = Frame.CoreLib("System.Runtime.CompilerServices.AsyncProfiler+CompleteAsyncMethod.Complete", "Complete");
+            Frame[] root = { Frame.ThreadPoolDispatch, Frame.WorkerThreadStart };
+            Frame[] sync = new[] { emission, callback, complete, Frame.V2InstrumentedDispatch, Frame.V2Dispatch }
+                .Concat(root).ToArray();
+            new StitchScenario
+            {
+                Sync = sync,
+                Async = new[] { Frame.App("Scenario.PendingAsync") },
+                ExpectedStitched = new[] { emission, callback, complete.DispatcherFrames() }.Concat(root).ToArray(),
+                ExpectedWithoutNormalization = sync,
+                ExpectedWithoutInfrastructureCleanup = sync,
+                EnableInfrastructureCleanup = true,
+                IncludeEventSourceEvents = false,
+                VerifySampleWeights = true,
+                ExpectedDiagnostics = new CallStackDiagnosticsExpectation
+                {
+                    V2SyncLayoutUsed = 2,
+                    AsyncInfrastructureFramesCollapsed = 6,
+                },
+            }.AssertProductionStitch();
         }
 
         [Theory]
@@ -5427,6 +5741,60 @@ namespace TraceEventTests
         }
 
         [Theory]
+        [InlineData((int)AsyncCallstackKind.StateMachineAsync, true, false)]
+        [InlineData((int)AsyncCallstackKind.StateMachineAsync, false, false)]
+        [InlineData((int)AsyncCallstackKind.StateMachineAsync, true, true)]
+        [InlineData((int)AsyncCallstackKind.RuntimeAsync, true, false)]
+        [InlineData((int)AsyncCallstackKind.RuntimeAsync, false, false)]
+        [InlineData((int)AsyncCallstackKind.RuntimeAsync, true, true)]
+        public void PdbNames_EnableOnlyVerifiedResumptionBridgeCleanupWithoutRewritingSymbols(
+            int kindValue, bool cleanup, bool lookalike)
+        {
+            StitchScenario scenario = CreateRuntimeResumptionBridgeScenario((AsyncCallstackKind)kindValue);
+            Frame[] pdbFrames =
+            {
+                Frame.CoreLib("System.Void System.Threading.Tasks.Task::RunContinuations(System.Object)", "Task.RunContinuations"),
+                Frame.CoreLib(lookalike
+                    ? "System.Boolean Other.Namespace.Task::TrySetResult(!0)"
+                    : "System.Boolean System.Threading.Tasks.Task`1[System.Int64]::TrySetResult(!0)", "Task.TrySetResult"),
+                Frame.CoreLib("System.Threading.ThreadPoolWorkQueue+DispatchResult System.Threading.ThreadPoolWorkQueue::Dispatch()", "ThreadPoolWorkQueue.Dispatch"),
+                Frame.CoreLib("System.Void System.Threading.PortableThreadPool+WorkerThread::WorkerThreadStart()", "WorkerThreadStart"),
+            };
+            foreach (Frame pdbFrame in pdbFrames)
+            {
+                Frame original = scenario.Sync.Single(frame => frame.Label == pdbFrame.Label);
+                scenario.Sync = scenario.Sync.Select(frame => frame == original ? pdbFrame : frame).ToArray();
+                scenario.ExpectedStitched = scenario.ExpectedStitched.Select(frame => frame == original ? pdbFrame : frame).ToArray();
+                scenario.ExpectedWithoutInfrastructureCleanup = scenario.ExpectedWithoutInfrastructureCleanup
+                    .Select(frame => frame == original ? pdbFrame : frame).ToArray();
+            }
+            scenario.EnableInfrastructureCleanup = cleanup;
+            scenario.VerifyThreadTimeComputer = true;
+            scenario.IncludeEventSourceEvents = false;
+            scenario.AllowSupplementalSamples = true;
+            if (!cleanup || lookalike)
+            {
+                scenario.ExpectedStitched = scenario.ExpectedWithoutInfrastructureCleanup;
+                scenario.ExpectedDiagnostics.AsyncInfrastructureFramesCollapsed = 0;
+                scenario.ExpectedDiagnostics.RuntimeResumptionBridgeFramesCollapsed = 0;
+            }
+            scenario.AssertPublicApi = (log, path) =>
+            {
+                TraceEvent sample = log.Events.First(data => data.CallStackIndex() != CallStackIndex.Invalid);
+                var names = new List<string>();
+                for (CallStackIndex stack = sample.CallStackIndex(); stack != CallStackIndex.Invalid; stack = log.CallStacks.Caller(stack))
+                {
+                    names.Add(log.CodeAddresses[log.CallStacks.CodeAddressIndex(stack)].FullMethodName);
+                }
+                foreach (Frame frame in pdbFrames)
+                {
+                    Assert.Contains(frame.SymbolName, names);
+                }
+            };
+            scenario.AssertProductionStitch();
+        }
+
+        [Theory]
         [InlineData((int)AsyncCallstackKind.StateMachineAsync, false, false)]
         [InlineData((int)AsyncCallstackKind.StateMachineAsync, false, true)]
         [InlineData((int)AsyncCallstackKind.StateMachineAsync, true, false)]
@@ -6489,7 +6857,7 @@ namespace TraceEventTests
         [InlineData(false, true)]
         [InlineData(true, false)]
         [InlineData(true, true)]
-        public void RuntimeAsync_TaskContinuationResume_CleanupPreservesCalleesParentsAndRejectedBridge(
+        public void RuntimeAsync_TaskContinuationResume_DispatchOnlyPreservesCalleesAndRejectedBridge(
             bool helperIsLeaf, bool enableInfrastructureCleanup)
         {
             Frame resume = Frame.CoreLib(
@@ -6521,21 +6889,18 @@ namespace TraceEventTests
                 IncludeEventSourceEvents = false,
                 VerifySampleWeights = true,
                 VerifyThreadTimeComputer = true,
-                ExpectedStitched = callees
-                    .Concat(enableInfrastructureCleanup ? Array.Empty<Frame>() : new[] { resume })
-                    .Concat(new[] { current, parent, owner }).Concat(tail).ToArray(),
+                ExpectedStitched = callees.Concat(new[] { resume.DispatcherFrames() }).Concat(tail).ToArray(),
                 ExpectedDiagnostics = new CallStackDiagnosticsExpectation
                 {
                     SegmentsProcessed = 2,
                     V2PlumbingFramesCollapsed = 4,
-                    AsyncInfrastructureFramesCollapsed = enableInfrastructureCleanup ? 2 : 0,
                 },
                 AssertTransformContext = context =>
                 {
-                    Assert.DoesNotContain(context.Frames, frame =>
-                        frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent);
+                    Assert.All(context.Frames, frame =>
+                        Assert.Equal(AsyncProfilerStitchedFrameOrigin.Sync, frame.Origin));
                     Assert.Single(context.Frames.Where(frame =>
-                        frame.ContextKind == AsyncProfilerStitchedFrameContextKind.ParentContext));
+                        frame.Presentation == AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames));
                 },
             };
 
@@ -6580,6 +6945,358 @@ namespace TraceEventTests
                     context.Frames.Count(frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget));
                 Assert.DoesNotContain(context.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent);
             };
+
+            scenario.AssertProductionStitch();
+        }
+
+        [Theory]
+        [InlineData(false, false)]
+        [InlineData(false, true)]
+        [InlineData(true, false)]
+        [InlineData(true, true)]
+        public void RuntimeResumptionBridge_V2NativePrefix_PreservesWorkAndProjectsOnlyADispatchTarget(
+            bool resumeStub, bool methodEvents)
+        {
+            StitchScenario scenario = CreateNativeRuntimeDispatchScenario(resumeStub, methodEvents);
+            scenario.OmitSymbolFor = scenario.Sync[0];
+            scenario.AssertTransformContext = context =>
+            {
+                AsyncProfilerStitchedFrame target = Assert.Single(context.Frames.Where(frame =>
+                    frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget));
+                Assert.Equal(1, target.SegmentFrameIndex);
+                Assert.Same(context.Segments[0], target.Context);
+                Assert.Equal(context.Segments[0].Frames.CodeAddressAt(1), target.CodeAddress);
+                Assert.DoesNotContain(context.Frames, frame =>
+                    frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent);
+                Assert.All(context.Frames.Take(2), frame =>
+                    Assert.Equal(AsyncProfilerStitchedFrameOrigin.Sync, frame.Origin));
+                Assert.Equal(MethodIndex.Invalid, context.Frames[0].Method);
+                Assert.NotEqual(MethodIndex.Invalid, context.Frames[1].Method);
+            };
+
+            scenario.AssertProductionStitch();
+        }
+
+        [Theory]
+        [InlineData(false, false)]
+        [InlineData(false, true)]
+        [InlineData(true, false)]
+        [InlineData(true, true)]
+        public void RuntimeResumptionBridge_V2NativeEntry_PreservesArbitraryCallees(
+            bool resumeStub, bool unresolvedEntry)
+        {
+            StitchScenario scenario = CreateNativeRuntimeDispatchScenario(resumeStub, false);
+            Frame entry = scenario.Sync[1];
+            Frame[] callees =
+            {
+                Frame.Library("ntdll", "RtlAllocateHeap", "OS work"),
+                Frame.App("Scenario.LoaderCallback"),
+                Frame.Library("thirdparty", "ThirdParty.NativeHelper", "Native callback work"),
+            };
+            scenario.Sync = callees.Concat(scenario.Sync).ToArray();
+            scenario.ExpectedStitched = callees.Concat(scenario.ExpectedStitched).ToArray();
+            scenario.ExpectedWithoutInfrastructureCleanup =
+                callees.Concat(scenario.ExpectedWithoutInfrastructureCleanup).ToArray();
+            scenario.OmitSymbolFor = unresolvedEntry ? entry : callees[0];
+            scenario.AssertTransformContext = context =>
+            {
+                AsyncProfilerStitchedFrame target = Assert.Single(context.Frames.Where(frame =>
+                    frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget));
+                Assert.Equal(1, target.SegmentFrameIndex);
+                Assert.DoesNotContain(context.Frames, frame =>
+                    frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent);
+                Assert.All(context.Frames.Take(5), frame =>
+                    Assert.Equal(AsyncProfilerStitchedFrameOrigin.Sync, frame.Origin));
+                Assert.Equal(MethodIndex.Invalid, context.Frames[unresolvedEntry ? 4 : 0].Method);
+            };
+
+            scenario.AssertProductionStitch();
+        }
+
+        [Theory]
+        [InlineData("physical-target")]
+        [InlineData("v1-dispatcher")]
+        [InlineData("v2-dispatch")]
+        [InlineData("extra-stub")]
+        public void RuntimeResumptionBridge_V2NativeEntry_RejectsConflictingCalleeEvidence(string obstruction)
+        {
+            StitchScenario scenario = CreateNativeRuntimeDispatchScenario(false, false);
+            Frame conflict = obstruction == "physical-target" ? scenario.Async[1] :
+                obstruction == "v1-dispatcher" ? Frame.V1MoveNextAsDispatcher :
+                obstruction == "v2-dispatch" ? Frame.V2InstrumentedDispatch :
+                Frame.App("dynamicClass.IL_STUB_AsyncResume");
+            scenario.Sync = new[] { conflict }.Concat(scenario.Sync).ToArray();
+            scenario.EnableNormalization = false;
+            scenario.EnableInfrastructureCleanup = false;
+            scenario.ExpectedStitched = scenario.Sync.Take(3).Concat(scenario.Async.Skip(2))
+                .Concat(scenario.Sync.Skip(6)).ToArray();
+            scenario.ExpectedWithoutInfrastructureCleanup = scenario.ExpectedStitched;
+            scenario.ExpectedDiagnostics.AdjacencyMismatches = 2;
+            scenario.ExpectedDiagnostics.AsyncInfrastructureFramesCollapsed = 0;
+            scenario.ExpectedDiagnostics.RuntimeResumptionBridgeFramesCollapsed = 0;
+            scenario.AssertTransformContext = context =>
+            {
+                Assert.DoesNotContain(context.Frames, frame =>
+                    frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget ||
+                    frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent);
+            };
+
+            scenario.AssertProductionStitch();
+        }
+
+        [Fact]
+        public void RuntimeResumptionBridge_V2NativePrefix_ProjectsInnerTargetWithoutReplacingTheOuterBody()
+        {
+            StitchScenario scenario = CreateNativeRuntimeDispatchScenario(false, false);
+            Frame outer = Frame.App("Scenario.OuterAsync");
+            Frame outerParent = Frame.App("Scenario.OuterParentAsync");
+            scenario.AsyncSegments = new[]
+            {
+                AsyncSegment.Runtime(outer, outerParent),
+                AsyncSegment.Runtime(scenario.Async),
+            };
+            scenario.Sync = scenario.Sync.Take(5).Concat(new[]
+            {
+                outer, Frame.V2Wrapper(0), Frame.V2InstrumentedDispatch, Frame.V2Dispatch,
+            }).Concat(scenario.Sync.Skip(5)).ToArray();
+            Frame[] logical = scenario.Sync.Take(2).Concat(scenario.Async.Skip(1))
+                .Concat(new[] { outer, outerParent }).ToArray();
+            scenario.ExpectedStitched = logical.Concat(scenario.Sync.Skip(scenario.Sync.Length - 2)).ToArray();
+            scenario.ExpectedWithoutInfrastructureCleanup = logical.Concat(scenario.Sync.Skip(9)).ToArray();
+            scenario.ExpectedDiagnostics.SegmentsProcessed = 4;
+            scenario.ExpectedDiagnostics.V2PlumbingFramesCollapsed = 8;
+            scenario.AssertTransformContext = context =>
+            {
+                Assert.Same(context.Segments[1], Assert.Single(context.Frames.Where(frame =>
+                    frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget)).Context);
+                Assert.Same(context.Segments[0], Assert.Single(context.Frames.Where(frame =>
+                    frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent)).Context);
+            };
+
+            scenario.AssertProductionStitch();
+        }
+
+        [Theory]
+        [InlineData("foreign-runtime")]
+        [InlineData("managed-image")]
+        [InlineData("missing-image")]
+        [InlineData("application-callback")]
+        [InlineData("unresolved-target")]
+        [InlineData("completed")]
+        [InlineData("before-base")]
+        public void RuntimeResumptionBridge_V2NativePrefix_UnverifiedEvidenceDoesNotProjectATarget(string obstruction)
+        {
+            StitchScenario scenario = CreateNativeRuntimeDispatchScenario(false, false);
+            Action<TraceLog> configure = scenario.ConfigureTraceLog;
+            scenario.ConfigureTraceLog = log =>
+            {
+                configure(log);
+                TraceModuleFile native = log.ModuleFiles.First(module => module.Name == "coreclr");
+                if (obstruction == "foreign-runtime")
+                {
+                    native.fileName = @"C:\other-runtime\coreclr.dll";
+                }
+                else if (obstruction == "managed-image")
+                {
+                    native.managedModule = log.ModuleFiles.First(module => string.Equals(
+                        module.Name, AsyncProfilerCallStackStitchBoundary.HostModuleName, StringComparison.OrdinalIgnoreCase));
+                }
+                else if (obstruction == "missing-image")
+                {
+                    native.imageBase = 0;
+                }
+            };
+            if (obstruction == "application-callback")
+            {
+                scenario.Sync = scenario.Sync.Take(2).Concat(new[] { Frame.App("Scenario.UnrelatedCallback") })
+                    .Concat(scenario.Sync.Skip(2)).ToArray();
+            }
+            else if (obstruction == "unresolved-target")
+            {
+                scenario.OmitSymbolFor = scenario.Async[1];
+            }
+            else if (obstruction == "completed")
+            {
+                scenario.MethodCompletions = scenario.Async.Length;
+            }
+            else if (obstruction == "before-base")
+            {
+                scenario.ContinuationIndexBase = 2;
+            }
+            int wrapper = Array.FindIndex(scenario.Sync, frame => frame.Kind == FrameKind.V2Wrapper);
+            int completed = obstruction == "completed" ? scenario.Async.Length - 1 :
+                obstruction == "before-base" ? 0 : 1;
+            scenario.ExpectedStitched = scenario.Sync.Take(wrapper).Concat(scenario.Async.Skip(completed + 1))
+                .Concat(scenario.Sync.Skip(wrapper + 3)).ToArray();
+            scenario.ExpectedWithoutInfrastructureCleanup = scenario.ExpectedStitched;
+            scenario.ExpectedDiagnostics.AsyncInfrastructureFramesCollapsed = 0;
+            scenario.ExpectedDiagnostics.RuntimeResumptionBridgeFramesCollapsed = 0;
+            scenario.ExpectedDiagnostics.AdjacencyMismatches =
+                obstruction == "unresolved-target" || obstruction == "before-base" ? 0 : 2;
+            scenario.AssertTransformContext = context =>
+            {
+                Assert.DoesNotContain(context.Frames, frame =>
+                    frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget ||
+                    frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent);
+            };
+
+            scenario.AssertProductionStitch();
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void RuntimeResumptionBridge_YieldFamily_FoldsOnlyTheBoundedMachinerySpan(bool multiple)
+        {
+            Frame[] yieldFrames = multiple ? new[]
+            {
+                Frame.CoreLib("System.Runtime.CompilerServices.YieldAwaitable+YieldAwaiter+<>c::<DifferentCallback>b__91_2(System.Action)",
+                    "Yield.GeneratedCallback"),
+                Frame.CoreLib("System.Void System.Runtime.CompilerServices.YieldAwaitable+YieldAwaiter+Helper`1[System.Int64]::Invoke()",
+                    "Yield.NestedHelper"),
+                Frame.CoreLib("System.Runtime.CompilerServices.YieldAwaitable.GetAwaiter()", "Yield.GetAwaiter"),
+            } : new[]
+            {
+                Frame.CoreLib("System.Runtime.CompilerServices.YieldAwaitable+YieldAwaiter+<>c::<OutputCorrelationEtwEvent>b__6_0(System.Action, System.Threading.Tasks.Task)",
+                    "Yield.Correlation"),
+            };
+            StitchScenario scenario = CreateYieldRuntimeBridgeScenario(yieldFrames);
+            Frame leafSideYield = Frame.CoreLib(
+                "System.Runtime.CompilerServices.YieldAwaitable+YieldAwaiter.GetResult()", "Yield.ApplicationWork");
+            scenario.Sync = new[] { leafSideYield }.Concat(scenario.Sync).ToArray();
+            scenario.ExpectedStitched = new[] { leafSideYield }.Concat(scenario.ExpectedStitched).ToArray();
+            scenario.ExpectedWithoutInfrastructureCleanup =
+                new[] { leafSideYield }.Concat(scenario.ExpectedWithoutInfrastructureCleanup).ToArray();
+            scenario.ExpectedWithoutNormalization = scenario.ExpectedWithoutInfrastructureCleanup;
+
+            scenario.AssertProductionStitch();
+        }
+
+        [Theory]
+        [InlineData("missing-instrumented")]
+        [InlineData("reversed-pair")]
+        [InlineData("duplicate-pair")]
+        [InlineData("foreign-module")]
+        [InlineData("other-corelib")]
+        [InlineData("lookalike")]
+        [InlineData("namespace-lookalike")]
+        [InlineData("interrupted")]
+        [InlineData("unresolved-yield")]
+        [InlineData("unresolved-anchor")]
+        [InlineData("unverified-current")]
+        public void RuntimeResumptionBridge_YieldFamily_UnverifiedSpansRemainIntact(string obstruction)
+        {
+            Frame yield = Frame.CoreLib(
+                "System.Runtime.CompilerServices.YieldAwaitable+YieldAwaiter+<>c.Callback()", "Yield.Callback");
+            Frame[] span = obstruction == "interrupted" ? new[]
+            {
+                yield, Frame.App("Scenario.UnrelatedCallback"),
+                Frame.CoreLib(
+                    "System.Runtime.CompilerServices.YieldAwaitable+YieldAwaiter.System.Runtime.CompilerServices.IStateMachineBoxAwareAwaiter.AwaitUnsafeOnCompleted(class System.Runtime.CompilerServices.IAsyncStateMachineBox)",
+                    "Yield.Registration"),
+            } : new[]
+            {
+                obstruction == "foreign-module" ? Frame.Library("Other.CoreLib", yield.SymbolName, "Foreign.Yield") :
+                obstruction == "other-corelib" ? Frame.Library(
+                    @"C:\other\System.Private.CoreLib.dll", yield.SymbolName, "OtherCoreLib.Yield") :
+                obstruction == "lookalike" ? Frame.CoreLib(
+                    "System.Runtime.CompilerServices.YieldAwaitableLookalike+YieldAwaiter.Callback()", "Lookalike.Yield") :
+                obstruction == "namespace-lookalike" ? Frame.CoreLib(
+                    "System.Runtime.CompilerServices.YieldAwaitable.OtherType.Callback()", "NamespaceLookalike.Yield") : yield,
+            };
+            StitchScenario scenario = CreateYieldRuntimeBridgeScenario(span);
+            if (obstruction == "missing-instrumented")
+            {
+                scenario.Sync = scenario.Sync.Where(frame => frame != Frame.V2InstrumentedDispatch).ToArray();
+                scenario.ExpectedDiagnostics.V2PlumbingFramesCollapsed = 2;
+            }
+            else if (obstruction == "reversed-pair")
+            {
+                scenario.Sync[3] = Frame.V2Dispatch;
+                scenario.Sync[4] = Frame.V2InstrumentedDispatch;
+            }
+            else if (obstruction == "duplicate-pair")
+            {
+                scenario.Sync[4] = Frame.V2InstrumentedDispatch;
+            }
+            else if (obstruction == "unresolved-yield")
+            {
+                scenario.OmitSymbolFor = yield;
+            }
+            else if (obstruction == "unresolved-anchor")
+            {
+                scenario.OmitSymbolFor = scenario.Sync[scenario.Sync.Length - 2];
+            }
+            else if (obstruction == "unverified-current")
+            {
+                Frame other = Frame.App("Scenario.OtherAsync");
+                scenario.Sync[1] = other;
+                scenario.ExpectedWithoutInfrastructureCleanup[1] = other;
+                scenario.ExpectedDiagnostics.AdjacencyMismatches = 2;
+            }
+            scenario.ExpectedStitched = scenario.ExpectedWithoutInfrastructureCleanup;
+            scenario.ExpectedWithoutNormalization = scenario.ExpectedStitched;
+            scenario.ExpectedDiagnostics.AsyncInfrastructureFramesCollapsed = 0;
+            scenario.ExpectedDiagnostics.RuntimeResumptionBridgeFramesCollapsed = 0;
+
+            scenario.AssertProductionStitch();
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void RuntimeResumptionBridge_YieldFamily_WithoutStructuralPairEvidenceRemainsIntact(bool traceContext)
+        {
+            StitchScenario scenario = CreateYieldRuntimeBridgeScenario(Frame.CoreLib(
+                "System.Runtime.CompilerServices.YieldAwaitable+YieldAwaiter.Callback()", "Yield.Callback"));
+            scenario.EnableInfrastructureCleanup = false;
+            scenario.ExpectedStitched = scenario.ExpectedWithoutInfrastructureCleanup;
+            scenario.ExpectedDiagnostics.AsyncInfrastructureFramesCollapsed = 0;
+            scenario.ExpectedDiagnostics.RuntimeResumptionBridgeFramesCollapsed = 0;
+            scenario.AssertTransformContext = context =>
+            {
+                var diagnostics = new AsyncProfilerCallStackDiagnostics { SegmentsProcessed = context.Segments.Count };
+                var pipeline = new AsyncProfilerCallStackTransformPipeline
+                {
+                    EnableNormalization = false,
+                    EnableInfrastructureCleanup = true,
+                };
+                AsyncProfilerStitchResult result = pipeline.Transform(
+                    new AsyncProfilerStitchResult(context.Frames.ToArray(), diagnostics),
+                    context.Segments, context.TimestampQpc, context.ClassifyBoundary,
+                    traceContext ? context.TraceLog : null);
+                Assert.Equal(context.Frames, result.Frames);
+                Assert.Equal(0, diagnostics.RuntimeResumptionBridgeFramesCollapsed);
+            };
+
+            scenario.AssertProductionStitch();
+        }
+
+        [Fact]
+        public void RuntimeResumptionBridge_YieldFamily_RequiresTheRootDispatchPairNotAnInnerPair()
+        {
+            Frame yield = Frame.CoreLib(
+                "System.Runtime.CompilerServices.YieldAwaitable+YieldAwaiter.Callback()", "Yield.Callback");
+            StitchScenario scenario = CreateYieldRuntimeBridgeScenario(yield);
+            Frame inner = Frame.App("Scenario.InnerAsync");
+            Frame innerParent = Frame.App("Scenario.InnerParentAsync");
+            scenario.AsyncSegments = new[]
+            {
+                AsyncSegment.Runtime(scenario.Async),
+                AsyncSegment.Runtime(inner, innerParent),
+            };
+            scenario.Sync = new[]
+            {
+                inner, Frame.V2Wrapper(0), Frame.V2InstrumentedDispatch, Frame.V2Dispatch,
+            }.Concat(scenario.Sync.Where(frame => frame != Frame.V2InstrumentedDispatch)).ToArray();
+            scenario.ExpectedStitched = new[] { inner, innerParent }
+                .Concat(scenario.ExpectedWithoutInfrastructureCleanup).ToArray();
+            scenario.ExpectedWithoutInfrastructureCleanup = scenario.ExpectedStitched;
+            scenario.ExpectedWithoutNormalization = scenario.ExpectedStitched;
+            scenario.ExpectedDiagnostics.SegmentsProcessed = 4;
+            scenario.ExpectedDiagnostics.V2PlumbingFramesCollapsed = 6;
+            scenario.ExpectedDiagnostics.AsyncInfrastructureFramesCollapsed = 0;
+            scenario.ExpectedDiagnostics.RuntimeResumptionBridgeFramesCollapsed = 0;
 
             scenario.AssertProductionStitch();
         }
@@ -7346,6 +8063,58 @@ namespace TraceEventTests
             };
         }
 
+        private static StitchScenario CreateYieldRuntimeBridgeScenario(params Frame[] yieldFrames)
+        {
+            StitchScenario scenario = CreateRuntimeResumptionBridgeScenario(AsyncCallstackKind.RuntimeAsync);
+            Frame[] tail = scenario.Sync.Skip(scenario.Sync.Length - 2).ToArray();
+            scenario.Sync = scenario.Sync.Take(5).Concat(yieldFrames).Concat(tail).ToArray();
+            scenario.ExpectedWithoutInfrastructureCleanup =
+                scenario.ExpectedStitched.Take(3).Concat(yieldFrames).Concat(tail).ToArray();
+            scenario.ExpectedDiagnostics.AsyncInfrastructureFramesCollapsed = yieldFrames.Length * 2;
+            scenario.ExpectedDiagnostics.RuntimeResumptionBridgeFramesCollapsed = yieldFrames.Length * 2;
+            scenario.IncludeEventSourceEvents = false;
+            scenario.VerifyThreadTimeComputer = true;
+            return scenario;
+        }
+
+        private static StitchScenario CreateNativeRuntimeDispatchScenario(bool resumeStub, bool methodEvents)
+        {
+            StitchScenario scenario = CreateRuntimeResumptionBridgeScenario(AsyncCallstackKind.RuntimeAsync);
+            Frame[] native =
+            {
+                Frame.Library("clrjit", "JitCompiler.compileMethod", "JIT work"),
+                Frame.Library("coreclr", "MethodDesc.PrepareCode", "Runtime work"),
+            };
+            Frame[] tail = scenario.Sync.Skip(5).ToArray();
+            Frame[] entry = resumeStub
+                ? new[] { Frame.App("dynamicClass.IL_STUB_AsyncResume") } : Array.Empty<Frame>();
+            scenario.Sync = native.Concat(entry).Concat(new[]
+            {
+                Frame.V2Wrapper(1), Frame.V2InstrumentedDispatch, Frame.V2Dispatch,
+            }).Concat(tail).ToArray();
+            Frame[] logical = scenario.Async;
+            scenario.Async = new[] { Frame.Zero }.Concat(logical).ToArray();
+            scenario.MethodCompletions = methodEvents ? 1 : 0;
+            scenario.IncludeEventSourceEvents = false;
+            scenario.VerifyThreadTimeComputer = true;
+            scenario.ExpectedStitched = native.Concat(logical).Concat(tail.Skip(5)).ToArray();
+            scenario.ExpectedWithoutInfrastructureCleanup = native.Concat(logical).Concat(tail).ToArray();
+            scenario.ExpectedDiagnostics.V2PlumbingFramesCollapsed = resumeStub ? 6 : 4;
+            scenario.ConfigureTraceLog = log =>
+            {
+                ConfigureCapturedRuntime(log, "12.0.0");
+                foreach (TraceModuleFile module in log.ModuleFiles)
+                {
+                    if (module.Name == "coreclr" || module.Name == "clrjit" ||
+                        string.Equals(module.Name, AsyncProfilerCallStackStitchBoundary.HostModuleName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        module.fileName = @"C:\runtime\" + module.Name + ".dll";
+                    }
+                }
+            };
+            return scenario;
+        }
+
         private static StitchScenario CreateV1AfterV2CompletionScenario()
         {
             Frame work = Frame.App("Scenario.Work");
@@ -7907,7 +8676,8 @@ namespace TraceEventTests
                     else
                     {
                         Assert.Equal(Labels(ExpectedStitched), ReadStack(output, stack).ScenarioFrames);
-                        Assert.Equal(stack, builder.GetCallStack(data.CallStackIndex(), timestampQpc));
+                        Assert.True(data.TryGetCallStackIndex(out var physicalStack, out long userModeTimeStampQPC));
+                        Assert.Equal(stack, builder.GetCallStack(physicalStack, userModeTimeStampQPC));
                     }
                     count++;
                 }

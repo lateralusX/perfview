@@ -452,8 +452,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         /// <summary>
-        /// Returns a stitching-only view of a method name with perfmap's type/method separator replaced by
-        /// rundown's separator. Stored/displayed symbols and parameter type spellings remain unchanged.
+        /// Returns a stitching-only view without PDB return-type prefixes and with perfmap/PDB type/method
+        /// separators replaced by rundown's separator. Stored/displayed symbols, generic arguments, and
+        /// parameter type spellings remain unchanged.
         /// </summary>
         internal static string NormalizeMethodName(string methodName)
         {
@@ -467,6 +468,48 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             int separator = nameEnd > 0
                 ? methodName.LastIndexOf("::", nameEnd - 1, nameEnd, StringComparison.Ordinal)
                 : -1;
+            int typeEnd = separator >= 0 ? separator : nameEnd;
+            int moduleEnd = 0;
+            int typeStart = 0;
+            int bracketDepth = 0;
+            for (int i = 0; i < typeEnd; i++)
+            {
+                char c = methodName[i];
+                if (c == '[')
+                {
+                    bracketDepth++;
+                }
+                else if (c == ']')
+                {
+                    if (bracketDepth == 0)
+                    {
+                        return methodName;
+                    }
+                    bracketDepth--;
+                }
+                else if (bracketDepth == 0)
+                {
+                    // Keep module qualifiers, but not generic parameter tokens such as !0 or !!0.
+                    if (c == '!' && i > 0 && methodName[i - 1] != '!' && !char.IsWhiteSpace(methodName[i - 1]))
+                    {
+                        moduleEnd = typeStart = i + 1;
+                    }
+                    else if (char.IsWhiteSpace(c))
+                    {
+                        typeStart = i + 1;
+                    }
+                }
+            }
+            if (bracketDepth != 0)
+            {
+                return methodName;
+            }
+
+            if (typeStart > moduleEnd)
+            {
+                methodName = methodName.Substring(0, moduleEnd) + methodName.Substring(typeStart);
+                separator -= typeStart - moduleEnd;
+            }
             return separator >= 0
                 ? methodName.Substring(0, separator) + "." + methodName.Substring(separator + 2)
                 : methodName;

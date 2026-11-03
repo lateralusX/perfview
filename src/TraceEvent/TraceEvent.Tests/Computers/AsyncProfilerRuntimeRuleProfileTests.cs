@@ -2,6 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using Microsoft.Diagnostics.Tracing.Computers;
+using Microsoft.Diagnostics.Tracing.Etlx;
 using Microsoft.Diagnostics.Tracing.Parsers.Clr;
 
 using Xunit;
@@ -63,6 +64,77 @@ namespace TraceEventTests
             foreach (AsyncProfilerRuntimeRuleProfile profile in InitialProfiles())
             {
                 Assert.Equal(expected, profile.ClassifySynchronousFrame(method, isHostModule));
+            }
+        }
+
+        [Theory]
+        [InlineData("System.Boolean System.Threading.Tasks.Task::TrySetResult()",
+            (int)AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult)]
+        [InlineData("System.Boolean System.Threading.Tasks.Task`1[System.Int64]::TrySetResult(!0)",
+            (int)AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult)]
+        [InlineData("System.Void System.Threading.Tasks.Task::RunContinuations(System.Object)",
+            (int)AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskRunContinuations)]
+        [InlineData("System.Threading.ThreadPoolWorkQueue+DispatchResult System.Threading.ThreadPoolWorkQueue::Dispatch()",
+            (int)AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibThreadPoolDispatch)]
+        [InlineData("System.Private.CoreLib!System.Boolean System.Threading.Tasks.Task::TrySetResult()",
+            (int)AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult)]
+        [InlineData("System.Boolean Other.Namespace.Task::TrySetResult()", (int)AsyncProfilerStitchSyncFrameKind.None)]
+        [InlineData("System.Threading.Tasks.Task Other.Namespace.Task::TrySetResult()", (int)AsyncProfilerStitchSyncFrameKind.None)]
+        [InlineData("System.Boolean System.Threading.Tasks.Task+Other::TrySetResult()", (int)AsyncProfilerStitchSyncFrameKind.None)]
+        [InlineData("System.Boolean System.Threading.Tasks.Task`2[System.Int32,System.Int64]::TrySetResult()", (int)AsyncProfilerStitchSyncFrameKind.None)]
+        [InlineData("System.Boolean System.Threading.Tasks.Task`1[System.Int64::TrySetResult()", (int)AsyncProfilerStitchSyncFrameKind.None)]
+        [InlineData("Other.CoreLib!System.Boolean System.Threading.Tasks.Task::TrySetResult()", (int)AsyncProfilerStitchSyncFrameKind.None)]
+        [InlineData("System.Boolean System.Threading.Tasks.Task::TrySetResultExtra()", (int)AsyncProfilerStitchSyncFrameKind.None)]
+        [InlineData("System.Threading.ThreadPoolWorkQueue+DispatchResult Other.Namespace.ThreadPoolWorkQueue::Dispatch()", (int)AsyncProfilerStitchSyncFrameKind.None)]
+        public void PdbNames_PreserveExactDeclaringTypeAndModuleOwnershipChecks(string name, int expected)
+        {
+            string normalized = AsyncProfilerCallStackStitchBoundary.NormalizeMethodName(name);
+            foreach (AsyncProfilerRuntimeRuleProfile profile in InitialProfiles())
+            {
+                Assert.Equal((AsyncProfilerStitchSyncFrameKind)expected, profile.ClassifySynchronousFrame(normalized, true));
+                Assert.Equal(AsyncProfilerStitchSyncFrameKind.None, profile.ClassifySynchronousFrame(normalized, false));
+            }
+        }
+
+        [Theory]
+        [InlineData("dynamicClass.IL_STUB_AsyncResume(class System.Object,unsigned int8&)", true)]
+        [InlineData("dynamicClass.IL_STUB_AsyncResume", true)]
+        [InlineData("Other.dynamicClass.IL_STUB_AsyncResume()", false)]
+        [InlineData("Other+dynamicClass.IL_STUB_AsyncResume()", false)]
+        [InlineData("dynamicClass.IL_STUB_AsyncResumeOther()", false)]
+        [InlineData("Other.IL_STUB_AsyncResume()", false)]
+        [InlineData("IL_STUB_AsyncResume()", false)]
+        public void ResumeStub_IsProfileSpecificApplicationPlumbingNotABoundary(string name, bool recognized)
+        {
+            foreach (AsyncProfilerRuntimeRuleProfile profile in InitialProfiles())
+            {
+                foreach (bool hostModule in new[] { false, true })
+                {
+                    Assert.Equal(recognized ? AsyncProfilerStitchSyncFrameKind.V2ResumeStub : AsyncProfilerStitchSyncFrameKind.None,
+                        profile.ClassifySynchronousFrame(name, hostModule));
+                }
+                Assert.Equal(AsyncProfilerCallStackStitchBoundaryKind.None, profile.ClassifyBoundary(name).Kind);
+            }
+        }
+
+        [Theory]
+        [InlineData(@"C:\runtime\coreclr.dll", @"C:\runtime\System.Private.CoreLib.dll", true)]
+        [InlineData(@"C:\RUNTIME\CLRJIT.DLL", @"c:\runtime\System.Private.CoreLib.dll", true)]
+        [InlineData("/runtime/libcoreclr.so", "/runtime/System.Private.CoreLib.dll", true)]
+        [InlineData("/runtime/libclrjit.so", "/runtime/System.Private.CoreLib.dll", true)]
+        [InlineData("/runtime/libcoreclr.dylib", "/runtime/System.Private.CoreLib.dll", true)]
+        [InlineData("/runtime/libclrjit.dylib", "/runtime/System.Private.CoreLib.dll", true)]
+        [InlineData(@"C:\other\coreclr.dll", @"C:\runtime\System.Private.CoreLib.dll", false)]
+        [InlineData(@"C:\runtime\coreclr.extra.dll", @"C:\runtime\System.Private.CoreLib.dll", false)]
+        [InlineData("clrjit.dll", "System.Private.CoreLib.dll", false)]
+        public void NativeDispatchModules_RequireCapturedRuntimeImagesInTheHostDirectory(
+            string path, string hostPath, bool recognized)
+        {
+            var module = new TraceModuleFile(path, 0x1000, (ModuleFileIndex)0);
+            var host = new TraceModuleFile(hostPath, 0x2000, (ModuleFileIndex)1);
+            foreach (AsyncProfilerRuntimeRuleProfile profile in InitialProfiles())
+            {
+                Assert.Equal(recognized, profile.IsV2NativeDispatchModule(module, host));
             }
         }
 

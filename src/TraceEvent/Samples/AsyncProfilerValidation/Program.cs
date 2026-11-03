@@ -13,6 +13,8 @@ using Microsoft.Diagnostics.Tracing;
 using Microsoft.Diagnostics.Tracing.Computers;
 using Microsoft.Diagnostics.Tracing.Etlx;
 using Microsoft.Diagnostics.Tracing.EventPipe;
+using Microsoft.Diagnostics.Tracing.Parsers;
+using Microsoft.Diagnostics.Tracing.Parsers.Kernel;
 using Microsoft.Diagnostics.Tracing.Stacks;
 using Microsoft.Diagnostics.Tracing.Stacks.Formats;
 
@@ -25,18 +27,46 @@ namespace AsyncProfilerValidation
         private static void Main(string[] args)
         {
             string[] originalArgs = args;
-            bool enableParentContexts = args.Length > 0 && args[args.Length - 1] == "--parent-contexts";
-            if (enableParentContexts)
+            bool enableParentContexts = false;
+            bool allowNoIndex = false;
+            bool preserveSampleGaps = true;
+            int targetPid = 0;
+            var positional = new List<string>();
+            for (int i = 0; i < args.Length; i++)
             {
-                args = args.Take(args.Length - 1).ToArray();
+                if (args[i] == "--parent-contexts")
+                {
+                    enableParentContexts = true;
+                }
+                else if (args[i] == "--allow-no-index")
+                {
+                    allowNoIndex = true;
+                }
+                else if (args[i] == "--legacy-sample-timing")
+                {
+                    preserveSampleGaps = false;
+                }
+                else if (args[i] == "--pid")
+                {
+                    if (++i == args.Length || !int.TryParse(args[i], NumberStyles.None,
+                        CultureInfo.InvariantCulture, out targetPid) || targetPid <= 0)
+                    {
+                        throw new ArgumentException("--pid requires a positive process ID.");
+                    }
+                }
+                else
+                {
+                    positional.Add(args[i]);
+                }
             }
+            args = positional.ToArray();
 
             if (!((args.Length == 3 && args[0] == "export") ||
                   (args.Length == 7 && args[0] == "probe") ||
                   (args.Length == 6 && args[0] == "probe-qpc")))
             {
                 throw new ArgumentException(
-                    "Usage:\n  AsyncProfilerValidation export <capture.nettrace> <new-output-directory> [--parent-contexts]\n" +
+                    "Usage:\n  AsyncProfilerValidation export <capture.nettrace|capture.etl> <new-output-directory> [--pid <pid>] [--parent-contexts] [--allow-no-index] [--legacy-sample-timing]\n" +
                     "  AsyncProfilerValidation probe <capture.etlx> <pid> <os-thread-id> <start-ms> <end-ms> <new-output-directory> [--parent-contexts]\n" +
                     "  AsyncProfilerValidation probe-qpc <capture.etlx> <pid> <os-thread-id> <qpc> <new-output-directory> [--parent-contexts]");
             }
@@ -47,9 +77,11 @@ namespace AsyncProfilerValidation
                 throw new FileNotFoundException("Input capture/cache is missing.", input);
             }
             bool export = args[0] == "export";
-            if (!string.Equals(Path.GetExtension(input), export ? ".nettrace" : ".etlx", StringComparison.OrdinalIgnoreCase))
+            bool kernelCpu = string.Equals(Path.GetExtension(input), ".etl", StringComparison.OrdinalIgnoreCase);
+            if (export ? !kernelCpu && !string.Equals(Path.GetExtension(input), ".nettrace", StringComparison.OrdinalIgnoreCase)
+                       : !string.Equals(Path.GetExtension(input), ".etlx", StringComparison.OrdinalIgnoreCase))
             {
-                throw new ArgumentException(export ? "Export requires a .nettrace." : "Probe requires an ETLX produced by export.");
+                throw new ArgumentException(export ? "Export requires a .nettrace or merged .etl." : "Probe requires an ETLX produced by export.");
             }
 
             int pid = 0;
@@ -59,12 +91,18 @@ namespace AsyncProfilerValidation
             double end = 0;
             if (!export)
             {
+                if (targetPid != 0 || allowNoIndex || !preserveSampleGaps)
+                {
+                    throw new ArgumentException("--pid, --allow-no-index and --legacy-sample-timing apply only to export.");
+                }
                 pid = int.Parse(args[2], NumberStyles.None, CultureInfo.InvariantCulture);
                 tid = ulong.Parse(args[3], NumberStyles.None, CultureInfo.InvariantCulture);
                 if (pid == 0 || tid == 0)
                 {
                     throw new ArgumentException("PID and OS thread ID must be positive.");
                 }
+                using var log = new TraceLog(input);
+                kernelCpu = log.Events.Any(data => data is SampledProfileTraceData && data.ProcessID == pid);
                 if (args[0] == "probe-qpc")
                 {
                     exactQpc = long.Parse(args[4], NumberStyles.None, CultureInfo.InvariantCulture);
@@ -97,25 +135,40 @@ namespace AsyncProfilerValidation
                 Helper = typeof(Program).Assembly.Location,
                 HelperSha256 = FileHash(typeof(Program).Assembly.Location),
                 SymbolPathEnvironment = Environment.GetEnvironmentVariable("_NT_SYMBOL_PATH"),
-                OnlyManagedCodeStacks = true,
-                IncludeEventSourceEvents = true,
+                CpuSource = kernelCpu ? "ETW kernel PerfInfoSample" : "EventPipe ThreadSample",
+                TargetProcessID = export ? targetPid : pid,
+                OnlyManagedCodeStacks = !kernelCpu,
+                IncludeEventSourceEvents = !kernelCpu,
+                ResolvePrecompiledRuntimeSymbols = kernelCpu,
+                AllowNoIndex = allowNoIndex,
+                PreserveSampleGaps = preserveSampleGaps,
                 EnableFrameAnnotations = true,
                 EnableParentContexts = enableParentContexts
             });
 
             if (export)
             {
-                string etlx = TraceLog.CreateFromEventPipeDataFile(input, Path.Combine(output, "capture.etlx"),
-                    new TraceLogOptions { KeepAsyncProfilerEvents = true, ConversionLog = Console.Error });
-                Export(etlx, output, enableParentContexts);
+                var options = new TraceLogOptions
+                {
+                    KeepAsyncProfilerEvents = true,
+                    ConversionLog = Console.Error,
+                    OnLostEvents = (truncated, lost, count) =>
+                        throw new InvalidDataException($"Capture loss/truncation: truncated={truncated}, lost={lost}, events={count}.")
+                };
+                string cache = Path.Combine(output, "capture.etlx");
+                string etlx = kernelCpu ? TraceLog.CreateFromEventTraceLogFile(input, cache, options)
+                    : TraceLog.CreateFromEventPipeDataFile(input, cache, options);
+                InputQuality.Validate(etlx, output, kernelCpu, targetPid, allowNoIndex);
+                Export(etlx, output, enableParentContexts, kernelCpu, targetPid, allowNoIndex, preserveSampleGaps);
             }
             else
             {
-                Probe(input, output, pid, tid, start, end, exactQpc, enableParentContexts);
+                Probe(input, output, pid, tid, start, end, exactQpc, enableParentContexts, kernelCpu);
             }
         }
 
-        private static void Export(string etlx, string output, bool enableParentContexts)
+        private static void Export(string etlx, string output, bool enableParentContexts,
+            bool kernelCpu, int targetPid, bool allowNoIndex, bool preserveSampleGaps)
         {
             string baselineHash = null;
             int baselineCount = 0;
@@ -123,10 +176,12 @@ namespace AsyncProfilerValidation
             {
                 using var log = new TraceLog(etlx);
                 using var symbols = new SymbolReader(Console.Error);
-                var source = new MutableTraceEventStackSource(log) { OnlyManagedCodeStacks = true };
-                var computer = CreateComputer(log, symbols, view, enableParentContexts);
+                if (kernelCpu) { InputQuality.ResolveRuntimeSymbols(log, symbols, targetPid); }
+                var source = new MutableTraceEventStackSource(log) { OnlyManagedCodeStacks = !kernelCpu };
+                var computer = CreateComputer(log, symbols, view, enableParentContexts, kernelCpu);
+                computer.TargetPid = targetPid;
                 computer.GenerateThreadTimeStacks(source);
-                if (view.EnableAsyncCallStacks && !computer.AsyncCallStacksActive)
+                if (view.EnableAsyncCallStacks && !computer.AsyncCallStacksActive && !allowNoIndex)
                 {
                     throw new InvalidDataException("No usable async index initialized stitching; check producer, keywords, and flush timing.");
                 }
@@ -164,7 +219,7 @@ namespace AsyncProfilerValidation
                 }
 
                 string path = Path.Combine(output, view.Name + ".speedscope.json");
-                SpeedScopeStackSourceWriter.WriteStackViewAsJson(source, path);
+                SpeedScopeStackSourceWriter.WriteStackViewAsJson(source, path, preserveSampleGaps);
                 ValidateExport(path);
                 WriteJson(Path.Combine(output, view.Name + ".summary.json"), new
                 {
@@ -172,6 +227,7 @@ namespace AsyncProfilerValidation
                     Count = count,
                     Weight = weight,
                     TimestampMetricSha256 = digest,
+                    PreserveSampleGaps = preserveSampleGaps,
                     computer.AsyncCallStacksActive,
                     computer.AsyncCallStackTransforms.EnableParentContexts,
                     computer.UseTasks,
@@ -184,17 +240,18 @@ namespace AsyncProfilerValidation
         }
 
         private static void Probe(string etlx, string output, int pid, ulong tid, double start, double end,
-            long? exactQpc, bool enableParentContexts)
+            long? exactQpc, bool enableParentContexts, bool kernelCpu)
         {
             var targets = new Dictionary<(long Qpc, ProcessIndex Process, ulong Thread), List<uint>>();
             var times = new Dictionary<double, List<uint>>();
             using (var log = new TraceLog(etlx))
             using (var events = log.Events.GetSource())
+            using (var symbols = new SymbolReader(Console.Error))
             using (var raw = new StreamWriter(Path.Combine(output, "physical-and-index.jsonl")))
             {
+                if (kernelCpu) { InputQuality.ResolveRuntimeSymbols(log, symbols, pid); }
                 var callStackComputer = new AsyncProfilerCallStackComputer(log);
-                var parser = new SampleProfilerTraceEventParser(events);
-                parser.ThreadSample += data =>
+                void OnSample(TraceEvent data)
                 {
                     long qpc = GetQpc(data);
                     double time = data.TimeStampRelativeMSec;
@@ -233,7 +290,7 @@ namespace AsyncProfilerValidation
                         data.EventName,
                         ProviderGuid = data.ProviderGuid,
                         EventId = (int)data.ID,
-                        SampleType = data.Type.ToString(),
+                        SampleType = data is ClrThreadSampleTraceData sample ? sample.Type.ToString() : "KernelCpu",
                         TimestampQpc = qpc,
                         TimeRelativeMSec = time,
                         data.ProcessID,
@@ -248,7 +305,15 @@ namespace AsyncProfilerValidation
                         PhysicalFrames = physical,
                         Activations = callStackComputer.GetCallStacks(data).Select(a => ActivationInfo(log, a, qpc)).ToArray()
                     });
-                };
+                }
+                if (kernelCpu)
+                {
+                    events.Kernel.PerfInfoSample += OnSample;
+                }
+                else
+                {
+                    new SampleProfilerTraceEventParser(events).ThreadSample += OnSample;
+                }
                 events.Process();
             }
             if (targets.Count == 0)
@@ -260,10 +325,12 @@ namespace AsyncProfilerValidation
             {
                 using var log = new TraceLog(etlx);
                 using var symbols = new SymbolReader(Console.Error);
+                if (kernelCpu) { InputQuality.ResolveRuntimeSymbols(log, symbols, pid); }
                 using var transforms = new StreamWriter(Path.Combine(output, view.Name + ".transforms.jsonl"));
                 using var emitted = new StreamWriter(Path.Combine(output, view.Name + ".emitted.jsonl"));
-                var source = new MutableTraceEventStackSource(log) { OnlyManagedCodeStacks = true };
-                var computer = CreateComputer(log, symbols, view, enableParentContexts);
+                var source = new MutableTraceEventStackSource(log) { OnlyManagedCodeStacks = !kernelCpu };
+                var computer = CreateComputer(log, symbols, view, enableParentContexts, kernelCpu);
+                computer.TargetPid = kernelCpu ? pid : 0;
                 computer.TraceAsyncProfilerCallStackSteps = true;
                 int callbackCount = 0;
                 computer.AsyncProfilerCallStackTransformPipeline.Add(context =>
@@ -362,15 +429,12 @@ namespace AsyncProfilerValidation
             Console.WriteLine($"Probe: {targets.Values.Sum(indices => indices.Count)} physical samples; evidence in {output}");
         }
 
-        private static SampleProfilerThreadTimeComputer CreateComputer(
+        private static CpuComputer CreateComputer(
             TraceLog log, SymbolReader symbols,
             (string Name, bool EnableAsyncCallStacks, bool EnableNormalization, bool EnableInfrastructureCleanup) view,
-            bool enableParentContexts)
+            bool enableParentContexts, bool kernelCpu)
         {
-            var computer = new SampleProfilerThreadTimeComputer(log, symbols)
-            {
-                EnableAsyncCallStacks = view.EnableAsyncCallStacks,
-            };
+            var computer = new CpuComputer(log, symbols, kernelCpu, view.EnableAsyncCallStacks);
             computer.AsyncCallStackTransforms.EnableNormalization = view.EnableNormalization;
             computer.AsyncCallStackTransforms.EnableInfrastructureCleanup = view.EnableInfrastructureCleanup;
             computer.AsyncCallStackTransforms.EnableFrameAnnotations = true;
@@ -378,6 +442,70 @@ namespace AsyncProfilerValidation
                 view.EnableAsyncCallStacks && enableParentContexts;
             return computer;
         }
+
+        // Keep collection-specific controls here; the production hosts own all reconstruction logic.
+#pragma warning disable CS0618 // Deliberately validate the existing experimental kernel CPU host.
+        private sealed class CpuComputer
+        {
+            public CpuComputer(TraceLog log, SymbolReader symbols, bool kernelCpu, bool enableAsync)
+            {
+                m_log = log;
+                if (kernelCpu)
+                {
+                    m_kernel = new ThreadTimeStackComputer(log, symbols)
+                    {
+                        EnableAsyncCallStacks = enableAsync,
+                        IncludeEventSourceEvents = false,
+                        NoAwaitTime = true,
+                        ExcludeReadyThread = true
+                    };
+                }
+                else
+                {
+                    m_eventPipe = new SampleProfilerThreadTimeComputer(log, symbols) { EnableAsyncCallStacks = enableAsync };
+                }
+            }
+
+            public int TargetPid { get; set; }
+            public bool AsyncCallStacksActive => m_kernel?.AsyncCallStacksActive ?? m_eventPipe.AsyncCallStacksActive;
+            public bool UseTasks => m_kernel?.UseTasks ?? m_eventPipe.UseTasks;
+            public bool GroupByStartStopActivity => m_kernel?.GroupByStartStopActivity ?? m_eventPipe.GroupByStartStopActivity;
+            public AsyncCallStackTransforms AsyncCallStackTransforms => m_kernel?.AsyncCallStackTransforms ?? m_eventPipe.AsyncCallStackTransforms;
+            public AsyncProfilerCallStackTransformPipeline AsyncProfilerCallStackTransformPipeline =>
+                m_kernel?.AsyncProfilerCallStackTransformPipeline ?? m_eventPipe.AsyncProfilerCallStackTransformPipeline;
+            public AsyncProfilerCallStackDiagnostics AsyncProfilerCallStackDiagnostics =>
+                m_kernel != null ? m_kernel.AsyncProfilerCallStackDiagnostics : m_eventPipe.AsyncProfilerCallStackDiagnostics;
+            public bool TraceAsyncProfilerCallStackSteps
+            {
+                set
+                {
+                    if (m_kernel != null) { m_kernel.TraceAsyncProfilerCallStackSteps = value; }
+                    else { m_eventPipe.TraceAsyncProfilerCallStackSteps = value; }
+                }
+            }
+
+            public void GenerateThreadTimeStacks(MutableTraceEventStackSource source)
+            {
+                if (m_kernel != null)
+                {
+                    // Exclude allocation/task/context-switch samples: all four views represent kernel CPU only.
+                    m_kernel.GenerateThreadTimeStacks(source, m_log.Events.Filter(data =>
+                        data is SampledProfileTraceData && (TargetPid == 0 || data.ProcessID == TargetPid)));
+                }
+                else
+                {
+                    m_eventPipe.GenerateThreadTimeStacks(source,
+                        TargetPid == 0 ? null : m_log.Events.Filter(data => data.ProcessID == TargetPid));
+                }
+            }
+
+            #region private
+            private readonly TraceLog m_log;
+            private readonly ThreadTimeStackComputer m_kernel;
+            private readonly SampleProfilerThreadTimeComputer m_eventPipe;
+            #endregion
+        }
+#pragma warning restore CS0618
 
         private static object AddressInfo(TraceLog log, CodeAddressIndex index)
         {
