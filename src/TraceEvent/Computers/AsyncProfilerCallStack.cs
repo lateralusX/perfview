@@ -181,6 +181,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <summary>The interned frames of this async call stack.</summary>
         internal AsyncProfilerCallStackFrames Frames { get; private set; }
 
+        internal IReadOnlyList<CompletionDelta> MethodCompletions => _methodCompletions;
+        internal IReadOnlyList<CompletionDelta> ExceptionCompletions => _exceptionCompletions;
+
         internal void Reset(AsyncProfilerThreadKey thread, ulong dispatcherId,
             int depth, AsyncProfilerCallStackFramesIndex framesIndex, AsyncProfilerCallStackFrames frames,
             byte continuationIndexBase, byte wrapperCount, long startQpc, long endQpc,

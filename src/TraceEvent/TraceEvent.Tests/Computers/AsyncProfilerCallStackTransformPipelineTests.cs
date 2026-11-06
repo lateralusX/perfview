@@ -206,28 +206,28 @@ namespace TraceEventTests
         }
 
         [Theory]
-        [InlineData(false)]
-        [InlineData(true)]
-        public void AsyncInfrastructureCleanup_PreservesDispatcherContextBoundaries(bool sameContext)
+        [InlineData(false, false)]
+        [InlineData(true, false)]
+        [InlineData(false, true)]
+        [InlineData(true, true)]
+        public void AsyncInfrastructureCleanup_PreservesDispatcherContextBoundaries(bool sameContext, bool builderHelper)
         {
-            AsyncProfilerCallStack CreateContext() =>
-                new AsyncProfilerCallStack(0, (AsyncProfilerCallStackFramesIndex)0,
-                    new AsyncProfilerCallStackFrames(AsyncCallstackKind.StateMachineAsync, new ulong[] { 3 }, new[] { 0 }),
-                    0, 32, 0, long.MaxValue, Array.Empty<AsyncProfilerCallStack.CompletionDelta>(),
-                    Array.Empty<AsyncProfilerCallStack.CompletionDelta>(), Array.Empty<long>());
-            AsyncProfilerCallStack leafContext = CreateContext();
-            AsyncProfilerCallStack rootContext = sameContext ? leafContext : CreateContext();
+            AsyncProfilerCallStack leafContext = CreateActivation();
+            AsyncProfilerCallStack rootContext = sameContext ? leafContext : CreateActivation();
+            AsyncProfilerStitchSyncFrameKind kind = builderHelper
+                ? AsyncProfilerStitchSyncFrameKind.V1MethodBuilderAwaitUnsafeOnCompleted
+                : AsyncProfilerStitchSyncFrameKind.None;
             var frames = new List<AsyncProfilerStitchedFrame>
             {
-                AsyncProfilerStitchedFrame.CreateSync(new AsyncProfilerStitchSyncFrame(CA(30), MethodIndex.Invalid), leafContext),
-                AsyncProfilerStitchedFrame.CreateSync(new AsyncProfilerStitchSyncFrame(CA(31), MethodIndex.Invalid), rootContext),
+                AsyncProfilerStitchedFrame.CreateSync(new AsyncProfilerStitchSyncFrame(CA(30), MethodIndex.Invalid, kind), leafContext),
+                AsyncProfilerStitchedFrame.CreateSync(new AsyncProfilerStitchSyncFrame(CA(31), MethodIndex.Invalid, kind), rootContext),
                 Sync(32),
             };
             var diagnostics = new AsyncProfilerCallStackDiagnostics();
             var pipeline = new AsyncProfilerCallStackTransformPipeline { EnableInfrastructureCleanup = true };
 
             pipeline.ApplyInPlace(Context(frames, diagnostics, classifyBoundary: ca =>
-                new AsyncProfilerCallStackStitchBoundaryInfo(ca == CA(32) ? AsyncProfilerCallStackStitchBoundaryKind.None :
+                new AsyncProfilerCallStackStitchBoundaryInfo(builderHelper || ca == CA(32) ? AsyncProfilerCallStackStitchBoundaryKind.None :
                     AsyncProfilerCallStackStitchBoundaryKind.V1DispatcherInfrastructure, -1)));
 
             Assert.Equal(sameContext ? 2 : 3, frames.Count);
@@ -261,12 +261,13 @@ namespace TraceEventTests
 
             pipeline.EnableInfrastructureCleanup = true;
             pipeline.ApplyInPlace(context);
-            Assert.Equal(new[] { CA(35), CA(36) }, frames.Select(frame => frame.CodeAddress));
+            Assert.Equal(new[] { CA(34), CA(35), CA(36) }, frames.Select(frame => frame.CodeAddress));
+            Assert.Equal(AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames, frames[0].Presentation);
             Assert.Equal(1, diagnostics.AsyncInfrastructureFramesCollapsed);
         }
 
         [Fact]
-        public void AsyncInfrastructureCleanup_RemovesBuilderAwaitUnsafeOnCompletedOverloads()
+        public void AsyncInfrastructureCleanup_GroupsBuilderAwaitUnsafeOnCompletedOverloads()
         {
             var diagnostics = new AsyncProfilerCallStackDiagnostics();
             var frames = new List<AsyncProfilerStitchedFrame>
@@ -289,14 +290,20 @@ namespace TraceEventTests
                 EnableInfrastructureCleanup = true,
             };
 
-            pipeline.ApplyInPlace(Context(frames, diagnostics));
+            AsyncProfilerCallStackTransformState context = Context(frames, diagnostics);
+            pipeline.ApplyInPlace(context);
 
-            Assert.Equal(new[] { CA(40), CA(49), CA(50) }, frames.Select(frame => frame.CodeAddress));
+            Assert.Equal(new[] { CA(40), CA(41), CA(49), CA(50) }, frames.Select(frame => frame.CodeAddress));
+            Assert.Equal(AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames, frames[1].Presentation);
+            Assert.Equal(8, diagnostics.AsyncInfrastructureFramesCollapsed);
+
+            pipeline.ApplyInPlace(context);
+            Assert.Equal(new[] { CA(40), CA(41), CA(49), CA(50) }, frames.Select(frame => frame.CodeAddress));
             Assert.Equal(8, diagnostics.AsyncInfrastructureFramesCollapsed);
         }
 
         [Fact]
-        public void AsyncInfrastructureCleanup_RemovesCompleteTaskCompletionChain()
+        public void AsyncInfrastructureCleanup_GroupsCompleteTaskCompletionChain()
         {
             var diagnostics = new AsyncProfilerCallStackDiagnostics();
             var frames = new List<AsyncProfilerStitchedFrame>
@@ -315,7 +322,8 @@ namespace TraceEventTests
 
             pipeline.ApplyInPlace(Context(frames, diagnostics));
 
-            Assert.Equal(new[] { CA(60), CA(64) }, frames.Select(frame => frame.CodeAddress));
+            Assert.Equal(new[] { CA(60), CA(61), CA(64) }, frames.Select(frame => frame.CodeAddress));
+            Assert.Equal(AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames, frames[1].Presentation);
             Assert.Equal(3, diagnostics.AsyncInfrastructureFramesCollapsed);
         }
 
@@ -338,6 +346,32 @@ namespace TraceEventTests
             pipeline.ApplyInPlace(Context(frames, diagnostics));
 
             Assert.Equal(new[] { CA(70), CA(71), CA(72) }, frames.Select(frame => frame.CodeAddress));
+            Assert.Equal(0, diagnostics.AsyncInfrastructureFramesCollapsed);
+        }
+
+        [Fact]
+        public void AsyncInfrastructureCleanup_PreservesCompletionChainsAcrossContextBoundaries()
+        {
+            AsyncProfilerCallStack leafContext = CreateActivation();
+            AsyncProfilerCallStack rootContext = CreateActivation();
+            var frames = new List<AsyncProfilerStitchedFrame>
+            {
+                AsyncProfilerStitchedFrame.CreateSync(new AsyncProfilerStitchSyncFrame(CA(60), MethodIndex.Invalid,
+                    AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskRunContinuations), leafContext),
+                AsyncProfilerStitchedFrame.CreateSync(new AsyncProfilerStitchSyncFrame(CA(61), MethodIndex.Invalid,
+                    AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult), rootContext),
+                AsyncProfilerStitchedFrame.CreateSync(new AsyncProfilerStitchSyncFrame(CA(62), MethodIndex.Invalid,
+                    AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskCompletionSourceSetResult), rootContext),
+            };
+            AsyncProfilerStitchedFrame[] original = frames.ToArray();
+            var diagnostics = new AsyncProfilerCallStackDiagnostics();
+            new AsyncProfilerCallStackTransformPipeline
+            {
+                EnableNormalization = false,
+                EnableInfrastructureCleanup = true,
+            }.ApplyInPlace(Context(frames, diagnostics));
+
+            Assert.Equal(original, frames);
             Assert.Equal(0, diagnostics.AsyncInfrastructureFramesCollapsed);
         }
 
@@ -367,19 +401,20 @@ namespace TraceEventTests
 
             pipeline.ApplyInPlace(Context(frames, diagnostics));
 
-            Assert.Empty(frames);
+            Assert.Equal(CA(80), Assert.Single(frames).CodeAddress);
+            Assert.Equal(AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames, frames[0].Presentation);
             Assert.Equal(2 + 3 * chainCount, diagnostics.AsyncInfrastructureFramesCollapsed);
         }
 
         [Theory]
         [InlineData("", 0, "")]
-        [InlineData("R", 1, "")]
-        [InlineData("RT", 2, "")]
-        [InlineData("RS", 1, "S")]
-        [InlineData("TRS", 2, "S")]
-        [InlineData("RATS", 2, "AS")]
-        [InlineData("RSTR", 3, "S")]
-        [InlineData("RTRTSS", 5, "S")]
+        [InlineData("R", 1, "M")]
+        [InlineData("RT", 2, "M")]
+        [InlineData("RS", 1, "MS")]
+        [InlineData("TRS", 2, "MS")]
+        [InlineData("RATS", 2, "MAMS")]
+        [InlineData("RSTR", 3, "MSM")]
+        [InlineData("RTRTSS", 5, "MS")]
         public void AsyncInfrastructureCleanup_IncompleteChains_PreserveSetResult(string pattern, int collapsed, string expected)
         {
             var diagnostics = new AsyncProfilerCallStackDiagnostics();
@@ -400,7 +435,9 @@ namespace TraceEventTests
 
             pipeline.ApplyInPlace(Context(frames, diagnostics));
 
-            Assert.Equal(expected, new string(frames.ConvertAll(frame => (char)frame.CodeAddress).ToArray()));
+            Assert.Equal(expected, new string(frames.ConvertAll(frame =>
+                frame.Presentation == AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames
+                    ? 'M' : (char)frame.CodeAddress).ToArray()));
             Assert.Equal(collapsed, diagnostics.AsyncInfrastructureFramesCollapsed);
         }
 
@@ -581,7 +618,7 @@ namespace TraceEventTests
                 int[] expected = !enableNormalization && !enableInfrastructureCleanup
                     ? new[] { 20, 10, 11, 12, 13, 14, 15, 16, 17 }
                     : enableInfrastructureCleanup
-                        ? enableNormalization ? new[] { 10, 11, 14, 16, 17 } : new[] { 20, 10, 11, 14, 16, 17 }
+                        ? enableNormalization ? new[] { 10, 11, 14, 15, 16, 17 } : new[] { 20, 10, 11, 12, 14, 15, 16, 17 }
                         : new[] { 10, 11, 14, 15, 16, 17 };
 
                 for (int sample = 0; sample < 2; sample++)
@@ -644,7 +681,7 @@ namespace TraceEventTests
             frames = CompositionFrames();
             pipeline.ApplyInPlace(Context(frames, diagnostics, wrapperCodeAddress: CA(20)));
 
-            int[] expected = enableInfrastructureCleanup ? new[] { 10, 11, 14, 16, 17 } : new[] { 10, 11, 14, 15, 16, 17 };
+            int[] expected = { 10, 11, 14, 15, 16, 17 };
             Assert.Equal(expected.Select(CA), frames.Select(frame => frame.CodeAddress));
             Assert.True(pipeline.EnableNormalization);
             Assert.Equal(enableInfrastructureCleanup, pipeline.EnableInfrastructureCleanup);
@@ -670,7 +707,7 @@ namespace TraceEventTests
 
                 pipeline.ApplyInPlace(Context(frames, diagnostics, wrapperCodeAddress: CA(20)));
 
-                Assert.Equal(new[] { CA(10), CA(11), CA(14), CA(16), CA(17) },
+                Assert.Equal(new[] { CA(10), CA(11), CA(14), CA(15), CA(16), CA(17) },
                     frames.Select(frame => frame.CodeAddress));
                 Assert.Equal(1, diagnostics.V2LeafWrapperDropped);
                 Assert.Equal(1, diagnostics.V1SynchronousMoveNextFramesNormalized);
@@ -738,6 +775,12 @@ namespace TraceEventTests
             frames.Add(Sync(17, AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibThreadPoolDispatch));
             return frames;
         }
+
+        private static AsyncProfilerCallStack CreateActivation() =>
+            new AsyncProfilerCallStack(0, (AsyncProfilerCallStackFramesIndex)0,
+                new AsyncProfilerCallStackFrames(AsyncCallstackKind.StateMachineAsync, new ulong[] { 3 }, new[] { 0 }),
+                0, 32, 0, long.MaxValue, Array.Empty<AsyncProfilerCallStack.CompletionDelta>(),
+                Array.Empty<AsyncProfilerCallStack.CompletionDelta>(), Array.Empty<long>());
 
         private static List<AsyncProfilerStitchedFrame> StartupFrames() =>
             new List<AsyncProfilerStitchedFrame>

@@ -4,7 +4,6 @@ using Microsoft.Diagnostics.Tracing.Stacks;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Globalization;
 
 namespace Microsoft.Diagnostics.Tracing.Computers
 {
@@ -79,7 +78,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 return false;
             }
 
-            MaterializeSyncLeafToRoot(callStackIndex);
+            CallStackIndex physicalRoot = MaterializeSyncLeafToRoot(callStackIndex);
             AsyncProfilerRuntimeRuleProfile runtimeProfile = m_runtimeProfiles.GetProcessProfile(processIndex);
 
             m_sampleDiagnostics.MessageLimit = m_diagnostics.RemainingMessageCapacity;
@@ -128,12 +127,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 m_sampleDiagnostics,
                 m_stitchedFrames,
                 m_runtimeProfileResolver, runtimeProfile, m_runtimeProfiles,
-                collectPlacements ? m_segmentPlacements : null);
+                collectPlacements ? m_segmentPlacements : null,
+                methodOf: m_methodOf);
             m_transforms.ApplyInPlace(transformContext);
             m_sampleDiagnostics.AddTo(m_diagnostics);
 
             stitchedStack = InternStitchedStack(
-                data == null ? root : m_rootFactory(data, thread), processIndex);
+                data == null ? root : m_rootFactory(data, thread), processIndex, physicalRoot);
             return true;
         }
 
@@ -204,14 +204,16 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 new Dictionary<CallStackSourceFrameIdentity, StackSourceFrameIndex>();
         }
 
-        private void MaterializeSyncLeafToRoot(CallStackIndex callStackIndex)
+        private CallStackIndex MaterializeSyncLeafToRoot(CallStackIndex callStackIndex)
         {
             m_syncFrames.Clear();
             TraceCallStacks callStacks = m_eventLog.CallStacks;
             TraceCodeAddresses codeAddresses = m_eventLog.CodeAddresses;
+            CallStackIndex physicalRoot = CallStackIndex.Invalid;
 
             for (CallStackIndex csi = callStackIndex; csi != CallStackIndex.Invalid; csi = callStacks.Caller(csi))
             {
+                physicalRoot = csi;
                 CodeAddressIndex ca = callStacks.CodeAddressIndex(csi);
                 MethodIndex method = ca != CodeAddressIndex.Invalid
                     ? NormalizeMethod(codeAddresses.MethodIndex(ca))
@@ -234,6 +236,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     : MethodIndex.Invalid;
                 m_syncFrames.Add(new AsyncProfilerStitchSyncFrame(ca, method, metadata.Kind, boxedMethod));
             }
+            return physicalRoot;
         }
 
         private MethodIndex GetBoxedStateMachineMethod(CodeAddressIndex codeAddressIndex)
@@ -325,9 +328,16 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         private StackSourceCallStackIndex InternStitchedStack(
             StackSourceCallStackIndex root,
-            ProcessIndex processIndex)
+            ProcessIndex processIndex,
+            CallStackIndex physicalRoot)
         {
             StackSourceCallStackIndex caller = root;
+            if (physicalRoot != CallStackIndex.Invalid &&
+                !m_stitchedFrames.Exists(frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.IncompleteRoot))
+            {
+                // Reuse the synchronous root policy without duplicating an explicitly recovered BROKEN root.
+                caller = m_outputStackSource.GetCallerIndex(m_outputStackSource.GetCallStack(physicalRoot, root));
+            }
             AsyncProfilerStitchedFrame rootwardFrame = default;
             bool hasRootwardFrame = false;
 
@@ -399,7 +409,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                         m_outputStackSource.Interner.ModuleIntern(codeAddress.ModuleName);
                     StackSourceFrameIndex logicalFrame =
                         m_outputStackSource.Interner.FrameIntern(
-                            FormatUnresolvedV1Method(logicalName, stateMachineSuffix),
+                            AsyncProfilerCallStackStitchBoundary.FormatLogicalStateMachineMethodName(
+                                logicalName, stateMachineSuffix),
                             module);
                     m_logicalSyncFrameByCodeAddress.Add(frame.CodeAddress, logicalFrame);
                     return logicalFrame;
@@ -467,7 +478,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                         m_outputStackSource.Interner.ModuleIntern(codeAddress.ModuleName);
                     asyncFrame =
                         m_outputStackSource.Interner.FrameIntern(
-                            FormatUnresolvedV1Method(
+                            AsyncProfilerCallStackStitchBoundary.FormatLogicalStateMachineMethodName(
                                 logicalName,
                                 stateMachineSuffix,
                                 parentContext || annotateActive ? presentationState : (int?)null),
@@ -520,22 +531,6 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     kind, processIndex, frame.CodeAddress, methodId, state, parentContext, parentContextCurrent, dispatchTarget,
                     current, frame.IsStateMachineBoxCarrier, completing, completionUnwind));
             return asyncFrame;
-        }
-
-        private static string FormatUnresolvedV1Method(
-            string logicalName,
-            string stateMachineSuffix,
-            int? state = null)
-        {
-            string ordinal = stateMachineSuffix.StartsWith("d__", StringComparison.Ordinal)
-                ? stateMachineSuffix.Substring(3)
-                : (stateMachineSuffix.StartsWith("d_", StringComparison.Ordinal)
-                    ? stateMachineSuffix.Substring(2)
-                    : stateMachineSuffix);
-            return state.HasValue
-                ? logicalName + " [ordinal " + ordinal + ", state " +
-                    state.Value.ToString(CultureInfo.InvariantCulture) + "]"
-                : logicalName + " [ordinal " + ordinal + "]";
         }
 
         private static string GetAnnotationPrefix(AsyncCallstackKind kind)

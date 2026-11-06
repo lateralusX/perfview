@@ -346,6 +346,16 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 return null; // no type qualifier (bare method name)
             }
 
+            // In Type..ctor, the constructor's leading dot is part of the member name.
+            if (frameName[methodDot - 1] == '.')
+            {
+                string method = frameName.Substring(methodDot + 1, end - methodDot - 1);
+                if (method == "ctor" || method == "cctor")
+                {
+                    methodDot--;
+                }
+            }
+
             int typeEnd = methodDot;
             // The type's simple name starts after the preceding namespace '.' or nested-type '+' (or module '!').
             // Ignore separators inside constructed generic arguments, such as the '+' in
@@ -449,6 +459,25 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 stateMachineSuffixStart + 1,
                 moveNext - stateMachineSuffixStart - 1);
             return true;
+        }
+
+        /// <summary>
+        /// Formats a logical V1 method with its generated ordinal and optional presentation state.
+        /// </summary>
+        internal static string FormatLogicalStateMachineMethodName(
+            string logicalName,
+            string stateMachineSuffix,
+            int? state = null)
+        {
+            string ordinal = stateMachineSuffix.StartsWith("d__", StringComparison.Ordinal)
+                ? stateMachineSuffix.Substring(3)
+                : (stateMachineSuffix.StartsWith("d_", StringComparison.Ordinal)
+                    ? stateMachineSuffix.Substring(2)
+                    : stateMachineSuffix);
+            return state.HasValue
+                ? logicalName + " [ordinal " + ordinal + ", state " +
+                    state.Value.ToString(CultureInfo.InvariantCulture) + "]"
+                : logicalName + " [ordinal " + ordinal + "]";
         }
 
         /// <summary>

@@ -87,7 +87,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         LogicalStateMachineMethod,
 
         /// <summary>
-        /// Represent a contiguous span of recognized V1/V2 dispatcher frames as
+        /// Represent a contiguous span of recognized V1/V2 runtime machinery as
         /// <c>[Async dispatcher frames]</c>, retaining the span's leafmost physical frame identity.
         /// </summary>
         AsyncDispatcherFrames,
@@ -131,6 +131,15 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// </summary>
         V1AwaiterRegistrationInfrastructure,
 
+        /// <summary>A known CoreLib Task or ValueTask awaiter's readiness check, not registration or a dispatch boundary.</summary>
+        V1AwaiterCompletionCheck,
+
+        /// <summary>
+        /// Other methods and nested helpers on profile-recognized CoreLib awaiter families. Classification
+        /// alone does not permit removal; a verified dispatcher span or completed return spine is required.
+        /// </summary>
+        SystemPrivateCoreLibAwaiterInfrastructure,
+
         /// <summary>
         /// Exact CoreLib Task-continuation or execution-context plumbing that connects physical async dispatch,
         /// such as <c>AwaitTaskContinuation.RunOrScheduleAction</c> or <c>ExecutionContext.RunInternal</c>. These frames are retained
@@ -171,8 +180,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <summary>CoreLib profiler context resumption, anchoring optional profiler-prefix ownership attribution.</summary>
         ProfilerContextResume,
 
-        /// <summary>Known profiler diagnostics, initialization, reset, or box helpers; not required for prefix ownership.</summary>
+        /// <summary>Known profiler, diagnostics, event-source, or box helpers; not required for prefix ownership.</summary>
         ProfilerInfrastructure,
+
+        /// <summary>Generic runtime initialization helpers, not members of a profiler-owned helper family.</summary>
+        RuntimeInitializationInfrastructure,
 
         /// <summary>
         /// CoreLib <c>AsyncStateMachineDispatcherInfo.CreateDispatcher</c> setup, removed only by optional
@@ -338,6 +350,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 AsyncProfilerStitchedFrameOrigin.Sync, frame.CodeAddress, frame.Method, null, -1, frame.Kind,
                 AsyncProfilerStitchedFramePresentation.Native, context, frame.BoxedStateMachineMethod);
 
+        /// <summary>Represents consumed machinery without attributing its callees to an application body.</summary>
+        public static AsyncProfilerStitchedFrame CreateAsyncDispatcherFrames(
+            AsyncProfilerStitchSyncFrame frame, AsyncProfilerCallStack context) =>
+            CreateSync(frame, context).WithPresentation(AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames);
+
         /// <summary>
         /// Creates a physically present current frame with its logical async identity. Supplying a V1 boxed
         /// state-machine identity instead creates a resumption target, retaining the helper's sampled address
@@ -497,7 +514,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         internal AsyncProfilerCallStack Activation { get; }
         internal int LeafIndex { get; }
         internal int RootIndexExclusive { get; }
-        // Retain the consumed pair for lazy verification, without enlarging every physical frame.
+        // Retain the consumed V1 dispatcher or V2 pair for lazy verification, without enlarging every physical frame.
         internal CodeAddressIndex InstrumentedDispatch { get; }
         internal CodeAddressIndex Dispatch { get; }
     }
@@ -545,8 +562,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <summary>V1 segments anchored by a physically present, record-verified completing method.</summary>
         public int V1CompletionTailUsed;
 
-        /// <summary>Physical V1 return-unwind frames attributed by default presentation to a record-verified,
-        /// fully completed activation's logical root.</summary>
+        /// <summary>Physical V1 return-unwind frames normalized by default presentation using a record-verified
+        /// completed activation or a truncated completed prefix with a physical finishing body.</summary>
         public int V1CompletionUnwindFramesCollapsed;
 
         /// <summary>V1 segments whose completion evidence cannot be safely aligned to a physical anchor,
@@ -598,8 +615,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// dispatch by the optional cleanup. A subset of <see cref="AsyncInfrastructureFramesCollapsed"/>.</summary>
         public int RuntimeResumptionBridgeFramesCollapsed;
 
-        /// <summary>Synchronous leaf-side frames owned by a verified profiler entry, including unresolved callees,
-        /// atomically attributed to the nearest active logical async frame.
+        /// <summary>Resolved profiler helpers and a verified entry spine represented by a dispatcher marker,
+        /// preserving native and unrecognized callees.
         /// A subset of <see cref="AsyncInfrastructureFramesCollapsed"/>.</summary>
         public int ProfilerEnvelopeFramesCollapsed;
 
@@ -1055,8 +1072,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                         {
                             output.Add(AsyncProfilerStitchedFrame.CreateSync(syncLeafToRoot[i], segment));
                         }
-                        output.Add(AsyncProfilerStitchedFrame.CreateSync(syncLeafToRoot[dispatchStart], segment)
-                            .WithPresentation(AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames));
+                        output.Add(AsyncProfilerStitchedFrame.CreateAsyncDispatcherFrames(syncLeafToRoot[dispatchStart], segment));
                         output.Add(AsyncProfilerStitchedFrame.CreateAsyncDispatchTarget(segment, completed));
                         for (int k = completed + 1; k < segment.Frames.FrameCount; k++)
                         {
@@ -1241,7 +1257,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 }
                 for (int i = pSync; i < physicalEnd; i++)
                 {
-                    output.Add(i == currentSyncPos
+                    AsyncProfilerStitchedFrame frame = i == currentSyncPos
                         ? kind == AsyncCallstackKind.StateMachineAsync &&
                           syncLeafToRoot[i].Method != methodOf(frames.CodeAddressAt(completed))
                             ? AsyncProfilerStitchedFrame.CreateAsyncDispatchTarget(syncLeafToRoot[i], segment, completed)
@@ -1251,7 +1267,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                             ? AsyncProfilerStitchedFrame.CreateAsyncCompleting(
                                 syncLeafToRoot[i].CodeAddress, syncLeafToRoot[i].Method, segment, completed - 1)
                             : AsyncProfilerStitchedFrame.CreateSync(
-                                syncLeafToRoot[i], segment));
+                                syncLeafToRoot[i], segment);
+                    if (frame.IsStateMachineBoxCarrier)
+                    {
+                        // The box identifies a pending target, not an executing application body.
+                        output.Add(AsyncProfilerStitchedFrame.CreateAsyncDispatcherFrames(syncLeafToRoot[i], segment));
+                    }
+                    output.Add(frame);
                 }
                 if (initialV2Dispatch)
                 {
@@ -1274,6 +1296,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     else if (kind == AsyncCallstackKind.StateMachineAsync && completingSyncPos < 0)
                     {
                         output.Add(AsyncProfilerStitchedFrame.CreateSync(syncLeafToRoot[boundaryPos], segment));
+                    }
+                    else if (nativeV2DispatchTarget)
+                    {
+                        int entry = IsV2ResumeStub(syncLeafToRoot[boundaryPos - 1]) ? boundaryPos - 1 : boundaryPos;
+                        output.Add(AsyncProfilerStitchedFrame.CreateAsyncDispatcherFrames(syncLeafToRoot[entry], segment));
                     }
                     output.Add(AsyncProfilerStitchedFrame.CreateAsyncDispatchTarget(segment, completed));
                 }
@@ -1311,6 +1338,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 CodeAddressIndex dispatch = CodeAddressIndex.Invalid;
                 if (boundaryFound)
                 {
+                    if (kind == AsyncCallstackKind.StateMachineAsync)
+                    {
+                        dispatch = syncLeafToRoot[boundaryPos].CodeAddress;
+                    }
                     // Collapse the dispatch-continuation plumbing for this segment immediately, rather than waiting
                     // until all segments are exhausted. An inner V2 segment may be followed by a preserved bridge
                     // and then an outer V1/V2 segment; leaking these frames into that bridge breaks lockstep alignment.

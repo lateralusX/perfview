@@ -61,7 +61,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
     /// <summary>
     /// Normalizes synchronous V1 startup frames, deduplicates exact reentrant V1 activation scaffolding, and
-    /// attributes verified fully completed V1 return spans to their logical root, and removes an exact
+    /// normalizes verified completed V1 return spans, and removes an exact
     /// completed-V2-dispatch tail beneath a physically matched V1 activation.
     /// </summary>
     /// <remarks>
@@ -101,9 +101,14 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// Its startup, reentrant, and completed-tail rules deliberately share one leaf-to-root traversal.
     /// Missing trace/symbol identity or an incomplete pattern prevents the identity-dependent folds;
     /// classified MoveNext normalization and adjacent builder-Start removal can still run without a TraceLog.
-    /// Fully completed V1 return spans additionally require completion events, unique consecutive captured
+    /// Completed V1 return spans additionally require completion events, unique consecutive captured
     /// method identities in physical return order, resolved same-module runtime plumbing, a box carrier, and
     /// builder-completion evidence. Unverified leaf callees remain outside the fold; an interrupted span is retained.
+    /// A fully completed activation is attributed to its logical root. A truncated, partially completed outer
+    /// activation retains its physically matched finishing body and captured remaining ancestry, without
+    /// asserting that its next continuation has started or identifying a dispatcher that was not captured.
+    /// A single normal completion of a recursive leaf can instead be aligned using an owned builder-completion
+    /// to box-entry span and its captured dispatcher, without weakening structural repeated-identity checks.
     /// </para>
     /// </remarks>
     internal sealed class AsyncProfilerV1PresentationTransform
@@ -111,6 +116,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         public void Apply(AsyncProfilerCallStackTransformState context)
         {
             List<AsyncProfilerStitchedFrame> frames = context.Frames;
+            ResolveRecursiveV1Completion(context);
             CollapseCompletedV1Unwinds(context);
             // Preserve the leaf-to-root interleaving of handoff, deduplication, and startup edits.
             for (int i = 0; i < frames.Count; i++)
@@ -170,6 +176,158 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         #region private
 
+        private static void ResolveRecursiveV1Completion(AsyncProfilerCallStackTransformState context)
+        {
+            if (context.TraceLog == null || context.Segments.Count != 1 ||
+                context.Diagnostics.SegmentsProcessed != 1 ||
+                context.Diagnostics.BoundariesNotFound != 0 || context.Diagnostics.AdjacencyMismatches != 0 ||
+                context.Diagnostics.V1CompletionAlignmentAmbiguous != 1)
+            {
+                return;
+            }
+            AsyncProfilerCallStack activation = context.Segments[0];
+            if (activation.Frames.Kind != AsyncCallstackKind.StateMachineAsync ||
+                activation.Frames.FrameCount < 2 ||
+                context.TraceLog.AsyncProfilerCallStacks?.MethodCompletionObserved(activation) != true ||
+                activation.GetMethodCompletedFrameCount(context.TimestampQpc) != 1 ||
+                activation.GetExceptionCompletedFrameCount(context.TimestampQpc) != 0)
+            {
+                return;
+            }
+            MethodIndex method = context.GetMethod(activation.Frames.CodeAddressAt(0));
+            if (method == MethodIndex.Invalid || context.GetMethod(activation.Frames.CodeAddressAt(1)) != method)
+            {
+                return;
+            }
+
+            List<AsyncProfilerStitchedFrame> frames = context.Frames;
+            int target = frames.FindIndex(frame =>
+                frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget &&
+                frame.ContextKind == AsyncProfilerStitchedFrameContextKind.Active &&
+                ReferenceEquals(frame.Context, activation) && frame.SegmentFrameIndex == 1 &&
+                !frame.IsStateMachineBoxCarrier);
+            if (target < 2 ||
+                context.ClassifyBoundary(frames[target - 1].CodeAddress).Kind !=
+                    AsyncProfilerCallStackStitchBoundaryKind.V1Dispatcher)
+            {
+                return;
+            }
+            ModuleFileIndex owner = context.GetHostModuleOwner(frames[target - 1].CodeAddress);
+            AsyncProfilerRuntimeRuleProfile profile = context.GetRuntimeProfile(frames[target - 1].CodeAddress);
+            bool Owned(int index)
+            {
+                AsyncProfilerStitchedFrame frame = frames[index];
+                return frame.Origin == AsyncProfilerStitchedFrameOrigin.Sync &&
+                    frame.ContextKind == AsyncProfilerStitchedFrameContextKind.Active &&
+                    ReferenceEquals(frame.Context, activation) &&
+                    frame.CodeAddress != CodeAddressIndex.Invalid && frame.Method != MethodIndex.Invalid &&
+                    owner != ModuleFileIndex.Invalid && context.GetHostModuleOwner(frame.CodeAddress) == owner &&
+                    ReferenceEquals(context.GetRuntimeProfile(frame.CodeAddress), profile);
+            }
+            if (!Owned(target - 1))
+            {
+                return;
+            }
+
+            int body = target - 2;
+            bool returnBox = false;
+            for (; body >= 0 && frames[body].SyncFrameKind != AsyncProfilerStitchSyncFrameKind.V1StateMachineMoveNext; body--)
+            {
+                AsyncProfilerStitchedFrame frame = frames[body];
+                if (!Owned(body) ||
+                    (!profile.IsV1CompletionUnwindInfrastructure(frame, context.ClassifyBoundary(frame.CodeAddress).Kind) &&
+                     frame.SyncFrameKind != AsyncProfilerStitchSyncFrameKind.V1StateMachineBoxExecutionContextCallback) ||
+                    (frame.BoxedStateMachineMethod != MethodIndex.Invalid && frame.BoxedStateMachineMethod != method))
+                {
+                    return;
+                }
+                returnBox |= frame.BoxedStateMachineMethod == method;
+            }
+            if (!returnBox || body < 1 || frames[body].Origin != AsyncProfilerStitchedFrameOrigin.Sync ||
+                frames[body].ContextKind != AsyncProfilerStitchedFrameContextKind.Active ||
+                !ReferenceEquals(frames[body].Context, activation) ||
+                frames[body].CodeAddress == CodeAddressIndex.Invalid || frames[body].Method != method ||
+                !Owned(body - 1) ||
+                frames[body - 1].SyncFrameKind != AsyncProfilerStitchSyncFrameKind.V1MethodBuilderCompletion)
+            {
+                return;
+            }
+
+            int entry = FindV1CompletionPairBeforeBody(context, 0, body);
+            if (entry < 0)
+            {
+                return;
+            }
+            for (int i = entry; i < body - 1; i++)
+            {
+                if (!Owned(i))
+                {
+                    return;
+                }
+            }
+            while (entry > 0 &&
+                (frames[entry - 1].SyncFrameKind == AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibAwaiterInfrastructure ||
+                 frames[entry - 1].SyncFrameKind == AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure))
+            {
+                if (!Owned(--entry))
+                {
+                    return;
+                }
+            }
+            int boxesEnd = entry;
+            while (entry > 0 && frames[entry - 1].BoxedStateMachineMethod != MethodIndex.Invalid)
+            {
+                AsyncProfilerStitchedFrame box = frames[--entry];
+                if (!Owned(entry) || box.BoxedStateMachineMethod != method ||
+                    box.SyncFrameKind != AsyncProfilerStitchSyncFrameKind.ProfilerInfrastructure ||
+                    !profile.IsProfilerDispatchInfrastructure(box.SyncFrameKind))
+                {
+                    return;
+                }
+            }
+            if (entry == boxesEnd)
+            {
+                return;
+            }
+            for (int i = 0; i < entry; i++)
+            {
+                if (frames[i].SyncFrameKind == AsyncProfilerStitchSyncFrameKind.V1StateMachineMoveNext ||
+                    frames[i].BoxedStateMachineMethod != MethodIndex.Invalid)
+                {
+                    return;
+                }
+            }
+
+            // Only frame zero can have completed. Two or more completions cannot identify a surviving recursive copy.
+            frames[body] = AsyncProfilerStitchedFrame.CreateAsyncCompleting(
+                frames[body].CodeAddress, frames[body].Method, activation, 0);
+            int removed = target - body - 1;
+            frames.RemoveRange(body + 1, removed);
+            context.Diagnostics.V1CompletionAlignmentAmbiguous--;
+            context.Diagnostics.V1CompletionTailUsed++;
+            context.Diagnostics.V1InfrastructureFramesCollapsed += removed;
+        }
+
+        private static int FindV1CompletionPairBeforeBody(
+            AsyncProfilerCallStackTransformState context, int start, int body)
+        {
+            for (int i = body - 2; i >= start; i--)
+            {
+                AsyncProfilerRuntimeSequenceMatch pair = context.MatchRuntimeSequence(
+                    AsyncProfilerRuntimeSequenceKind.TaskCompletionPair, i, body - 1);
+                if (pair.IsRejected)
+                {
+                    return -1;
+                }
+                if (pair.IsMatch && i + pair.Length == body - 1)
+                {
+                    return context.MatchRuntimeSequence(
+                        AsyncProfilerRuntimeSequenceKind.TaskCompletionChain, i, body).IsRejected ? -1 : i;
+                }
+            }
+            return -1;
+        }
+
         private static void CollapseCompletedV1Unwinds(AsyncProfilerCallStackTransformState context)
         {
             if (context.TraceLog == null)
@@ -189,30 +347,86 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 if (activation != null &&
                     activation.Frames.Kind == AsyncCallstackKind.StateMachineAsync &&
                     context.TraceLog.AsyncProfilerCallStacks?.MethodCompletionObserved(activation) == true &&
-                    activation.GetMethodCompletedFrameCount(context.TimestampQpc) > 0 &&
-                    activation.GetCompletedFrameCount(context.TimestampQpc) == activation.Frames.FrameCount &&
-                    TryMatchCompletedV1Unwind(context, start, end, activation, out int unwindStart))
+                    activation.GetMethodCompletedFrameCount(context.TimestampQpc) > 0)
                 {
+                    int completed = activation.GetCompletedFrameCount(context.TimestampQpc);
+                    bool fullyCompleted = completed == activation.Frames.FrameCount;
                     bool incompleteRoot = end == frames.Count && context.Segments.Count != 0 &&
                         ReferenceEquals(context.Segments[0], activation);
-                    int removed = end - unwindStart;
-                    frames.RemoveRange(unwindStart, removed);
-                    frames.Insert(unwindStart, AsyncProfilerStitchedFrame.CreateAsyncCompletionUnwind(activation));
-                    context.Diagnostics.V1CompletionUnwindFramesCollapsed += removed;
-                    end = unwindStart + 1;
-                    if (incompleteRoot)
+                    int physicalEnd = start;
+                    while (physicalEnd < end && frames[physicalEnd].Origin == AsyncProfilerStitchedFrameOrigin.Sync)
                     {
-                        frames.Insert(end++, AsyncProfilerStitchedFrame.CreateIncompleteRoot());
-                        context.Diagnostics.IncompleteAsyncRootsNormalized++;
+                        physicalEnd++;
+                    }
+                    bool partialReturn = incompleteRoot && completed > 0 && completed < activation.Frames.FrameCount &&
+                        HasRemainingV1Callers(frames, physicalEnd, end, completed + 1, activation.Frames.FrameCount);
+                    if ((fullyCompleted && physicalEnd == end || partialReturn) &&
+                        TryMatchCompletedV1Unwind(
+                            context, start, physicalEnd, activation, completed, out int unwindStart, out int completingPos))
+                    {
+                        AsyncProfilerStitchedFrame completionFrame = fullyCompleted
+                            ? AsyncProfilerStitchedFrame.CreateAsyncCompletionUnwind(activation)
+                            : AsyncProfilerStitchedFrame.CreateAsyncCompleting(
+                                frames[completingPos].CodeAddress, frames[completingPos].Method, activation, completed - 1);
+                        int removed = physicalEnd - unwindStart;
+                        int retainedCallers = end - physicalEnd;
+                        bool retainMachinery = unwindStart > start &&
+                            frames[unwindStart].SyncFrameKind != AsyncProfilerStitchSyncFrameKind.V1StateMachineMoveNext;
+                        if (retainMachinery)
+                        {
+                            CollapseMachinerySpan(frames, unwindStart, removed);
+                            unwindStart++;
+                        }
+                        else
+                        {
+                            frames.RemoveRange(unwindStart, removed);
+                        }
+                        frames.Insert(unwindStart, completionFrame);
+                        end = unwindStart + 1 + retainedCallers;
+                        if (!fullyCompleted)
+                        {
+                            // Without the dispatcher or a carrier, the next captured method is ancestry,
+                            // not a verified dispatch target or a physically running body.
+                            frames.Insert(unwindStart + 1, AsyncProfilerStitchedFrame.CreateAsync(activation, completed));
+                            end++;
+                        }
+                        context.Diagnostics.V1CompletionUnwindFramesCollapsed += removed;
+                        if (incompleteRoot)
+                        {
+                            frames.Insert(end++, AsyncProfilerStitchedFrame.CreateIncompleteRoot());
+                            context.Diagnostics.IncompleteAsyncRootsNormalized++;
+                        }
                     }
                 }
                 start = end;
             }
         }
 
-        private static bool TryMatchCompletedV1Unwind(
-            AsyncProfilerCallStackTransformState context, int start, int end, AsyncProfilerCallStack activation, out int unwindStart)
+        private static bool HasRemainingV1Callers(
+            List<AsyncProfilerStitchedFrame> frames, int start, int end, int next, int frameCount)
         {
+            for (int i = start; i < end; i++, next++)
+            {
+                if (frames[i].Origin != AsyncProfilerStitchedFrameOrigin.AsyncRemaining ||
+                    frames[i].SegmentFrameIndex != next)
+                {
+                    return false;
+                }
+            }
+            return next == frameCount;
+        }
+
+        private static bool TryMatchCompletedV1Unwind(
+            AsyncProfilerCallStackTransformState context, int start, int end, AsyncProfilerCallStack activation,
+            int completed, out int unwindStart, out int completingPos)
+        {
+            unwindStart = start;
+            completingPos = -1;
+            if (completed == activation.Frames.FrameCount &&
+                TryMatchFullyCompletedRecursiveV1Unwind(context, start, end, activation, out unwindStart))
+            {
+                return true;
+            }
             unwindStart = start;
             TraceLog log = context.TraceLog;
             TraceMethods methods = log.CodeAddresses.Methods;
@@ -266,6 +480,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                         capturedIndex = j;
                         break;
                     }
+                }
+                if (capturedIndex >= completed)
+                {
+                    return false;
                 }
 
                 AsyncProfilerRuntimeRuleProfile profile = context.GetRuntimeProfile(frame.CodeAddress);
@@ -325,9 +543,99 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     }
                     bodyAtPrevious = true;
                     hasBody = true;
+                    if (capturedIndex == completed - 1)
+                    {
+                        completingPos = i;
+                    }
                 }
             }
-            return identities >= 2 && hasBody && hasBox && hasCompletion;
+            return identities >= 2 && hasBody && hasBox && hasCompletion &&
+                (completed == captured.FrameCount || completingPos >= 0);
+        }
+
+        private static bool TryMatchFullyCompletedRecursiveV1Unwind(
+            AsyncProfilerCallStackTransformState context, int start, int end,
+            AsyncProfilerCallStack activation, out int unwindStart)
+        {
+            unwindStart = start;
+            AsyncProfilerCallStackFrames captured = activation.Frames;
+            if (captured.FrameCount < 2 ||
+                activation.GetMethodCompletedFrameCount(context.TimestampQpc) != captured.FrameCount ||
+                activation.GetExceptionCompletedFrameCount(context.TimestampQpc) != 0)
+            {
+                return false;
+            }
+            MethodIndex method = context.GetMethod(captured.CodeAddressAt(0));
+            for (int i = 0; i < captured.FrameCount; i++)
+            {
+                if (method == MethodIndex.Invalid || context.GetMethod(captured.CodeAddressAt(i)) != method)
+                {
+                    return false;
+                }
+            }
+            if (!AsyncProfilerCallStackStitchBoundary.TryGetLogicalStateMachineMethodName(
+                AsyncProfilerCallStackStitchBoundary.NormalizeMethodName(
+                    context.TraceLog.CodeAddresses[captured.CodeAddressAt(captured.FrameCount - 1)].FullMethodName), out _))
+            {
+                return false;
+            }
+
+            int bodies = 0;
+            bool entryBox = false;
+            ModuleFileIndex runtimeModule = ModuleFileIndex.Invalid;
+            AsyncProfilerRuntimeRuleProfile runtimeProfile = null;
+            for (int i = start; i < end; i++)
+            {
+                AsyncProfilerStitchedFrame frame = context.Frames[i];
+                if (frame.Origin != AsyncProfilerStitchedFrameOrigin.Sync ||
+                    frame.ContextKind != AsyncProfilerStitchedFrameContextKind.Active ||
+                    !ReferenceEquals(frame.Context, activation))
+                {
+                    return false;
+                }
+                bool body = frame.SyncFrameKind == AsyncProfilerStitchSyncFrameKind.V1StateMachineMoveNext;
+                AsyncProfilerRuntimeRuleProfile profile = context.GetRuntimeProfile(frame.CodeAddress);
+                bool infrastructure = profile.IsV1CompletionUnwindInfrastructure(
+                    frame, context.ClassifyBoundary(frame.CodeAddress).Kind);
+                bool box = frame.BoxedStateMachineMethod != MethodIndex.Invalid;
+                if (frame.CodeAddress == CodeAddressIndex.Invalid || frame.Method == MethodIndex.Invalid ||
+                    (body ? frame.Method != method : !infrastructure || (box && frame.BoxedStateMachineMethod != method)))
+                {
+                    if (bodies != 0)
+                    {
+                        return false;
+                    }
+                    unwindStart = i + 1;
+                    runtimeModule = ModuleFileIndex.Invalid;
+                    runtimeProfile = null;
+                    entryBox = false;
+                    continue;
+                }
+                if (body)
+                {
+                    // Attribute the completed cohort to its logical root, never to an individual recursive copy.
+                    if (!entryBox || i <= unwindStart ||
+                        context.Frames[i - 1].SyncFrameKind != AsyncProfilerStitchSyncFrameKind.V1MethodBuilderCompletion ||
+                        FindV1CompletionPairBeforeBody(context, unwindStart, i) < 0 ||
+                        ++bodies > captured.FrameCount)
+                    {
+                        return false;
+                    }
+                    entryBox = false;
+                    continue;
+                }
+                ModuleFileIndex owner = context.GetHostModuleOwner(frame.CodeAddress);
+                if (owner == ModuleFileIndex.Invalid ||
+                    (runtimeModule != ModuleFileIndex.Invalid &&
+                     (owner != runtimeModule || !ReferenceEquals(profile, runtimeProfile))))
+                {
+                    return false;
+                }
+                runtimeModule = owner;
+                runtimeProfile = profile;
+                entryBox |= box && frame.SyncFrameKind == AsyncProfilerStitchSyncFrameKind.ProfilerInfrastructure;
+            }
+            return bodies >= 2;
         }
 
         private static bool SameMethodIdentity(TraceMethods methods, MethodIndex left, MethodIndex right)
@@ -580,7 +888,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
     /// <summary>
     /// Opt-in cleanup of recognized V1/V2 CoreLib machinery, with atomic resumption-bridge and profiler-prefix
-    /// ownership checks protecting uncertain spans from later individual-helper removal.
+    /// ownership checks and independently verified bounded helper runs protecting uncertain callees.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -590,10 +898,17 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// The complete candidate, including the anchor, must resolve to one captured CoreLib module, contain a profile-recognized
     /// bridge layout (containing adjacent Task.RunContinuations/TrySetResult under the common rules), and have no live-context ownership or V1-dispatcher/V2-wrapper
     /// boundary. V2 additionally requires a physically matched current method or a resolved structural dispatch target.
-    /// Alternatively, a profile-matched V2 helper span can follow that activation's structurally consumed,
-    /// verified dispatch pair. The common rule accepts contiguous YieldAwaitable-family methods of the same
+    /// Alternatively, a profile-matched helper span can follow that activation's structurally consumed,
+    /// verified V1 dispatcher or V2 dispatch pair. V1 also requires a verified current/target anchor.
+    /// The common rule accepts contiguous YieldAwaitable-family methods of the same
     /// captured CoreLib before the scheduler anchor, without relying on a particular generated callback name.
-    /// Rejected candidates stay intact and protected, including their completion chains.
+    /// A physical, record-aligned V1 completion body with its consumed dispatcher can prove ownership of this
+    /// bounded bridge without being promoted to an executing anchor.
+    /// A normalized, fully completed V1 return unwind can supply that ownership for the Yield helper bridge.
+    /// A root-adjacent completion chain, optionally preceded by known awaiter/bridge helpers, can instead
+    /// become one dispatcher marker before a resolved non-CoreLib caller. The verified root dispatcher and
+    /// same-runtime scheduler anchor remain required; that caller and its entire host tail remain physical
+    /// and protected. Other rejected candidates stay intact, including their completion chains.
     /// </para>
     /// <para>
     /// A leaf-side wrapperless V2 dispatch pair can also own a contiguous span of resolved profiler-type
@@ -604,18 +919,26 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// Next, a resolved CoreLib AsyncProfiler.ResumeAsyncContext.Resume entry spine must establish ownership
     /// immediately above a physical current/completing method, a verified V1 box carrier, or a retained V1
     /// dispatcher and its target. Every leaf-side prefix frame must be synchronous and belong to that same active
-    /// context, with no intervening async boundary. The entire owned prefix, including initialization, GC,
-    /// unresolved callees, and callbacks, is attributed to the logical anchor; this is overhead attribution, not
-    /// proof that an application's suspended body was executing. Rejected profiler prefixes remain protected too.
-    /// CreateDispatcher and a resolved await-registration spine directly above a physical current V1 method
-    /// also establish ownership of the dispatcher's callees, without requiring their individual names.
+    /// context, with no intervening async boundary. Only the entry spine and its contiguous, resolved profiler
+    /// helpers become a dispatcher marker. Initialization, GC, unresolved callees, and callbacks remain physical.
+    /// Rejected profiler prefixes remain protected too, except for independently verified bounded registration.
+    /// A resolved await-registration spine directly above a physical current V1 method also identifies an entry,
+    /// without requiring a particular profiler helper or hiding unrecognized callees.
+    /// A verified V1 completion owner can instead anchor the profile's completion pair followed by its builder
+    /// completion helper. Contiguous TaskAwaiter-family methods can extend an owned span, not start one.
     /// Profiles recognize the entry spine; activation ownership and required dispatcher evidence remain shared.
+    /// A resolved CreateDispatcher and profile-matched await-registration run before a physical non-CoreLib caller
+    /// can be grouped independently of whole-prefix ownership. All helpers must be eligible, contiguous, resolved,
+    /// and share the captured runtime/profile and active context. Entry/registration profile vetoes still apply.
+    /// The caller remains synchronous; the marker and all leaf-side callees remain protected. Independent helpers
+    /// rootward of that physical caller can use ordinary cleanup without claiming a new async activation.
     /// </para>
     /// <para>
-    /// Within the remaining unprotected range, removes profile-matched completion chains before individual known builder,
-    /// awaiter, dispatcher-creation, Task, and execution-context helpers. Residual contiguous dispatcher/box spans
-    /// become <c>[Async dispatcher frames]</c> markers so their callees do not appear to belong to the scheduler.
-    /// Spans belonging to different async contexts are not combined. Isolated
+    /// Within the remaining unprotected range, groups profile-matched completion chains and individual known builder,
+    /// awaiter, dispatcher-creation, Task, execution-context, and dispatcher/box helpers into
+    /// <c>[Async dispatcher frames]</c> markers so their callees retain their machinery boundary.
+    /// Adjacent markers merge only within the same async context, runtime profile, and captured CoreLib owner.
+    /// Isolated
     /// TaskCompletionSource.SetResult frames and application/thread roots outside an owned prefix are retained.
     /// This is not a general CoreLib include/exclude filter.
     /// </para>
@@ -644,11 +967,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             CollapseProfilerDispatchSpan(context);
             int cleanupEnd = CollapseRuntimeResumptionBridge(context);
             int cleanupStart = CollapseProfilerOwnedPrefix(context, ref cleanupEnd);
+            cleanupStart = CollapseBoundedAwaitRegistration(context, cleanupStart, ref cleanupEnd);
             List<(int Start, int End)> rejectedSpans = null;
 
-            // Remove the public SetResult trigger only as part of the exact inline-completion chain. Removing the
-            // two implementation frames independently would otherwise leave SetResult as an orphan between the
-            // resumed async method and its synchronous caller.
+            // Group the public SetResult trigger only as part of the exact inline-completion chain.
             for (int i = cleanupStart; i < cleanupEnd;)
             {
                 if (frames[i].Origin != AsyncProfilerStitchedFrameOrigin.Sync)
@@ -658,11 +980,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 }
                 AsyncProfilerRuntimeSequenceMatch chain = context.MatchRuntimeSequence(
                     AsyncProfilerRuntimeSequenceKind.TaskCompletionChain, i, cleanupEnd);
-                if (chain.IsMatch)
+                if (chain.IsMatch && HasSameMachineryOwner(context, i, chain.Length))
                 {
-                    frames.RemoveRange(i, chain.Length);
-                    cleanupEnd -= chain.Length;
+                    cleanupEnd -= CollapseMachinerySpan(frames, i, chain.Length);
                     context.Diagnostics.AsyncInfrastructureFramesCollapsed += chain.Length;
+                    i++;
                 }
                 else
                 {
@@ -671,7 +993,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     AsyncProfilerRuntimeSequenceMatch handoff = context.MatchRuntimeSequence(
                         AsyncProfilerRuntimeSequenceKind.V2CompletionHandoff, i, cleanupEnd);
                     int protectedLength = Math.Max(
-                        chain.IsRejected ? chain.Length : 0,
+                        chain.IsRejected || chain.IsMatch ? chain.Length : 0,
                         handoff.IsRejected ? handoff.Length : 0);
                     AsyncProfilerRuntimeSequenceMatch startup = context.MatchRuntimeSequence(
                         AsyncProfilerRuntimeSequenceKind.V1Startup, i, cleanupEnd);
@@ -691,49 +1013,151 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     }
                     else
                     {
-                        i++;
+                        AsyncProfilerRuntimeSequenceMatch pair = context.MatchRuntimeSequence(
+                            AsyncProfilerRuntimeSequenceKind.TaskCompletionPair, i, cleanupEnd);
+                        AsyncProfilerStitchedFrame entry = frames[i];
+                        if (pair.IsMatch && entry.Context != null &&
+                            entry.ContextKind == AsyncProfilerStitchedFrameContextKind.Active &&
+                            HasSameMachineryOwner(context, i, pair.Length) &&
+                            context.HasVerifiedV1CompletionAnchor(entry.Context, entry.CodeAddress))
+                        {
+                            int minimumStart = rejectedSpans != null
+                                ? Math.Max(cleanupStart, rejectedSpans[rejectedSpans.Count - 1].End) : cleanupStart;
+                            int start = i > minimumStart && frames[i - 1].Method != MethodIndex.Invalid &&
+                                IsSyncFrameKind(frames[i - 1],
+                                    AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure) &&
+                                HasSameMachineryOwner(context, i - 1, pair.Length + 1) ? i - 1 : i;
+                            start = FindProfilerDispatchSpanStart(context, start, frames[start], minimumStart);
+                            int count = i + pair.Length - start;
+                            cleanupEnd -= CollapseMachinerySpan(frames, start, count);
+                            context.Diagnostics.AsyncInfrastructureFramesCollapsed += count;
+                            context.Diagnostics.ProfilerEnvelopeFramesCollapsed += i - start;
+                            i = start + 1;
+                        }
+                        else
+                        {
+                            i++;
+                        }
                     }
                 }
             }
 
             int rejectedIndex = (rejectedSpans?.Count ?? 0) - 1;
+            int mergeEnd = cleanupEnd;
             for (int i = cleanupEnd - 1; i >= cleanupStart; i--)
             {
                 if (rejectedIndex >= 0 && i < rejectedSpans[rejectedIndex].End)
                 {
+                    mergeEnd = rejectedSpans[rejectedIndex].Start;
                     i = rejectedSpans[rejectedIndex--].Start;
                     continue;
                 }
                 AsyncProfilerStitchedFrame frame = frames[i];
-                if (frame.Origin != AsyncProfilerStitchedFrameOrigin.Sync ||
-                    frame.Presentation == AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames)
+                if (frame.Origin != AsyncProfilerStitchedFrameOrigin.Sync)
                 {
                     continue;
                 }
 
+                bool marker = frame.Presentation == AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames;
                 AsyncProfilerCallStackStitchBoundaryKind boundaryKind = context.ClassifyBoundary(frame.CodeAddress).Kind;
-                if (context.GetRuntimeProfile(frame.CodeAddress).IsOptionalInfrastructureFrame(frame, boundaryKind))
+                if (marker || context.GetRuntimeProfile(frame.CodeAddress).IsOptionalInfrastructureFrame(frame, boundaryKind))
                 {
-                    if (boundaryKind != AsyncProfilerCallStackStitchBoundaryKind.None)
+                    int count = i + 1 < mergeEnd &&
+                        frames[i + 1].Presentation == AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames &&
+                        HasSameMachineryOwner(context, i, 2) ? 2 : 1;
+                    int start = i;
+                    if (context.TraceLog != null && frame.Context != null &&
+                        frame.ContextKind == AsyncProfilerStitchedFrameContextKind.Active &&
+                        (marker || context.ClassifyBoundary(frame.CodeAddress).IsBoundary) &&
+                        context.HasVerifiedDispatchEntry(frame.Context, frame.CodeAddress, requireAsyncAnchor: false))
                     {
-                        frames[i] = frame.WithPresentation(AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames);
-                        if (i + 1 < frames.Count &&
-                            frames[i + 1].Presentation == AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames &&
-                            ReferenceEquals(frame.Context, frames[i + 1].Context))
-                        {
-                            frames.RemoveAt(i + 1);
-                        }
+                        int minimumStart = rejectedIndex >= 0
+                            ? Math.Max(cleanupStart, rejectedSpans[rejectedIndex].End) : cleanupStart;
+                        start = FindProfilerDispatchSpanStart(context, i, frame, minimumStart);
                     }
-                    else
-                    {
-                        frames.RemoveAt(i);
-                    }
-                    context.Diagnostics.AsyncInfrastructureFramesCollapsed++;
+                    int helpers = i - start;
+                    int removed = CollapseMachinerySpan(frames, start, helpers + count);
+                    cleanupEnd -= removed;
+                    mergeEnd -= removed;
+                    context.Diagnostics.AsyncInfrastructureFramesCollapsed += helpers + (marker ? 0 : 1);
+                    context.Diagnostics.ProfilerEnvelopeFramesCollapsed += helpers;
+                    i = start;
                 }
             }
         }
 
         #region private
+
+        private static int CollapseBoundedAwaitRegistration(
+            AsyncProfilerCallStackTransformState context, int protectedEnd, ref int cleanupEnd)
+        {
+            if (context.TraceLog == null)
+            {
+                return protectedEnd;
+            }
+            List<AsyncProfilerStitchedFrame> frames = context.Frames;
+            for (int start = 0; start < protectedEnd; start++)
+            {
+                AsyncProfilerStitchedFrame entry = frames[start];
+                if (!IsSyncFrameKind(entry, AsyncProfilerStitchSyncFrameKind.V1DispatcherCreationInfrastructure) ||
+                    entry.Context == null || entry.ContextKind != AsyncProfilerStitchedFrameContextKind.Active)
+                {
+                    continue;
+                }
+                AsyncProfilerRuntimeSequenceMatch registration = context.MatchRuntimeSequence(
+                    AsyncProfilerRuntimeSequenceKind.V1AwaitRegistration, start + 1, protectedEnd);
+                if (!registration.IsMatch)
+                {
+                    continue;
+                }
+                int end = start + 1 + registration.Length;
+                if (end >= protectedEnd)
+                {
+                    continue;
+                }
+                AsyncProfilerStitchedFrame caller = frames[end];
+                if (caller.Origin != AsyncProfilerStitchedFrameOrigin.Sync ||
+                    caller.ContextKind != AsyncProfilerStitchedFrameContextKind.Active ||
+                    !ReferenceEquals(entry.Context, caller.Context) ||
+                    caller.CodeAddress == CodeAddressIndex.Invalid || caller.Method == MethodIndex.Invalid ||
+                    context.GetHostModuleOwner(caller.CodeAddress) != ModuleFileIndex.Invalid ||
+                    context.ClassifyBoundary(caller.CodeAddress).IsBoundary)
+                {
+                    continue;
+                }
+                AsyncProfilerRuntimeSequenceMatch match = context.MatchRuntimeSequence(
+                    AsyncProfilerRuntimeSequenceKind.ProfilerEntry, start, end);
+                if (!match.IsMatch || match.Length != end - start || !HasSameMachineryOwner(context, start, match.Length))
+                {
+                    continue;
+                }
+                AsyncProfilerRuntimeRuleProfile profile = context.GetRuntimeProfile(entry.CodeAddress);
+                bool eligible = true;
+                for (int i = start; i < end; i++)
+                {
+                    AsyncProfilerStitchedFrame helper = frames[i];
+                    AsyncProfilerCallStackStitchBoundaryKind boundary = context.ClassifyBoundary(helper.CodeAddress).Kind;
+                    if (helper.Presentation != AsyncProfilerStitchedFramePresentation.Native ||
+                        helper.ContextKind != AsyncProfilerStitchedFrameContextKind.Active ||
+                        boundary != AsyncProfilerCallStackStitchBoundaryKind.None ||
+                        !profile.IsOptionalInfrastructureFrame(helper, boundary))
+                    {
+                        eligible = false;
+                        break;
+                    }
+                }
+                if (!eligible)
+                {
+                    continue;
+                }
+                cleanupEnd -= CollapseMachinerySpan(frames, start, match.Length);
+                context.Diagnostics.AsyncInfrastructureFramesCollapsed += match.Length;
+                // Only the local helper run is proven. Its callees and representative stay protected;
+                // the physical caller and independent root-side helpers can use ordinary cleanup.
+                return start + 1;
+            }
+            return protectedEnd;
+        }
 
         private static void CollapseProfilerDispatchSpan(AsyncProfilerCallStackTransformState context)
         {
@@ -786,35 +1210,40 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 {
                     return;
                 }
-                ModuleFileIndex owner = context.GetHostModuleOwner(dispatcher.CodeAddress);
-                int start = i;
-                while (start > 0)
-                {
-                    AsyncProfilerStitchedFrame helper = frames[start - 1];
-                    if (helper.Origin != AsyncProfilerStitchedFrameOrigin.Sync ||
-                        helper.Presentation != AsyncProfilerStitchedFramePresentation.Native ||
-                        helper.Method == MethodIndex.Invalid ||
-                        !ReferenceEquals(helper.Context, dispatcher.Context) ||
-                        owner == ModuleFileIndex.Invalid || owner != context.GetHostModuleOwner(helper.CodeAddress) ||
-                        !ReferenceEquals(profile, context.GetRuntimeProfile(helper.CodeAddress)) ||
-                        context.ClassifyBoundary(helper.CodeAddress).Kind != AsyncProfilerCallStackStitchBoundaryKind.None ||
-                        !profile.IsProfilerDispatchInfrastructure(
-                            AsyncProfilerCallStackStitchBoundary.NormalizeMethodName(
-                                context.TraceLog.CodeAddresses[helper.CodeAddress].FullMethodName)))
-                    {
-                        break;
-                    }
-                    start--;
-                }
+                int start = FindProfilerDispatchSpanStart(context, i, dispatcher);
                 if (start < i)
                 {
                     // Retain the leafmost physical identity; the marker does not imply a logical method owner.
-                    frames[start] = frames[start].WithPresentation(AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames);
-                    frames.RemoveRange(start + 1, i - start + (marker ? 0 : 1));
+                    CollapseMachinerySpan(frames, start, i - start + (marker ? 1 : 2));
                     context.Diagnostics.AsyncInfrastructureFramesCollapsed += i - start + (marker ? 0 : 2);
                 }
                 return;
             }
+        }
+
+        private static int FindProfilerDispatchSpanStart(
+            AsyncProfilerCallStackTransformState context, int start, AsyncProfilerStitchedFrame entry,
+            int minimumStart = 0)
+        {
+            AsyncProfilerRuntimeRuleProfile profile = context.GetRuntimeProfile(entry.CodeAddress);
+            ModuleFileIndex owner = context.GetHostModuleOwner(entry.CodeAddress);
+            while (start > minimumStart)
+            {
+                AsyncProfilerStitchedFrame helper = context.Frames[start - 1];
+                if (helper.Origin != AsyncProfilerStitchedFrameOrigin.Sync ||
+                    helper.Presentation != AsyncProfilerStitchedFramePresentation.Native ||
+                    helper.Method == MethodIndex.Invalid ||
+                    !ReferenceEquals(helper.Context, entry.Context) ||
+                    owner == ModuleFileIndex.Invalid || owner != context.GetHostModuleOwner(helper.CodeAddress) ||
+                    !ReferenceEquals(profile, context.GetRuntimeProfile(helper.CodeAddress)) ||
+                    context.ClassifyBoundary(helper.CodeAddress).IsBoundary ||
+                    !profile.IsProfilerDispatchInfrastructure(helper.SyncFrameKind))
+                {
+                    break;
+                }
+                start--;
+            }
+            return start;
         }
 
         private static int CollapseProfilerOwnedPrefix(AsyncProfilerCallStackTransformState context, ref int cleanupEnd)
@@ -846,7 +1275,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 candidate |= i > 0 &&
                              frame.SyncFrameKind == AsyncProfilerStitchSyncFrameKind.V1DispatcherCreationInfrastructure;
             }
-            if (!candidate)
+            int registrationEntry = FindV1AwaitRegistrationEntry(context, targetIndex);
+            int completionEntry = FindV1CompletionEntry(context, targetIndex);
+            bool completionFallbackOnly = !candidate && registrationEntry < 0 && completionEntry >= 0;
+            if (!candidate && registrationEntry < 0 && completionEntry < 0)
             {
                 return 0;
             }
@@ -881,6 +1313,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             {
                 AsyncProfilerRuntimeSequenceMatch entry = context.MatchRuntimeSequence(
                     AsyncProfilerRuntimeSequenceKind.ProfilerEntry, i, targetIndex);
+                if (entry.IsRejected)
+                {
+                    return targetIndex;
+                }
                 if (entry.IsMatch && entry.Length == targetIndex - i)
                 {
                     entryIndex = i;
@@ -889,11 +1325,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
             if (entryIndex < 0)
             {
-                return targetIndex;
+                entryIndex = registrationEntry >= 0 ? registrationEntry : completionEntry;
+                if (entryIndex < 0)
+                {
+                    return targetIndex;
+                }
             }
 
-            // Only the entry spine needs symbols. Everything leafward is callee work owned by that invocation.
-            // A physical current/completing anchor remains intact even when stitching already removed its dispatcher.
             int dispatcherCount = 0;
             for (int i = 0; i < targetIndex; i++)
             {
@@ -919,11 +1357,80 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 return targetIndex;
             }
 
-            frames.RemoveRange(0, targetIndex);
-            cleanupEnd -= targetIndex;
-            context.Diagnostics.AsyncInfrastructureFramesCollapsed += targetIndex;
-            context.Diagnostics.ProfilerEnvelopeFramesCollapsed += targetIndex;
-            return 0;
+            int start = FindProfilerDispatchSpanStart(context, entryIndex, frames[entryIndex]);
+            int count = targetIndex - start;
+            cleanupEnd -= CollapseMachinerySpan(frames, start, count);
+            context.Diagnostics.AsyncInfrastructureFramesCollapsed += count;
+            context.Diagnostics.ProfilerEnvelopeFramesCollapsed += count;
+            // Completion-only entries must not suppress independent helper groups above a contiguity break.
+            return completionFallbackOnly ? 0 : start + 1;
+        }
+
+        private static int FindV1AwaitRegistrationEntry(
+            AsyncProfilerCallStackTransformState context, int targetIndex)
+        {
+            if (targetIndex == context.Frames.Count)
+            {
+                return -1;
+            }
+            AsyncProfilerStitchedFrame target = context.Frames[targetIndex];
+            if (target.Origin != AsyncProfilerStitchedFrameOrigin.AsyncCurrent ||
+                target.Segment.Kind != AsyncCallstackKind.StateMachineAsync ||
+                target.Method == MethodIndex.Invalid || target.CodeAddress == CodeAddressIndex.Invalid)
+            {
+                return -1;
+            }
+
+            int entry = -1;
+            for (int i = targetIndex - 1; i >= 0; i--)
+            {
+                AsyncProfilerRuntimeSequenceMatch registration = context.MatchRuntimeSequence(
+                    AsyncProfilerRuntimeSequenceKind.V1AwaitRegistration, i, targetIndex);
+                if (registration.IsRejected)
+                {
+                    return -1;
+                }
+                if (!registration.IsMatch || registration.Length != targetIndex - i)
+                {
+                    break;
+                }
+                entry = i;
+            }
+            return entry;
+        }
+
+        private static int FindV1CompletionEntry(AsyncProfilerCallStackTransformState context, int targetIndex)
+        {
+            if (targetIndex < 3 || targetIndex == context.Frames.Count ||
+                context.Frames[targetIndex].Origin != AsyncProfilerStitchedFrameOrigin.AsyncCompleting ||
+                !IsSyncFrameKind(context.Frames[targetIndex - 1],
+                    AsyncProfilerStitchSyncFrameKind.V1MethodBuilderCompletion) ||
+                !context.HasVerifiedV1CompletionAnchor(
+                    context.Frames[targetIndex].Context, context.Frames[targetIndex - 1].CodeAddress))
+            {
+                return -1;
+            }
+            for (int i = targetIndex - 2; i >= 0; i--)
+            {
+                AsyncProfilerRuntimeSequenceMatch pair = context.MatchRuntimeSequence(
+                    AsyncProfilerRuntimeSequenceKind.TaskCompletionPair, i, targetIndex - 1);
+                if (pair.IsRejected)
+                {
+                    return -1;
+                }
+                if (pair.IsMatch && pair.Length == targetIndex - 1 - i)
+                {
+                    if (context.MatchRuntimeSequence(
+                        AsyncProfilerRuntimeSequenceKind.TaskCompletionChain, i, targetIndex).IsRejected)
+                    {
+                        return -1;
+                    }
+                    int start = i > 0 && IsSyncFrameKind(context.Frames[i - 1],
+                        AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure) ? i - 1 : i;
+                    return HasSameMachineryOwner(context, start, targetIndex - start) ? start : -1;
+                }
+            }
+            return -1;
         }
 
         private static int CollapseRuntimeResumptionBridge(AsyncProfilerCallStackTransformState context)
@@ -994,9 +1501,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 return frames.Count;
             }
 
+            int matchedEnd = bridgeStart + bridge.Length;
+            bool completionPrefix = matchedEnd < bridgeEnd;
+            bool completedOuter = !rootPlaced && bridge.IsMatch && !completionPrefix &&
+                context.HasVerifiedCompletedV1OuterDispatch(rootContext, frames[bridgeStart].CodeAddress);
             // Rejected bridges remain intact; individual-helper cleanup only visits their leaf-ward prefix.
-            if (!bridge.IsMatch || !rootPlaced || context.TraceLog == null ||
-                dispatchIndex == frames.Count || bridge.Length != bridgeEnd - bridgeStart ||
+            if (!bridge.IsMatch || (!rootPlaced && !completedOuter) || context.TraceLog == null ||
+                dispatchIndex == frames.Count ||
                 context.Diagnostics.SegmentsProcessed != context.Segments.Count ||
                 context.Diagnostics.BoundariesNotFound != 0 ||
                 context.Diagnostics.AdjacencyMismatches != 0 ||
@@ -1005,7 +1516,30 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             {
                 return bridgeStart;
             }
-            for (int i = bridgeStart; i <= dispatchIndex; i++)
+            if (completionPrefix)
+            {
+                AsyncProfilerStitchedFrame caller = frames[matchedEnd];
+                AsyncProfilerStitchedFrame anchor = frames[dispatchIndex];
+                if (context.Diagnostics.V1CompletionAlignmentAmbiguous != 0 ||
+                    matchedEnd >= dispatchIndex ||
+                    caller.Origin != AsyncProfilerStitchedFrameOrigin.Sync || caller.Context != null ||
+                    caller.CodeAddress == CodeAddressIndex.Invalid || caller.Method == MethodIndex.Invalid ||
+                    context.TraceLog.CodeAddresses.ModuleFileIndex(caller.CodeAddress) == ModuleFileIndex.Invalid ||
+                    context.GetHostModuleOwner(caller.CodeAddress) != ModuleFileIndex.Invalid ||
+                    context.ClassifyBoundary(caller.CodeAddress).IsBoundary ||
+                    anchor.Origin != AsyncProfilerStitchedFrameOrigin.Sync || anchor.Context != null ||
+                    anchor.Method == MethodIndex.Invalid ||
+                    context.GetHostModuleOwner(anchor.CodeAddress) != context.GetHostModuleOwner(frames[bridgeStart].CodeAddress) ||
+                    !ReferenceEquals(context.GetRuntimeProfile(anchor.CodeAddress),
+                        context.GetRuntimeProfile(frames[bridgeStart].CodeAddress)) ||
+                    !(context.HasVerifiedDispatchEntry(rootContext, frames[bridgeStart].CodeAddress) ||
+                      context.HasVerifiedV1CompletionAnchor(
+                          rootContext, frames[bridgeStart].CodeAddress, allowCompletionUnwind: true)))
+                {
+                    return bridgeStart;
+                }
+            }
+            for (int i = bridgeStart; i < matchedEnd; i++)
             {
                 if (frames[i].Origin != AsyncProfilerStitchedFrameOrigin.Sync ||
                     frames[i].Context != null)
@@ -1020,11 +1554,18 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 }
             }
 
-            int count = dispatchIndex - bridgeStart;
-            frames.RemoveRange(bridgeStart, count);
+            int count = completionPrefix ? bridge.Length : dispatchIndex - bridgeStart;
+            if (completionPrefix)
+            {
+                CollapseMachinerySpan(frames, bridgeStart, count);
+            }
+            else
+            {
+                frames.RemoveRange(bridgeStart, count);
+            }
             context.Diagnostics.AsyncInfrastructureFramesCollapsed += count;
             context.Diagnostics.RuntimeResumptionBridgeFramesCollapsed += count;
-            return frames.Count;
+            return completionPrefix ? bridgeStart : frames.Count;
         }
 
         #endregion
@@ -1122,6 +1663,39 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
     internal static class AsyncProfilerCallStackTransformHelpers
     {
+        /// <summary>Replaces a verified machinery span, retaining its leafmost physical identity and ownership.</summary>
+        internal static int CollapseMachinerySpan(List<AsyncProfilerStitchedFrame> frames, int start, int count)
+        {
+            if (count <= 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(count));
+            }
+            frames[start] = frames[start].WithPresentation(AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames);
+            frames.RemoveRange(start + 1, count - 1);
+            return count - 1;
+        }
+
+        internal static bool HasSameMachineryOwner(
+            AsyncProfilerCallStackTransformState context, int start, int count)
+        {
+            AsyncProfilerStitchedFrame first = context.Frames[start];
+            AsyncProfilerRuntimeRuleProfile profile = context.GetRuntimeProfile(first.CodeAddress);
+            ModuleFileIndex owner = context.GetHostModuleOwner(first.CodeAddress);
+            for (int i = start; i < start + count; i++)
+            {
+                AsyncProfilerStitchedFrame frame = context.Frames[i];
+                if (frame.Origin != AsyncProfilerStitchedFrameOrigin.Sync ||
+                    !ReferenceEquals(first.Context, frame.Context) ||
+                    !ReferenceEquals(profile, context.GetRuntimeProfile(frame.CodeAddress)) ||
+                    (context.TraceLog != null &&
+                     (owner == ModuleFileIndex.Invalid || owner != context.GetHostModuleOwner(frame.CodeAddress))))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
         internal static bool HasVerifiedAsyncAnchor(
             AsyncProfilerCallStackTransformState context,
             int contextEnd,

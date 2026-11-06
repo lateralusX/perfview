@@ -883,6 +883,80 @@ Full JSONL can be large; keep it with the trace, not in source control or on an
 unapproved service. Failed runs can leave partial artifacts; require all four
 successful summaries and exports before accepting an export run.
 
+The helper also writes **`async-timeline.speedscope.json`** and
+`async-timeline.summary.json`. This separate event-driven view uses the existing
+persisted async contexts and their completion/unwind records directly, without
+CPU samples, synchronous stacks, reconstruction transforms, or another persisted
+timeline. Each process instance/OS thread has its own profile, including async
+threads with no ordinary trace events. Blank intervals mean no displayed async
+context; resumption on a different thread appears in that thread's profile.
+
+At resume, it opens the finalized captured chain. For V1 this deliberately includes
+frames appended later in that activation, displayed from the resume timestamp.
+V1 state labels are **captured** states, not inferred executing/completed states.
+V1 names use the same logical-method presentation as the CPU views, for example
+`[Async V1] app!Namespace.Type.RunAsync [ordinal 8, state 0]`, rather than the
+generated `Type+<RunAsync>d__8.MoveNext()` name. The ordinal distinguishes generated
+state machines without inventing a source-method signature. Unrecognized or
+unresolved V1 frames retain their original name/IP and explicit captured-state label.
+Recorded `CompleteMethod` and exception-unwind events close leaf frames at their
+inner-event QPC timestamps. Without those records, no normal progress is invented:
+wrapper resets cannot refine it without a physical wrapper slot. Enable the
+method-completion keywords when collecting if that detail is needed. Suspension
+closes the displayed context without declaring its remaining methods completed.
+Nested contexts preserve their enclosing stacks. Zero-IP sentinel slots are hidden
+from the output, but remain in the captured chain and completion/unwind accounting.
+Unresolved nonzero IPs are still shown. Contexts with no visible frames add no
+artificial placeholder; still-open contexts are clipped to trace end without claiming completion.
+Zero-duration contexts do not contribute elapsed time and are omitted.
+
+Widths here mean **elapsed time with the recorded context active**, not CPU time
+or a method's full lifetime across awaits. Do not compare its event counts or
+durations with CPU sample counts/weights. The helper validates this additional
+file independently; `--allow-no-index` permits an explicitly empty timeline.
+Library callers can export an existing ETLX directly, even without CPU samples
+or retained raw async batches:
+
+```csharp
+using (var log = new TraceLog(etlxPath))
+{
+    SpeedScopeStackSourceWriter.WriteAsyncCallStacksAsJson(
+        log, "async-timeline.speedscope.json", processId: targetPid);
+}
+```
+
+The writer uses symbols already available through the open TraceLog; it does not
+download symbols. A process ID of 0 includes all process instances. No matching
+contexts (or no async index) produces an empty profiles array.
+
+For a **virtually sampled** alternative, add `--async-sample-interval-ms 1` to
+`export` (or choose another positive interval). This configures the same
+`async-timeline.speedscope.json`; without the option, exact event timing remains
+the default. The four CPU views are unaffected. Use separate output directories
+to retain both alternatives. Library callers select the same mode with an overload:
+
+```csharp
+SpeedScopeStackSourceWriter.WriteAsyncCallStacksAsJson(
+    log, "async-virtual-1ms.speedscope.json",
+    sampleInterval: TimeSpan.FromMilliseconds(1), processId: targetPid);
+```
+
+All threads use one grid beginning at **trace start**, not at their first resume.
+At each grid point the exporter observes the recorded logical stack, with method
+completions and exception unwinds through that instant, then holds the snapshot
+until the next grid point. The last interval is clipped to trace end. Finalized V1
+future-appended frames and zero-IP filtering follow the exact view's rules.
+The interval is rounded to the nearest source QPC tick; intervals below one tick
+are rejected. The summary records requested/effective intervals, and profile names
+include the effective interval.
+
+Widths estimate **async-context occupancy**, not CPU time or exact method
+durations. A short activation crossing a grid point receives one interval of
+display width; one entirely between grid points can disappear. Empty snapshots
+leave gaps. Coarse sampling can legitimately produce no profiles even with a
+valid index; the summary distinguishes missing async data from no visible contexts.
+No real CPU events, physical stacks, duration floors, or new persisted data are used.
+
 The helper preserves sample coverage gaps by default: every frame closes when
 coverage ends and reopens at the next sample. Blank intervals mean no represented
 sample coverage, not proven off-CPU time. Add `--legacy-sample-timing` to `export`
@@ -1035,6 +1109,8 @@ the evidence and guardrails below.
 
 The export recipe checks timestamp/metric/count preservation across views and
 balanced evented profiles. Those checks are necessary, not a semantic verdict.
+The async timeline is checked separately for event balance and chronological
+timestamps; it is not part of the four-view CPU-conservation comparison.
 
 Compare each `.samples.jsonl` with the same view from the previous revision,
 aligning by enumeration ordinal and verifying timestamp/metric equality. Keep

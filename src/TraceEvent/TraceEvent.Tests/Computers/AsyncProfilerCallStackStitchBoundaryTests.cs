@@ -263,7 +263,7 @@ namespace TraceEventTests
             (int)AsyncProfilerStitchSyncFrameKind.V1AwaiterRegistrationInfrastructure)]
         [InlineData(
             "System.Private.CoreLib!System.Runtime.CompilerServices.TaskAwaiter.GetResult()",
-            (int)AsyncProfilerStitchSyncFrameKind.None)]
+            (int)AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibAwaiterInfrastructure)]
         [InlineData(
             "System.Private.CoreLib!System.Threading.Tasks.Task.RunContinuations(class System.Object)",
             (int)AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskRunContinuations)]
@@ -465,12 +465,16 @@ namespace TraceEventTests
         [InlineData("System.Runtime.CompilerServices.AsyncStateMachineDiagnostics`1[Scenario+<ChildAsync>d__3]..cctor()", (int)AsyncProfilerStitchSyncFrameKind.ProfilerInfrastructure)]
         [InlineData("System.Runtime.CompilerServices.AsyncStateMachineDiagnostics`1[Scenario+<ChildAsync>d__3].get_MethodId()", (int)AsyncProfilerStitchSyncFrameKind.ProfilerInfrastructure)]
         [InlineData("System.Runtime.CompilerServices.AsyncStateMachineDiagnostics`1[!0].get_StateOffset()", (int)AsyncProfilerStitchSyncFrameKind.ProfilerInfrastructure)]
-        [InlineData("System.Runtime.CompilerServices.InitHelpers.CallClassConstructor(void*,void*,class System.Exception*)", (int)AsyncProfilerStitchSyncFrameKind.ProfilerInfrastructure)]
-        [InlineData("System.Runtime.CompilerServices.InitHelpers.InitClassHelper(value class MethodTable*)", (int)AsyncProfilerStitchSyncFrameKind.ProfilerInfrastructure)]
-        [InlineData("System.Runtime.CompilerServices.InitHelpers.InitClassSlow(value class MethodTable*)", (int)AsyncProfilerStitchSyncFrameKind.ProfilerInfrastructure)]
-        [InlineData("System.Runtime.CompilerServices.StaticsHelpers.GetNonGCStaticBaseSlow(value class MethodTable*)", (int)AsyncProfilerStitchSyncFrameKind.ProfilerInfrastructure)]
+        [InlineData("System.Runtime.CompilerServices.InitHelpers.CallClassConstructor(void*,void*,class System.Exception*)", (int)AsyncProfilerStitchSyncFrameKind.RuntimeInitializationInfrastructure)]
+        [InlineData("System.Runtime.CompilerServices.InitHelpers.InitClassHelper(value class MethodTable*)", (int)AsyncProfilerStitchSyncFrameKind.RuntimeInitializationInfrastructure)]
+        [InlineData("System.Runtime.CompilerServices.InitHelpers.InitClassSlow(value class MethodTable*)", (int)AsyncProfilerStitchSyncFrameKind.RuntimeInitializationInfrastructure)]
+        [InlineData("System.Runtime.CompilerServices.StaticsHelpers.GetNonGCStaticBaseSlow(value class MethodTable*)", (int)AsyncProfilerStitchSyncFrameKind.RuntimeInitializationInfrastructure)]
         [InlineData("System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1+AsyncStateMachineBox`1[System.Int64,Scenario+<ChildAsync>d__3].System.Runtime.CompilerServices.IAsyncStateMachineBox.GetDiagnosticData(unsigned int64&,int32&,class System.Object&)", (int)AsyncProfilerStitchSyncFrameKind.ProfilerInfrastructure)]
-        public void ClassifySynchronousFrame_ProfilerEnvelope_RequiresExactCoreLibMethods(
+        [InlineData("System.Runtime.CompilerServices.AsyncProfiler+Other.EmitEvent()", (int)AsyncProfilerStitchSyncFrameKind.ProfilerInfrastructure)]
+        [InlineData("System.Runtime.CompilerServices.AsyncProfiler+AsyncCallstack.EmitEventExtra()", (int)AsyncProfilerStitchSyncFrameKind.ProfilerInfrastructure)]
+        [InlineData("System.Runtime.CompilerServices.AsyncProfiler+ResumeAsyncContext.Other()", (int)AsyncProfilerStitchSyncFrameKind.ProfilerInfrastructure)]
+        [InlineData("System.Runtime.CompilerServices.AsyncProfiler+Other.Resume()", (int)AsyncProfilerStitchSyncFrameKind.ProfilerInfrastructure)]
+        public void ClassifySynchronousFrame_ProfilerEnvelope_PreservesSpecializedKindsAndOwnership(
             string method, int expectedValue)
         {
             var expected = (AsyncProfilerStitchSyncFrameKind)expectedValue;
@@ -482,10 +486,6 @@ namespace TraceEventTests
         [Theory]
         [InlineData("Other.Namespace.AsyncProfiler+AsyncCallstack.CaptureStateMachineAsyncCallstack()")]
         [InlineData("System.Runtime.CompilerServices.OtherAsyncProfiler+AsyncCallstack.EmitEvent()")]
-        [InlineData("System.Runtime.CompilerServices.AsyncProfiler+Other.EmitEvent()")]
-        [InlineData("System.Runtime.CompilerServices.AsyncProfiler+AsyncCallstack.EmitEventExtra()")]
-        [InlineData("System.Runtime.CompilerServices.AsyncProfiler+ResumeAsyncContext.Other()")]
-        [InlineData("System.Runtime.CompilerServices.AsyncProfiler+Other.Resume()")]
         [InlineData("System.Runtime.CompilerServices.AsyncStateMachineDiagnostics`2[!0,!1].get_MethodId()")]
         [InlineData("System.Runtime.CompilerServices.AsyncStateMachineDiagnostics`10.get_MethodId()")]
         [InlineData("System.Runtime.CompilerServices.AsyncStateMachineDiagnostics`1[!0].cctor()")]
@@ -519,6 +519,14 @@ namespace TraceEventTests
         [InlineData("Ns.Outer+Inner.Method", "Inner")]                       // nested type ('+') separator
         [InlineData("Module!Type.Method(System.Int32)", "Type")]             // module + signature stripped
         [InlineData("Type.Method", "Type")]                                  // no module/namespace
+        [InlineData("Type..ctor()", "Type")]
+        [InlineData("Module!Ns.Outer+Inner..cctor()", "Inner")]
+        [InlineData("System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1+AsyncProfilerAsyncStateMachineBox`1[System.Int64,Scenario+<ChildAsync>d__9]..ctor()",
+            "AsyncProfilerAsyncStateMachineBox`1[System.Int64,Scenario+<ChildAsync>d__9]")]
+        [InlineData("System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1+DebugFinalizableAsyncStateMachineBox`1[System.Int64,Scenario+<ChildAsync>d__9]..ctor()",
+            "DebugFinalizableAsyncStateMachineBox`1[System.Int64,Scenario+<ChildAsync>d__9]")]
+        [InlineData(".ctor()", null)]
+        [InlineData(".cctor()", null)]
         [InlineData("BareToken", null)]                                       // no type qualifier
         [InlineData("Module!Method", null)]                                   // module but no type
         [InlineData(null, null)]

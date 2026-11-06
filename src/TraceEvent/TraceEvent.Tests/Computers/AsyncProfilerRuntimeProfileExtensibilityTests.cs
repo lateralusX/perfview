@@ -185,6 +185,65 @@ namespace TraceEventTests
         }
 
         [Fact]
+        public void RejectedRegistration_PreventsMarkerMergingIntoItsProtectedSpan()
+        {
+            var frames = new List<AsyncProfilerStitchedFrame>
+            {
+                Sync(1, AsyncProfilerStitchSyncFrameKind.V1MethodBuilderAwaitUnsafeOnCompleted),
+                Sync(2, AsyncProfilerStitchSyncFrameKind.V1AwaiterRegistrationInfrastructure)
+                    .WithPresentation(AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames),
+                Sync(3, AsyncProfilerStitchSyncFrameKind.V1MethodBuilderInfrastructure),
+                Sync(4, AsyncProfilerStitchSyncFrameKind.V1MethodBuilderAwaitUnsafeOnCompleted),
+                Sync(5, AsyncProfilerStitchSyncFrameKind.V1MethodBuilderAwaitUnsafeOnCompleted),
+            };
+            AsyncProfilerStitchedFrame[] protectedSpan = frames.Skip(1).Take(2).ToArray();
+            var context = Context(frames, new RejectingLayoutProfile());
+            var pipeline = new AsyncProfilerCallStackTransformPipeline
+            {
+                EnableNormalization = false,
+                EnableInfrastructureCleanup = true,
+            };
+            pipeline.ApplyInPlace(context);
+
+            Assert.Equal(new[] { 1, 2, 3, 4 }, frames.Select(frame => (int)frame.CodeAddress));
+            Assert.Equal(protectedSpan, frames.Skip(1).Take(2));
+            Assert.Equal(AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames, frames[0].Presentation);
+            Assert.Equal(AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames, frames[3].Presentation);
+            Assert.Equal(3, context.Diagnostics.AsyncInfrastructureFramesCollapsed);
+            pipeline.ApplyInPlace(context);
+            Assert.Equal(protectedSpan, frames.Skip(1).Take(2));
+            Assert.Equal(3, context.Diagnostics.AsyncInfrastructureFramesCollapsed);
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void OptionalCleanup_MergesOnlyMatchingRuntimeProfiles(bool sameProfile)
+        {
+            var first = new AsyncProfilerExtendedRuntimeLayoutProfile();
+            AsyncProfilerRuntimeRuleProfile second = sameProfile ? first : AsyncProfilerRuntimeRuleProfile.Common;
+            var frames = new List<AsyncProfilerStitchedFrame>
+            {
+                Sync(1), Sync(2),
+            };
+            var context = new AsyncProfilerCallStackTransformState(null, new List<AsyncProfilerCallStack>(), 1,
+                _ => new AsyncProfilerCallStackStitchBoundaryInfo(
+                    AsyncProfilerCallStackStitchBoundaryKind.V1DispatcherInfrastructure, -1),
+                new AsyncProfilerCallStackDiagnostics(), frames,
+                ca => (int)ca == 1 ? first : second);
+            new AsyncProfilerCallStackTransformPipeline
+            {
+                EnableNormalization = false,
+                EnableInfrastructureCleanup = true,
+            }.ApplyInPlace(context);
+
+            Assert.Equal(sameProfile ? new[] { 1 } : new[] { 1, 2 }, frames.Select(frame => (int)frame.CodeAddress));
+            Assert.All(frames, frame =>
+                Assert.Equal(AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames, frame.Presentation));
+            Assert.Equal(2, context.Diagnostics.AsyncInfrastructureFramesCollapsed);
+        }
+
+        [Fact]
         public void OptionalCleanup_DoesNotResolveRuntimeLayoutsForLogicalFrames()
         {
             var frames = new List<AsyncProfilerStitchedFrame>

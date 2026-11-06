@@ -5,6 +5,7 @@ using System;
 using System.Collections.Generic;
 
 using Microsoft.Diagnostics.Tracing.Etlx;
+using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
 
 using static Microsoft.Diagnostics.Tracing.Computers.AsyncProfilerCallStackTransformHelpers;
 
@@ -26,7 +27,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile> runtimeProfileResolver = null,
             AsyncProfilerRuntimeRuleProfile runtimeProfile = null,
             AsyncProfilerRuntimeRuleProfileCache runtimeProfiles = null,
-            IReadOnlyList<AsyncProfilerSegmentPlacement> segmentPlacements = null)
+            IReadOnlyList<AsyncProfilerSegmentPlacement> segmentPlacements = null,
+            Func<CodeAddressIndex, MethodIndex> methodOf = null)
         {
             TraceLog = traceLog;
             Segments = segments;
@@ -35,6 +37,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             Diagnostics = diagnostics;
             Frames = frames;
             m_segmentPlacements = segmentPlacements;
+            m_methodOf = methodOf;
             m_runtimeProfiles = runtimeProfiles ??
                 (traceLog == null ? null : new AsyncProfilerRuntimeRuleProfileCache(traceLog.ModuleFiles));
             m_runtimeProfileResolver = runtimeProfileResolver ?? CreateRuntimeProfileResolver(traceLog, m_runtimeProfiles);
@@ -81,6 +84,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 ? ModuleFileIndex.Invalid
                 : m_runtimeProfiles.GetHostModuleOwner(TraceLog.CodeAddresses.ModuleFileIndex(codeAddress));
 
+        /// <summary>Uses the stitcher's canonical identity across captured and sampled code versions.</summary>
+        internal MethodIndex GetMethod(CodeAddressIndex codeAddress) =>
+            codeAddress == CodeAddressIndex.Invalid ? MethodIndex.Invalid :
+                m_methodOf != null ? m_methodOf(codeAddress) :
+                TraceLog == null ? MethodIndex.Invalid : TraceLog.CodeAddresses.MethodIndex(codeAddress);
+
         internal bool IsV2DispatchPair(CodeAddressIndex instrumented, CodeAddressIndex dispatch) =>
             TraceLog != null &&
             AsyncProfilerCallStackStitcher.IsV2DispatchPair(TraceLog, m_runtimeProfiles, instrumented, dispatch);
@@ -102,6 +111,142 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                         TraceLog, m_runtimeProfiles, placement.InstrumentedDispatch, placement.Dispatch))
                 {
                     return true;
+                }
+            }
+            return false;
+        }
+
+        internal bool HasVerifiedDispatchEntry(
+            AsyncProfilerCallStack activation, CodeAddressIndex bridge, bool requireAsyncAnchor = true)
+        {
+            if (activation.Frames.Kind == AsyncCallstackKind.RuntimeAsync)
+            {
+                return HasVerifiedV2DispatchPair(activation, bridge);
+            }
+            if (TraceLog == null || m_segmentPlacements == null)
+            {
+                return false;
+            }
+            ModuleFileIndex owner = GetHostModuleOwner(bridge);
+            foreach (AsyncProfilerSegmentPlacement placement in m_segmentPlacements)
+            {
+                if (!ReferenceEquals(placement.Activation, activation) ||
+                    owner == ModuleFileIndex.Invalid || owner != GetHostModuleOwner(placement.Dispatch) ||
+                    !ReferenceEquals(GetRuntimeProfile(bridge), GetRuntimeProfile(placement.Dispatch)) ||
+                    ClassifyBoundary(placement.Dispatch).Kind != AsyncProfilerCallStackStitchBoundaryKind.V1Dispatcher ||
+                    TraceLog.CodeAddresses.MethodIndex(placement.Dispatch) == MethodIndex.Invalid)
+                {
+                    continue;
+                }
+                // Grouping dispatch machinery does not require the pending application target to have started.
+                if (!requireAsyncAnchor)
+                {
+                    return true;
+                }
+                for (int i = Frames.Count - 1; i >= 0; i--)
+                {
+                    if (ReferenceEquals(Frames[i].Context, activation))
+                    {
+                        return HasVerifiedAsyncAnchor(this, i, activation);
+                    }
+                }
+            }
+            return false;
+        }
+
+        /// <summary>Verifies a V1 completion owner for machinery cleanup, not an executing target.
+        /// Bounded resumption bridges can also accept a normalized, fully completed return unwind.</summary>
+        internal bool HasVerifiedV1CompletionAnchor(
+            AsyncProfilerCallStack activation, CodeAddressIndex bridge, bool allowCompletionUnwind = false)
+        {
+            if (activation.Frames.Kind != AsyncCallstackKind.StateMachineAsync ||
+                Diagnostics.SegmentsProcessed != Segments.Count ||
+                Diagnostics.BoundariesNotFound != 0 || Diagnostics.AdjacencyMismatches != 0 ||
+                Diagnostics.V1CompletionAlignmentAmbiguous != 0 ||
+                !HasVerifiedDispatchEntry(activation, bridge, requireAsyncAnchor: false))
+            {
+                return false;
+            }
+
+            int completed = activation.GetCompletedFrameCount(TimestampQpc);
+            if (completed <= 0 || completed > activation.Frames.FrameCount)
+            {
+                return false;
+            }
+            CodeAddressIndex captured = activation.Frames.CodeAddressAt(completed - 1);
+            if (captured == CodeAddressIndex.Invalid)
+            {
+                return false;
+            }
+            foreach (AsyncProfilerStitchedFrame frame in Frames)
+            {
+                if (allowCompletionUnwind &&
+                    frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCompletionUnwind &&
+                    frame.ContextKind == AsyncProfilerStitchedFrameContextKind.Active &&
+                    ReferenceEquals(frame.Context, activation) &&
+                    completed == activation.Frames.FrameCount &&
+                    frame.SegmentFrameIndex == completed - 1 &&
+                    frame.CodeAddress == captured && frame.Method == MethodIndex.Invalid &&
+                    GetMethod(captured) != MethodIndex.Invalid &&
+                    TraceLog.AsyncProfilerCallStacks?.MethodCompletionObserved(activation) == true &&
+                    activation.GetMethodCompletedFrameCount(TimestampQpc) > 0)
+                {
+                    return true;
+                }
+                if (frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCompleting &&
+                    frame.ContextKind == AsyncProfilerStitchedFrameContextKind.Active &&
+                    ReferenceEquals(frame.Context, activation) &&
+                    frame.SegmentFrameIndex == completed - 1 &&
+                    frame.CodeAddress != CodeAddressIndex.Invalid && frame.Method != MethodIndex.Invalid &&
+                    GetMethod(frame.CodeAddress) == frame.Method &&
+                    GetMethod(captured) == frame.Method)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /// <summary>Retains machinery ownership when a fully completed outer V1 activation emitted no frames.</summary>
+        internal bool HasVerifiedCompletedV1OuterDispatch(AsyncProfilerCallStack activation, CodeAddressIndex bridge)
+        {
+            if (TraceLog == null || m_segmentPlacements == null || Segments.Count < 2 ||
+                !ReferenceEquals(activation, Segments[0]) ||
+                activation.Frames.Kind != AsyncCallstackKind.StateMachineAsync || activation.Frames.FrameCount == 0 ||
+                Diagnostics.SegmentsProcessed != Segments.Count ||
+                Diagnostics.BoundariesNotFound != 0 || Diagnostics.AdjacencyMismatches != 0 ||
+                Diagnostics.V1CompletionAlignmentAmbiguous != 0 ||
+                TraceLog.AsyncProfilerCallStacks?.MethodCompletionObserved(activation) != true ||
+                activation.GetMethodCompletedFrameCount(TimestampQpc) != activation.Frames.FrameCount ||
+                activation.GetExceptionCompletedFrameCount(TimestampQpc) != 0 ||
+                Segments[1].Depth != activation.Depth + 1 ||
+                !HasVerifiedDispatchEntry(activation, bridge, requireAsyncAnchor: false) ||
+                !HasVerifiedDispatchEntry(Segments[1], bridge, requireAsyncAnchor: false))
+            {
+                return false;
+            }
+            foreach (AsyncProfilerStitchedFrame frame in Frames)
+            {
+                if (ReferenceEquals(frame.Context, activation))
+                {
+                    return false;
+                }
+            }
+            foreach (AsyncProfilerSegmentPlacement outer in m_segmentPlacements)
+            {
+                if (!ReferenceEquals(outer.Activation, activation) ||
+                    outer.LeafIndex != outer.RootIndexExclusive)
+                {
+                    continue;
+                }
+                foreach (AsyncProfilerSegmentPlacement inner in m_segmentPlacements)
+                {
+                    if (ReferenceEquals(inner.Activation, Segments[1]) &&
+                        inner.LeafIndex < inner.RootIndexExclusive &&
+                        inner.RootIndexExclusive == outer.LeafIndex)
+                    {
+                        return true;
+                    }
                 }
             }
             return false;
@@ -227,6 +372,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         private readonly Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile> m_runtimeProfileResolver;
         private readonly AsyncProfilerRuntimeRuleProfileCache m_runtimeProfiles;
         private readonly IReadOnlyList<AsyncProfilerSegmentPlacement> m_segmentPlacements;
+        private readonly Func<CodeAddressIndex, MethodIndex> m_methodOf;
 
         #endregion
     }
@@ -338,31 +484,41 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// V1 requires a verified dispatcher boundary; V2 requires a physically matched current async method
         /// or a resolved structurally verified dispatch target.
         /// Bridges require a runtime-profile completion pair (adjacent
-        /// <c>Task.RunContinuations -&gt; Task.TrySetResult</c> under the common rules), or a profile-matched V2
-        /// helper span after that activation's verified dispatch pair. The common V2 helper span consists
-        /// entirely of <c>YieldAwaitable</c> or nested-type methods, independent of method/lambda names. Interrupted,
-        /// unresolved, non-CoreLib, or unverified candidates remain intact and protected from all subsequent
-        /// helper cleanup, including completion-chain removal. Exact completion chains can still be removed
-        /// independently outside protected candidates.
+        /// <c>Task.RunContinuations -&gt; Task.TrySetResult</c> under the common rules), or a profile-matched
+        /// helper span after that activation's verified V1 dispatcher or V2 dispatch pair. The common helper span consists
+        /// entirely of <c>YieldAwaitable</c> or nested-type methods, independent of method/lambda names.
+        /// The V1 helper-only span additionally requires a verified current/target anchor or a physically matched,
+        /// record-aligned completing body with its verified dispatcher. Shared executing-anchor checks remain strict.
+        /// A root-adjacent exact completion chain and contiguous known awaiter/bridge helpers may instead become
+        /// one dispatcher marker before a resolved non-CoreLib caller, retaining that caller and its protected host tail.
+        /// This bounded prefix requires the root activation's verified dispatcher and a resolved same-runtime scheduler anchor.
+        /// Other interrupted, unresolved, foreign, or unverified candidates remain intact and protected from subsequent
+        /// helper cleanup. Exact completion chains can still be grouped independently outside protected candidates.
         /// A resolved CoreLib profiler <c>Resume</c> immediately above a verified V1 dispatcher or physically
         /// matched current/completing async method or V1 box carrier establishes ownership of the synchronous
         /// leaf-side prefix.
-        /// That entire prefix, including unresolved frames, initialization, GC, and callbacks invoked by the
-        /// profiler, is atomically attributed to the nearest active logical async frame. Capture and emission
-        /// helpers need not be visible because they may inline. All prefix frames must belong to the same active
+        /// The entry spine and contiguous, resolved profiler-type helpers become an <c>[Async dispatcher frames]</c>
+        /// marker; native or unrecognized callees, initialization, GC, and callbacks remain physical.
+        /// Capture and emission helpers need not be visible because they may inline. All prefix frames must belong to the same active
         /// activation; cleanup never crosses another async boundary or a physically matched application anchor.
         /// A resolved CoreLib <c>CreateDispatcher</c> and await-registration spine directly above a physical
-        /// current V1 method likewise establish ownership of the dispatcher's entire callee prefix, regardless
-        /// of callee names. Rejected dispatcher-callee prefixes remain protected from individual-helper cleanup.
+        /// current V1 method likewise identify an entry span without hiding unrecognized callees.
+        /// Retained callees and rejected dispatcher-callee prefixes remain protected from individual-helper cleanup.
+        /// A bounded, profile-matched <c>CreateDispatcher</c> and await-registration run before a resolved
+        /// physical non-CoreLib caller can still be grouped independently of whole-prefix ownership.
+        /// Variable helper counts are supported; all helpers must be eligible and share the captured CoreLib owner,
+        /// runtime profile, and active context. Profile vetoes remain authoritative. The physical caller stays
+        /// synchronous, and the marker and its leaf-side callees remain protected.
         /// A registered V1 target without a physical current-method match keeps its dispatch-target metadata.
-        /// Residual recognized V1/V2 dispatcher and box frames outside protected spans are represented by
+        /// All recognized V1/V2 machinery outside protected spans, including individual builder, awaiter,
+        /// Task, execution-context, dispatcher-creation, dispatcher, and box helpers, is represented by
         /// <c>[Async dispatcher frames]</c>, rather than deleted, preserving the caller context of their callees.
-        /// Each contiguous span within the same async context gets one marker, whether or not a body was matched.
+        /// Each contiguous span within the same async context, runtime profile, and captured CoreLib owner gets
+        /// one marker, whether or not a body was matched. The leafmost physical identity is retained.
         /// This is overhead attribution, not evidence that a suspended caller was physically executing.
         /// Missing, unresolved, foreign, interrupted, or context-inconsistent ownership evidence leaves the
-        /// candidate prefix protected from general helper cleanup; no partial profiler tail is removed.
-        /// Outside rejected candidates, the exact CoreLib <c>AsyncStateMachineDispatcherInfo.CreateDispatcher</c>
-        /// helper is removed individually, preserving the application kickoff frame.
+        /// unverified portion protected from general helper cleanup; no unverified profiler tail is removed.
+        /// Grouping <c>AsyncStateMachineDispatcherInfo.CreateDispatcher</c> preserves the application kickoff frame.
         /// Application frames outside profiler-owned prefixes, thread roots, isolated
         /// <c>TaskCompletionSource.SetResult</c> frames, and other profiler work outside a verified prefix are retained.
         /// This option is independent of structural stitching and

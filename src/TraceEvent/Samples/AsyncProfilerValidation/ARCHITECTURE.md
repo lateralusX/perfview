@@ -1210,6 +1210,18 @@ Classification and using a classification as a splice boundary are distinct.
 
 A verified dispatcher/box/wrapper can establish an **indexed dispatch
 target** without proving that the application's body is physically present.
+For a verified V1 box carrier, structural stitching emits an
+`[Async dispatcher frames]` marker immediately above `AsyncDispatchTarget`,
+preserving all sampled callees and the target's captured compiler state.
+The marker retains the physical carrier identity and activation ownership,
+including when sampled at the leaf. It is independent of normalization,
+infrastructure cleanup, and frame annotations; a physically matched application
+body remains `AsyncCurrent` without this carrier marker.
+Verified V2 native entry work likewise retains a structural marker above its
+`AsyncDispatchTarget`. The marker uses the consumed resume stub's physical
+identity, or the wrapper's when no stub was present; native and arbitrary
+managed callees remain unchanged. This does not change sampled-leaf wrapper
+consumption when no callees survive.
 For a sampled-leaf V2 wrapper with a known target, structural stitching
 consumes the wrapper and emits `AsyncDispatchTarget`, not `AsyncCurrent`.
 An unavailable target retains the conservative structural fallback; without
@@ -1219,6 +1231,10 @@ recursive or repeated matches are not guessed. Verified unavailable roots are
 represented as `BROKEN`, not invented thread-pool/framework callers. Its
 export-visible marker is an ordinary interned frame named `BROKEN`, because
 exporters filter the reserved `StackSourceFrameIndex.Broken` value.
+Async emission also reuses the normal synchronous source's native-root policy,
+including its managed-only setting, when recovery fails or leaves the physical
+stack unchanged. An explicit recovered incomplete root suppresses a duplicate
+marker. Broken-root evidence does not depend on recognizing async machinery.
 
 Missing boundaries do not always preclude other reconstruction: independent
 enclosing activations can still match, while uncertain slices remain.
@@ -1343,22 +1359,215 @@ recorded full completion plus a verified, uniquely ordered physical return
 span. It emits a logical-root unwind role with displayed state `-2`; merely
 seeing a completed count is not sufficient to fold an arbitrary stack.
 
+The same return-spine proof also handles a partially completed V1 activation
+whose dispatcher and current body were lost to root-side truncation. The
+surviving outermost physical span must contain at least two unique, consecutive
+completed method identities in return order, a physical body for the last
+recorded completed frame, matching box/completion evidence, and only resolved
+same-runtime plumbing between identities. Its exact remaining logical suffix
+must agree with the recorded progress. The finishing body keeps its sampled
+address and `AsyncCompleting` role (displayed `-2`); the next captured method is
+restored as `AsyncRemaining`, not an executing body or a dispatch target.
+Native and arbitrary leaf callees remain outside the fold, and one `BROKEN`
+root preserves the missing host. Cuts inside verified helpers or bodies need
+no fixed stack depth or assumed thread-pool caller. Interrupted, unresolved,
+recursive, unordered, or completion-inconsistent evidence preserves the
+physical span. This is default normalization shared by ETW and EventPipe;
+raw and structural views are unchanged.
+
 Infrastructure cleanup is an additional attribution policy, not general
 framework filtering. Verified same-runtime resumption/completion bridges can
 be folded atomically, retaining their scheduler anchor. V2 allows either a
 physically matched current method or a resolved, structurally verified
 dispatch target. An interrupted, unresolved, foreign, or otherwise unverified
-candidate stays intact, including its Task completion chain; independent
-cleanup can still run outside that protected span. For example, an application
-callback between `ThreadPoolWorkQueue.Dispatch` and `TaskCompletionSource.SetResult`
-prevents the complete bridge fold, so its `SetResult`, `TrySetResult`, and
-`RunContinuations` frames remain together.
+candidate stays intact; independent cleanup can still run outside that protected
+span. An application callback between `ThreadPoolWorkQueue.Dispatch` and
+`TaskCompletionSource.SetResult` still prevents the complete bridge fold. However,
+a root-adjacent exact completion chain, optionally preceded by contiguous known
+CoreLib awaiter/bridge helpers, can become one `[Async dispatcher frames]` marker
+ending strictly before that resolved callback. This bounded prefix requires the
+root activation's verified dispatcher/current-or-target evidence (or a verified
+V1 completion owner, including a normalized, fully completed return unwind),
+matching captured CoreLib/profile ownership throughout,
+and a resolved same-runtime scheduler anchor. The callback and its entire
+scheduler/thread host tail remain physical and protected, even if unrelated host
+work is unresolved. Unknown, unresolved, foreign, interrupted, or incomplete
+prefixes are not partially folded. This is opt-in machinery cleanup only; raw,
+structural, and default-normalized views are unchanged.
 
-A verified profiler `Resume` or dispatcher-registration
-spine can establish ownership of its entire callee prefix, including unresolved
-callees, GC, initialization, or callbacks. That work can then be charged to a
-logical async frame without claiming the suspended method executed it.
-Residual dispatcher spans can become `[Async dispatcher frames]`.
+The exact `get_IsCompleted` accessors on captured CoreLib `TaskAwaiter`,
+`ValueTaskAwaiter`, and their configured-await equivalents (including generic
+variants) can be grouped individually outside protected spans. Their native
+callees and synchronous kickoff frames remain physical. This readiness
+classification is not await registration, a dispatch boundary, or completion
+evidence, and does not include other awaiter methods. Pooled ValueTasks use
+the same ValueTask awaiters; backing-source `GetStatus` implementations are
+not included.
+
+V1 and V2 share the bounded `YieldAwaitable` type-family resumption rule,
+including nested/generic helper types, without depending on generated callback
+names or lambda ordinals. It requires a contiguous, resolved same-runtime span
+ending at the retained scheduler anchor. Structural evidence must belong to
+the root activation and the same captured CoreLib owner: the consumed V1
+dispatcher plus a verified current/target anchor, or the consumed V2 dispatch
+pair. That evidence is retained per activation, not on every physical frame.
+Missing proof, unresolved symbols, foreign runtime owners, and intervening
+application callbacks preserve the complete bridge. This is optional
+infrastructure cleanup only; raw, structural, and default views retain the
+Yield helpers. Pending V1 box targets keep their captured state and dispatch
+role when the rootward Yield bridge is folded.
+
+Machinery grouping follows the same ownership rule in structural stitching,
+normalization, and optional cleanup: hiding a verified machinery span must not
+make its surviving callees appear to execute directly in an application body.
+The span becomes `[Async dispatcher frames]`, retaining its leafmost physical
+code address, method, and activation context. Optional cleanup uses this rule
+for individual builder/awaiter/Task/execution-context helpers and matched
+completion chains, not just dispatcher and box frames. Adjacent markers merge
+only for the same activation, runtime profile, and captured CoreLib owner;
+they never merge across application/unknown frames or protected spans.
+Standalone transforms without a TraceLog rely on supplied classifications
+and profile identity rather than unavailable captured-module metadata.
+
+Verified application-identity projections and causal folds remain distinct:
+startup `MoveNext + Start` normalization and exact activation/handoff
+deduplication do not automatically add machinery markers. A completed V1
+return fold retains a marker before its logical completion-unwind root when
+its verified spine begins in runtime machinery and leaf-side callees survive.
+Logical roles and captured states are unchanged. Each collapsing pass retains
+the evidence at the point of the edit; there is no later heuristic repair pass.
+Missing async context still leaves the physical stack verbatim. Arbitrary
+custom transforms are outside this built-in ownership guarantee.
+
+A verified profiler `Resume` or dispatcher-registration spine can identify a
+contiguous span of resolved, same-runtime profiler helpers. That span and the
+entry spine become `[Async dispatcher frames]`, preserving native or unresolved
+callees, GC, initialization, and application callbacks. Retained callees remain
+protected from subsequent individual-helper cleanup. The logical async frame
+keeps its current/completing/dispatch-target provenance.
+
+A failed whole-prefix proof does not veto an independently verified managed
+registration run. A resolved `CreateDispatcher` followed by one or more
+profile-matched await-registration helpers before a resolved physical non-CoreLib
+caller can become one marker. The helper count and supported layouts come from
+the runtime profile, not a particular sample. Every grouped frame must be eligible,
+resolved, contiguous, and share the captured CoreLib owner, runtime profile, and
+active context. Entry/registration profile vetoes still preserve the candidate.
+The marker retains the entry's physical identity; the caller remains synchronous,
+including a child state machine started inside the active async method. The marker
+and all leaf-side callees remain protected, without claiming native-prefix
+ownership. Independent helpers rootward of the physical caller can use ordinary
+cleanup. Raw, structural, default, and no-segment behavior are unchanged.
+
+An already verified dispatcher span can also absorb contiguous methods on the
+CoreLib state-machine box families and `AsyncStateMachineDiagnostics<T>`,
+including constructors and explicit interface implementations. The first
+unrelated frame ends that span; diagnostics or box helpers above the break do
+not restart it. A later independently identified dispatcher span can start a
+new collapse. Generic static-initialization helpers are not members of these
+families and remain visible.
+
+Optional machinery cleanup also accepts a resolved await-registration spine
+immediately leafward of a physically matched current V1 body as an entry anchor.
+It reuses the runtime profile's await-registration matcher and grows through the
+same helper families, without requiring a visible `CreateDispatcher`, `Resume`,
+or callstack-emission method. Native, unknown, foreign, or unrelated frames stop
+growth; eligible helpers above a break do not restart it. Ownership, profile
+rejections, structural-evidence checks, and splice boundaries remain enforced.
+The physical current body retains its sampled address and inferred `-1` display
+state, with captured state/IP unchanged. Indexed targets and historical parent
+frames alone do not provide this proof. Structural/default views and direct async
+timelines do not enable this rule.
+
+`YieldAwaitable.YieldAwaiter.QueueContinuation` and `OutputCorrelationEtwEvent`
+are classified as await-registration machinery and can join that same verified
+span. General thread-pool enqueueing, worker requests, semaphore wakeups,
+thread-static initialization, and native callees remain physical. This groups
+async-specific scheduling/correlation overhead without claiming that the queued
+continuation is already executing or filtering runtime helpers generally.
+Known awaiters' explicit `IStateMachineBoxAwareAwaiter` implementations use the
+same registration classification; the interface qualification is not mistaken
+for their declaring type. This includes generic and configured ValueTask awaiters,
+without treating their other methods or foreign implementations as machinery.
+
+The runtime profile centrally classifies AsyncProfiler, its EventSource,
+state-machine diagnostics, and box helper families as profiler infrastructure.
+Capture, emission, resume, box-callback, and await-registration anchors retain
+their specialized classifications. Generic runtime initialization has a separate
+kind and cannot extend a dispatcher span. Dispatcher cleanup consumes these
+classifications rather than repeating implementation-dependent name checks.
+A resolved capture helper directly above a verified V1 dispatcher can form the
+pending target's entry spine even when `Resume` is absent from the physical stack.
+The same context, runtime/profile, boundary, and contiguity guards still apply;
+native callees remain physical and the target is not promoted to executing.
+Capture alone before a physical application body does not establish this ownership.
+
+TaskAwaiter methods and its generated nested callbacks are classified as CoreLib
+awaiter infrastructure and can extend these verified contiguous machinery spans;
+classification does not authorize individual-frame cleanup.
+TaskAwaiter application work outside a proven span, including direct `GetResult`
+calls, remains visible. The same awaiter classification is accepted inside a
+fully completed V1 return spine, still requiring exact recorded completion,
+unique ordered captured methods, matching box/body evidence, and resolved
+same-runtime helpers. Unknown, foreign, or unresolved intervening frames reject
+that normalization rather than being skipped.
+A physically matched V1 completion body can also anchor
+the runtime profile's completion pair and adjacent builder-completion helper.
+The completing frame must agree with the recorded completion count and captured
+canonical managed-method identity, and retain its verified same-runtime dispatcher
+placement. Cleanup reuses the stitcher's method resolver so different native/JIT
+versions do not fail a raw method-index comparison.
+Independent helper groups above a contiguity break remain eligible for their
+existing cleanup; profiler-prefix protection remains unchanged.
+An independent profile-matched completion pair can also own its contiguous
+awaiter/box prefix when the activation has a verified physical V1 completion
+anchor. Profile rejections remain protected, and this grouping stops at callers
+such as `WhenAllPromise.Invoke` rather than hiding their aggregation work.
+
+Recursive completion alignment remains conservative in structural stitching.
+For a single active V1 activation, normalization can resolve one recorded normal
+completion, with no exception progress, when the repeated leaf/current method has
+one physical finishing body, an owned builder-completion pair, a contiguous matching box-entry run leafward,
+and matching box/return plumbing through the same-runtime dispatcher rootward.
+This identifies only captured frame zero as completing; the next frame stays a
+pending dispatch target, never a physically running body. Its owned completion
+prefix can then use ordinary machinery grouping, including TaskAwaiter callbacks.
+Additional completions, another physical body, missing entry/return evidence,
+unresolved or foreign helpers, and profile vetoes retain the ambiguous layout.
+Native/JIT callees remain physical. The original structural recursion guard and
+normalization-disabled behavior are unchanged.
+
+A wholly recursive captured chain has a separate aggregate return proof after
+every captured frame has a recorded normal completion and there is no exception
+progress. At least two physical bodies must match that method, each with matching
+box-entry evidence and an owned completion pair immediately before its builder
+completion. Every intervening/root-side helper must be resolved, contiguous,
+same-runtime plumbing; profile vetoes still apply. This can normalize a physical
+stack truncated before its dispatcher into a logical-root `AsyncCompletionUnwind`,
+without assigning individual recursive copies or inventing pending/executing
+methods. Native leaf work and the `BROKEN` physical-root marker remain visible.
+Partially completed, mixed-identity, single-body, interrupted, or unowned recursive
+layouts still use the existing conservative fallback.
+
+That completion proof can also authorize a bounded YieldAwaitable-family bridge
+before the scheduler anchor. A normalized `AsyncCompletionUnwind` root can supply
+this ownership too, provided recorded completion covers the entire activation
+and its consumed dispatcher belongs to the bridge's captured runtime/profile.
+This additional proof applies only to the bounded Yield bridge, not general
+completion-prefix or profiler-envelope cleanup. It does not weaken the shared
+executing-anchor guard used by reentrant handoff rules, or promote a completing
+body or logical unwind root to executing. Missing, ambiguous, foreign, or
+interrupted evidence retains the relevant span; the scheduler/thread tail,
+completion state, and sampled/captured IPs are unchanged.
+
+A fully normally completed outer V1 activation may emit no frames while its
+dispatcher synchronously resumes a nested activation. Bounded resumption cleanup
+can retain that outer dispatch's ownership from its empty structural placement,
+exact normal-completion count, and verified same-runtime outer/inner dispatchers.
+The nested placement must be nonempty and immediately enclosed by the omitted
+outer placement. This does not restore completed ancestry or promote a pending
+nested target to executing. Missing, interrupted, foreign, ambiguous, or
+profile-rejected evidence retains the bridge; native/JIT work is unchanged.
 
 Historical parent blocks use `[Async resumed parent context]` markers and
 ordinary `[Async V1]` / `[Async V2]` frame annotations. Each block replays the

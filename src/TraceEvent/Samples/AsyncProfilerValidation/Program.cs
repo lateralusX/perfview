@@ -30,6 +30,7 @@ namespace AsyncProfilerValidation
             bool enableParentContexts = false;
             bool allowNoIndex = false;
             bool preserveSampleGaps = true;
+            TimeSpan? asyncSampleInterval = null;
             int targetPid = 0;
             var positional = new List<string>();
             for (int i = 0; i < args.Length; i++)
@@ -54,6 +55,21 @@ namespace AsyncProfilerValidation
                         throw new ArgumentException("--pid requires a positive process ID.");
                     }
                 }
+                else if (args[i] == "--async-sample-interval-ms")
+                {
+                    if (++i == args.Length || !double.TryParse(args[i], NumberStyles.Float,
+                        CultureInfo.InvariantCulture, out double interval) ||
+                        !double.IsFinite(interval) || interval <= 0 ||
+                        interval >= TimeSpan.MaxValue.TotalMilliseconds)
+                    {
+                        throw new ArgumentException("--async-sample-interval-ms requires a finite, positive interval.");
+                    }
+                    asyncSampleInterval = TimeSpan.FromMilliseconds(interval);
+                    if (asyncSampleInterval.Value <= TimeSpan.Zero)
+                    {
+                        throw new ArgumentException("--async-sample-interval-ms is below TimeSpan resolution.");
+                    }
+                }
                 else
                 {
                     positional.Add(args[i]);
@@ -66,7 +82,7 @@ namespace AsyncProfilerValidation
                   (args.Length == 6 && args[0] == "probe-qpc")))
             {
                 throw new ArgumentException(
-                    "Usage:\n  AsyncProfilerValidation export <capture.nettrace|capture.etl> <new-output-directory> [--pid <pid>] [--parent-contexts] [--allow-no-index] [--legacy-sample-timing]\n" +
+                    "Usage:\n  AsyncProfilerValidation export <capture.nettrace|capture.etl> <new-output-directory> [--pid <pid>] [--parent-contexts] [--allow-no-index] [--legacy-sample-timing] [--async-sample-interval-ms <ms>]\n" +
                     "  AsyncProfilerValidation probe <capture.etlx> <pid> <os-thread-id> <start-ms> <end-ms> <new-output-directory> [--parent-contexts]\n" +
                     "  AsyncProfilerValidation probe-qpc <capture.etlx> <pid> <os-thread-id> <qpc> <new-output-directory> [--parent-contexts]");
             }
@@ -91,9 +107,9 @@ namespace AsyncProfilerValidation
             double end = 0;
             if (!export)
             {
-                if (targetPid != 0 || allowNoIndex || !preserveSampleGaps)
+                if (targetPid != 0 || allowNoIndex || !preserveSampleGaps || asyncSampleInterval.HasValue)
                 {
-                    throw new ArgumentException("--pid, --allow-no-index and --legacy-sample-timing apply only to export.");
+                    throw new ArgumentException("--pid, --allow-no-index, --legacy-sample-timing and --async-sample-interval-ms apply only to export.");
                 }
                 pid = int.Parse(args[2], NumberStyles.None, CultureInfo.InvariantCulture);
                 tid = ulong.Parse(args[3], NumberStyles.None, CultureInfo.InvariantCulture);
@@ -142,6 +158,7 @@ namespace AsyncProfilerValidation
                 ResolvePrecompiledRuntimeSymbols = kernelCpu,
                 AllowNoIndex = allowNoIndex,
                 PreserveSampleGaps = preserveSampleGaps,
+                AsyncSampleIntervalMSec = asyncSampleInterval?.TotalMilliseconds,
                 EnableFrameAnnotations = true,
                 EnableParentContexts = enableParentContexts
             });
@@ -159,7 +176,7 @@ namespace AsyncProfilerValidation
                 string etlx = kernelCpu ? TraceLog.CreateFromEventTraceLogFile(input, cache, options)
                     : TraceLog.CreateFromEventPipeDataFile(input, cache, options);
                 InputQuality.Validate(etlx, output, kernelCpu, targetPid, allowNoIndex);
-                Export(etlx, output, enableParentContexts, kernelCpu, targetPid, allowNoIndex, preserveSampleGaps);
+                Export(etlx, output, enableParentContexts, kernelCpu, targetPid, allowNoIndex, preserveSampleGaps, asyncSampleInterval);
             }
             else
             {
@@ -168,7 +185,7 @@ namespace AsyncProfilerValidation
         }
 
         private static void Export(string etlx, string output, bool enableParentContexts,
-            bool kernelCpu, int targetPid, bool allowNoIndex, bool preserveSampleGaps)
+            bool kernelCpu, int targetPid, bool allowNoIndex, bool preserveSampleGaps, TimeSpan? asyncSampleInterval)
         {
             string baselineHash = null;
             int baselineCount = 0;
@@ -236,6 +253,41 @@ namespace AsyncProfilerValidation
                     Diagnostics = computer.AsyncProfilerCallStackDiagnostics
                 });
                 Console.WriteLine($"{view.Name}: {count} samples, weight {weight:R}, timestamp/metric SHA-256 {digest}");
+            }
+
+            using (var log = new TraceLog(etlx))
+            using (var symbols = new SymbolReader(Console.Error))
+            {
+                if (kernelCpu) { InputQuality.ResolveRuntimeSymbols(log, symbols, targetPid); }
+                string path = Path.Combine(output, "async-timeline.speedscope.json");
+                if (asyncSampleInterval.HasValue)
+                {
+                    SpeedScopeStackSourceWriter.WriteAsyncCallStacksAsJson(log, path, asyncSampleInterval.Value, targetPid);
+                }
+                else
+                {
+                    SpeedScopeStackSourceWriter.WriteAsyncCallStacksAsJson(log, path, targetPid);
+                }
+                var summary = ValidateExport(path, allowEmpty: allowNoIndex || asyncSampleInterval.HasValue);
+                WriteJson(Path.Combine(output, "async-timeline.summary.json"), new
+                {
+                    Name = "async-timeline", summary.Profiles, summary.Frames, summary.Events,
+                    TargetProcessID = targetPid,
+                    Measurement = asyncSampleInterval.HasValue
+                        ? "Virtually sampled async-context occupancy; not CPU time or exact method lifetimes."
+                        : "Elapsed time with recorded async contexts active; not CPU time or full method lifetimes.",
+                    AsyncSampleIntervalMSec = asyncSampleInterval?.TotalMilliseconds,
+                    EffectiveAsyncSampleIntervalMSec = asyncSampleInterval.HasValue
+                        ? Math.Round(asyncSampleInterval.Value.Ticks * (log.QPCFreq / (double)TimeSpan.TicksPerSecond),
+                            MidpointRounding.AwayFromZero) * 1000.0 / log.QPCFreq : (double?)null,
+                    SamplingGrid = asyncSampleInterval.HasValue ? "Trace start, shared across threads; final interval clipped at trace end." : null,
+                    FinalizedV1AppendsIncludedAtResume = true,
+                    CompletionProgress = "Recorded method-completion and exception-unwind events only.",
+                    MissingAsyncData = log.AsyncProfilerCallStacks == null,
+                    NoVisibleAsyncContexts = summary.Profiles == 0
+                });
+                Console.WriteLine($"async-timeline: {summary.Profiles} profiles, {summary.Events} timestamped events " +
+                    $"({(asyncSampleInterval.HasValue ? "virtually sampled occupancy" : "elapsed time")}, not CPU samples)");
             }
         }
 
@@ -582,16 +634,17 @@ namespace AsyncProfilerValidation
         private static void WriteLine(TextWriter writer, object value) =>
             writer.WriteLine(JsonSerializer.Serialize(value, s_jsonOptions));
 
-        private static void ValidateExport(string path)
+        private static (int Profiles, int Frames, long Events) ValidateExport(string path, bool allowEmpty = false)
         {
             using var stream = File.OpenRead(path);
             using var document = JsonDocument.Parse(stream);
             int frameCount = document.RootElement.GetProperty("shared").GetProperty("frames").GetArrayLength();
             var profiles = document.RootElement.GetProperty("profiles");
-            if (profiles.GetArrayLength() == 0)
+            if (profiles.GetArrayLength() == 0 && !allowEmpty)
             {
                 throw new InvalidDataException("No exported profiles.");
             }
+            long eventCount = 0;
             foreach (var profile in profiles.EnumerateArray())
             {
                 var stack = new Stack<int>();
@@ -604,6 +657,7 @@ namespace AsyncProfilerValidation
                 }
                 foreach (var item in profile.GetProperty("events").EnumerateArray())
                 {
+                    eventCount++;
                     int frame = item.GetProperty("frame").GetInt32();
                     double at = item.GetProperty("at").GetDouble();
                     if (frame < 0 || frame >= frameCount || !double.IsFinite(at) || at < previous || at > end)
@@ -626,6 +680,7 @@ namespace AsyncProfilerValidation
                     throw new InvalidDataException("Unclosed exported frames.");
                 }
             }
+            return (profiles.GetArrayLength(), frameCount, eventCount);
         }
 
         private static readonly JsonSerializerOptions s_jsonOptions = new JsonSerializerOptions { IncludeFields = true };

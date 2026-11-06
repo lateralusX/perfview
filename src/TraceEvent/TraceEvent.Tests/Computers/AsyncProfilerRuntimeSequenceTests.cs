@@ -62,7 +62,7 @@ namespace TraceEventTests
         [InlineData("BRATID", "BRATID")]
         [InlineData("BRHTII", "BRHTII")]
         [InlineData("BRHTI", "BRHTI")]
-        public void RejectedCandidates_StayProtectedWhileOtherSpansAreRemoved(string pattern, string expected)
+        public void RejectedCandidates_StayProtectedWhileOtherSpansAreGrouped(string pattern, string expected)
         {
             foreach (bool enableNormalization in new[] { false, true })
             {
@@ -72,7 +72,7 @@ namespace TraceEventTests
                     EnableNormalization = enableNormalization,
                     EnableInfrastructureCleanup = true,
                 }.ApplyInPlace(fixture.Context());
-                Assert.Equal(expected, fixture.RemainingPattern);
+                Assert.Equal(expected, fixture.RemainingPhysicalPattern);
                 Assert.Equal(pattern.Length - expected.Length, fixture.Diagnostics.AsyncInfrastructureFramesCollapsed);
             }
         }
@@ -84,13 +84,15 @@ namespace TraceEventTests
             var pipeline = new AsyncProfilerCallStackTransformPipeline { EnableInfrastructureCleanup = true };
             pipeline.ApplyInPlace(fixture.Context(ca =>
                 (int)ca < 4 ? fixture.Profile : AsyncProfilerRuntimeRuleProfile.Common));
-            Assert.Empty(fixture.Frames);
+            Assert.Equal(new[] { 0, 4 }, fixture.Frames.Select(frame => (int)frame.CodeAddress));
+            Assert.All(fixture.Frames, frame =>
+                Assert.Equal(AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames, frame.Presentation));
             Assert.Equal(7, fixture.Diagnostics.AsyncInfrastructureFramesCollapsed);
 
             fixture = new SequenceFixture("RHTS");
             pipeline.ApplyInPlace(fixture.Context(ca =>
                 (int)ca == 1 ? AsyncProfilerRuntimeRuleProfile.Common : fixture.Profile));
-            Assert.Equal("RHTS", fixture.RemainingPattern);
+            Assert.Equal("RHTS", fixture.RemainingPhysicalPattern);
             Assert.Equal(0, fixture.Diagnostics.AsyncInfrastructureFramesCollapsed);
         }
 
@@ -137,7 +139,9 @@ namespace TraceEventTests
             public AsyncProfilerExtendedCompletionRuntimeProfile Profile { get; }
             public List<AsyncProfilerStitchedFrame> Frames { get; } = new List<AsyncProfilerStitchedFrame>();
             public AsyncProfilerCallStackDiagnostics Diagnostics { get; } = new AsyncProfilerCallStackDiagnostics();
-            public string RemainingPattern => new string(Frames.Select(frame => m_pattern[(int)frame.CodeAddress]).ToArray());
+            public string RemainingPhysicalPattern => new string(Frames
+                .Where(frame => frame.Presentation != AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames)
+                .Select(frame => m_pattern[(int)frame.CodeAddress]).ToArray());
 
             public AsyncProfilerCallStackTransformState Context(Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile> runtimeProfileResolver = null) =>
                 new AsyncProfilerCallStackTransformState(null, new List<AsyncProfilerCallStack>(), 1,

@@ -126,15 +126,15 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 return AsyncProfilerStitchSyncFrameKind.None;
             }
 
+            if (method == "ExecutionContextCallback" && IsCommonV1DispatcherInfrastructure(frameName))
+            {
+                return AsyncProfilerStitchSyncFrameKind.V1StateMachineBoxExecutionContextCallback;
+            }
+
             AsyncProfilerStitchSyncFrameKind profilerKind = ClassifyProfilerInfrastructure(frameName, method);
             if (profilerKind != AsyncProfilerStitchSyncFrameKind.None)
             {
                 return profilerKind;
-            }
-
-            if (method == "ExecutionContextCallback" && IsCommonV1DispatcherInfrastructure(frameName))
-            {
-                return AsyncProfilerStitchSyncFrameKind.V1StateMachineBoxExecutionContextCallback;
             }
 
             AsyncProfilerStitchSyncFrameKind bridgeKind = ClassifySystemPrivateCoreLibAsyncBridge(frameName, method);
@@ -160,10 +160,33 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 builderType = builderType.Substring(0, genericArity);
             }
 
-            if ((IsKnownV1AwaiterType(builderType) || IsKnownStateMachineBoxAwareAwaiter(frameName)) &&
-                IsAwaiterRegistrationMethod(method))
+            if (((IsKnownV1AwaiterType(builderType) || IsKnownStateMachineBoxAwareAwaiter(frameName)) &&
+                 IsAwaiterRegistrationMethod(method)) ||
+                ((method == "QueueContinuation" || method == "OutputCorrelationEtwEvent") &&
+                 IsMethodOnType(frameName, "System.Runtime.CompilerServices.YieldAwaitable+YieldAwaiter", method)))
             {
                 return AsyncProfilerStitchSyncFrameKind.V1AwaiterRegistrationInfrastructure;
+            }
+
+            if (method == "get_IsCompleted" &&
+                (IsMethodOnType(frameName, "System.Runtime.CompilerServices.TaskAwaiter", method) ||
+                 IsMethodOnType(frameName, "System.Runtime.CompilerServices.TaskAwaiter`1", method) ||
+                 IsMethodOnType(frameName, "System.Runtime.CompilerServices.ValueTaskAwaiter", method) ||
+                 IsMethodOnType(frameName, "System.Runtime.CompilerServices.ValueTaskAwaiter`1", method) ||
+                 IsMethodOnType(frameName, "System.Runtime.CompilerServices.ConfiguredTaskAwaitable+ConfiguredTaskAwaiter", method) ||
+                 IsMethodOnType(frameName, "System.Runtime.CompilerServices.ConfiguredTaskAwaitable`1+ConfiguredTaskAwaiter", method) ||
+                 IsMethodOnType(frameName, "System.Runtime.CompilerServices.ConfiguredTaskAwaitable`1", method, "ConfiguredTaskAwaiter") ||
+                 IsMethodOnType(frameName, "System.Runtime.CompilerServices.ConfiguredValueTaskAwaitable+ConfiguredValueTaskAwaiter", method) ||
+                 IsMethodOnType(frameName, "System.Runtime.CompilerServices.ConfiguredValueTaskAwaitable`1+ConfiguredValueTaskAwaiter", method) ||
+                 IsMethodOnType(frameName, "System.Runtime.CompilerServices.ConfiguredValueTaskAwaitable`1", method, "ConfiguredValueTaskAwaiter")))
+            {
+                return AsyncProfilerStitchSyncFrameKind.V1AwaiterCompletionCheck;
+            }
+
+            AsyncProfilerStitchSyncFrameKind awaiterKind = ClassifyAwaiterInfrastructure(frameName);
+            if (awaiterKind != AsyncProfilerStitchSyncFrameKind.None)
+            {
+                return awaiterKind;
             }
 
             if (method == "SetExistingTaskResult" && builderType == "AsyncTaskMethodBuilder")
@@ -303,7 +326,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         /// <summary>
-        /// Recognizes return-unwind plumbing after full completion has independently been recorded. Captured
+        /// Recognizes return-unwind plumbing after completion has independently been recorded. Captured
         /// method order, box identities, and runtime-module ownership are checked by the presentation transform.
         /// </summary>
         public virtual bool IsV1CompletionUnwindInfrastructure(
@@ -313,7 +336,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             frame.SyncFrameKind == AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure ||
             frame.SyncFrameKind == AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskRunContinuations ||
             frame.SyncFrameKind == AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult ||
-            frame.SyncFrameKind == AsyncProfilerStitchSyncFrameKind.V1MethodBuilderCompletion;
+            frame.SyncFrameKind == AsyncProfilerStitchSyncFrameKind.V1MethodBuilderCompletion ||
+            frame.SyncFrameKind == AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibAwaiterInfrastructure;
 
         /// <summary>
         /// Filters candidate V1 carriers. Resolved identity and physical-application-body precedence are
@@ -328,23 +352,16 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         public virtual bool IsRuntimeResumptionAnchor(AsyncProfilerStitchedFrame frame) =>
             IsSyncFrameKind(frame, AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibThreadPoolDispatch);
 
-        /// <summary>Recognizes profiler-owned helper types above a verified wrapperless V2 dispatch pair.
+        /// <summary>Recognizes helper types eligible to extend an already verified dispatcher span.
         /// Captured runtime ownership, physical contiguity, and context identity are checked by cleanup.</summary>
-        public virtual bool IsProfilerDispatchInfrastructure(string frameName)
-        {
-            if (string.IsNullOrEmpty(frameName))
-            {
-                return false;
-            }
-            const string profilerType = "System.Runtime.CompilerServices.AsyncProfiler";
-            string method = GetBareMethodName(frameName);
-            int typeStart = IsHostModuleQualifiedFrame(frameName) ? HostModuleName.Length + 1 : 0;
-            int typeEnd = typeStart + profilerType.Length;
-            return IsMethodOnType(frameName, profilerType, method) ||
-                IsMethodOnType(frameName, "System.Runtime.CompilerServices.AsyncProfilerEventSource", method) ||
-                (frameName.Length > typeEnd && frameName[typeEnd] == '+' &&
-                 string.CompareOrdinal(frameName, typeStart, profilerType, 0, profilerType.Length) == 0);
-        }
+        public virtual bool IsProfilerDispatchInfrastructure(AsyncProfilerStitchSyncFrameKind kind) =>
+            kind == AsyncProfilerStitchSyncFrameKind.ProfilerCallstackCapture ||
+            kind == AsyncProfilerStitchSyncFrameKind.ProfilerCallstackEmission ||
+            kind == AsyncProfilerStitchSyncFrameKind.ProfilerContextResume ||
+            kind == AsyncProfilerStitchSyncFrameKind.ProfilerInfrastructure ||
+            kind == AsyncProfilerStitchSyncFrameKind.V1StateMachineBoxExecutionContextCallback ||
+            kind == AsyncProfilerStitchSyncFrameKind.V1AwaiterRegistrationInfrastructure ||
+            kind == AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibAwaiterInfrastructure;
 
         /// <summary>Optional individual-helper policy, applied only outside protected/rejected spans.</summary>
         public virtual bool IsOptionalInfrastructureFrame(AsyncProfilerStitchedFrame frame, AsyncProfilerCallStackStitchBoundaryKind boundary) =>
@@ -357,6 +374,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             frame.SyncFrameKind == AsyncProfilerStitchSyncFrameKind.V1MethodBuilderInfrastructure ||
             frame.SyncFrameKind == AsyncProfilerStitchSyncFrameKind.V1MethodBuilderCompletion ||
             frame.SyncFrameKind == AsyncProfilerStitchSyncFrameKind.V1AwaiterRegistrationInfrastructure ||
+            frame.SyncFrameKind == AsyncProfilerStitchSyncFrameKind.V1AwaiterCompletionCheck ||
             frame.SyncFrameKind == AsyncProfilerStitchSyncFrameKind.V1DispatcherCreationInfrastructure ||
             frame.SyncFrameKind == AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure ||
             frame.SyncFrameKind == AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskRunContinuations ||
@@ -424,7 +442,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             return next == start ? default : AsyncProfilerRuntimeSequenceMatch.Match(next - start);
         }
 
-        /// <summary>Matches the entry spine immediately before the verified logical anchor at end.</summary>
+        /// <summary>Matches an entry spine before a physical caller or logical anchor; cleanup verifies its ownership.</summary>
         protected virtual AsyncProfilerRuntimeSequenceMatch MatchProfilerEntry(
             AsyncProfilerCallStackTransformState context, int start, int end)
         {
@@ -435,22 +453,36 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             AsyncProfilerStitchedFrame target = context.Frames[end];
             if (IsSyncFrameKind(context.Frames[start], AsyncProfilerStitchSyncFrameKind.V1DispatcherCreationInfrastructure))
             {
-                if (target.Origin != AsyncProfilerStitchedFrameOrigin.AsyncCurrent ||
-                    target.Segment.Kind != AsyncCallstackKind.StateMachineAsync)
+                if (target.Origin != AsyncProfilerStitchedFrameOrigin.Sync &&
+                    (target.Origin != AsyncProfilerStitchedFrameOrigin.AsyncCurrent ||
+                     target.Segment.Kind != AsyncCallstackKind.StateMachineAsync))
                 {
                     return default;
                 }
                 AsyncProfilerRuntimeSequenceMatch registration = context.MatchRuntimeSequence(
                     AsyncProfilerRuntimeSequenceKind.V1AwaitRegistration, start + 1, end);
                 return registration.IsMatch && registration.Length == end - start - 1
-                    ? AsyncProfilerRuntimeSequenceMatch.Match(end - start) : default;
-            }
-            if (!IsSyncFrameKind(context.Frames[start], AsyncProfilerStitchSyncFrameKind.ProfilerContextResume))
-            {
-                return default;
+                    ? AsyncProfilerRuntimeSequenceMatch.Match(end - start)
+                    : AsyncProfilerRuntimeSequenceMatch.Reject(end - start);
             }
             bool dispatcherTarget = target.Origin == AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget &&
                 !target.IsStateMachineBoxCarrier;
+            if (!IsSyncFrameKind(context.Frames[start], AsyncProfilerStitchSyncFrameKind.ProfilerContextResume) &&
+                !(dispatcherTarget &&
+                  IsSyncFrameKind(context.Frames[start], AsyncProfilerStitchSyncFrameKind.ProfilerCallstackCapture)))
+            {
+                return default;
+            }
+            if (target.IsStateMachineBoxCarrier && end - start == 2)
+            {
+                AsyncProfilerStitchedFrame carrier = context.Frames[start + 1];
+                return carrier.Origin == AsyncProfilerStitchedFrameOrigin.Sync &&
+                       carrier.Presentation == AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames &&
+                       carrier.CodeAddress == target.CodeAddress &&
+                       carrier.BoxedStateMachineMethod == target.BoxedStateMachineMethod &&
+                       ReferenceEquals(carrier.Context, target.Context)
+                    ? AsyncProfilerRuntimeSequenceMatch.Match(2) : default;
+            }
             int length = dispatcherTarget ? 2 : 1;
             return end - start == length &&
                    (!dispatcherTarget ||
@@ -461,8 +493,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         /// <summary>
-        /// Matches a whole optional bridge including its retained scheduler anchor. Explicit rejections protect
-        /// incomplete or changed layouts from individual-helper cleanup.
+        /// Matches a whole optional bridge including its retained scheduler anchor, or a root-adjacent
+        /// completion prefix ending before a non-CoreLib caller. Shared guards verify that caller and anchor.
+        /// Explicit rejections protect incomplete or changed layouts from individual-helper cleanup.
         /// </summary>
         protected virtual AsyncProfilerRuntimeSequenceMatch MatchRuntimeResumptionBridge(
             AsyncProfilerCallStackTransformState context, int start, int end)
@@ -486,17 +519,36 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
             if (anchor && pairMatched && !pairRejected)
             {
+                int completionStart = start;
+                while (completionStart < helpersEnd &&
+                       (IsSyncFrameKind(context.Frames[completionStart],
+                            AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibAwaiterInfrastructure) ||
+                        IsSyncFrameKind(context.Frames[completionStart],
+                            AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibAsyncBridgeInfrastructure)))
+                {
+                    completionStart++;
+                }
+                AsyncProfilerRuntimeSequenceMatch chain = context.MatchRuntimeSequence(
+                    AsyncProfilerRuntimeSequenceKind.TaskCompletionChain, completionStart, helpersEnd);
+                int caller = completionStart + chain.Length;
+                if (chain.IsMatch && caller < helpersEnd && context.TraceLog != null &&
+                    context.GetHostModuleOwner(context.Frames[caller].CodeAddress) == ModuleFileIndex.Invalid)
+                {
+                    return AsyncProfilerRuntimeSequenceMatch.Match(caller - start);
+                }
                 return AsyncProfilerRuntimeSequenceMatch.Match(end - start);
             }
-            if (context.TraceLog != null && context.Segments.Count != 0 &&
-                context.Segments[0].Frames.Kind == AsyncCallstackKind.RuntimeAsync)
+            if (context.TraceLog != null && context.Segments.Count != 0)
             {
                 AsyncProfilerRuntimeSequenceMatch helpers =
-                    MatchV2DispatchResumptionHelpers(context, start, helpersEnd);
+                    MatchDispatchResumptionHelpers(context, start, helpersEnd);
                 if (helpers.Length != 0)
                 {
                     return anchor && !pairRejected && helpers.IsMatch && helpers.Length == helpersEnd - start &&
-                        context.HasVerifiedV2DispatchPair(context.Segments[0], context.Frames[start].CodeAddress)
+                        (context.HasVerifiedDispatchEntry(context.Segments[0], context.Frames[start].CodeAddress) ||
+                         context.HasVerifiedV1CompletionAnchor(
+                             context.Segments[0], context.Frames[start].CodeAddress, allowCompletionUnwind: true) ||
+                         context.HasVerifiedCompletedV1OuterDispatch(context.Segments[0], context.Frames[start].CodeAddress))
                             ? AsyncProfilerRuntimeSequenceMatch.Match(end - start)
                             : AsyncProfilerRuntimeSequenceMatch.Reject(end - start);
                 }
@@ -506,9 +558,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         /// <summary>
         /// Supplies the removable helper span before the scheduler anchor. The caller verifies the root
-        /// activation's consumed dispatch pair; the common rule recognizes contiguous YieldAwaitable-family methods.
+        /// activation's consumed V1 dispatcher or V2 dispatch pair; the common rule recognizes contiguous YieldAwaitable-family methods.
         /// </summary>
-        protected virtual AsyncProfilerRuntimeSequenceMatch MatchV2DispatchResumptionHelpers(
+        protected virtual AsyncProfilerRuntimeSequenceMatch MatchDispatchResumptionHelpers(
             AsyncProfilerCallStackTransformState context, int start, int end)
         {
             int matched = 0;
@@ -677,19 +729,40 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
         }
 
+        private static AsyncProfilerStitchSyncFrameKind ClassifyAwaiterInfrastructure(string frameName)
+        {
+            const string typeName = "System.Runtime.CompilerServices.TaskAwaiter";
+            string method = GetBareMethodName(frameName);
+            string member = method == "ctor" || method == "cctor" ? "." + method : method;
+            int typeStart = IsHostModuleQualifiedFrame(frameName) ? HostModuleName.Length + 1 : 0;
+            int typeEnd = typeStart + typeName.Length;
+            return IsMethodOnType(frameName, typeName, member) ||
+                IsMethodOnType(frameName, typeName + "`1", member) ||
+                (frameName.Length > typeEnd && frameName[typeEnd] == '+' &&
+                 string.CompareOrdinal(frameName, typeStart, typeName, 0, typeName.Length) == 0)
+                    ? AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibAwaiterInfrastructure
+                    : AsyncProfilerStitchSyncFrameKind.None;
+        }
+
         private static bool IsAwaiterRegistrationMethod(string method) =>
             method == "OnCompleted" ||
             method == "UnsafeOnCompleted" ||
             method == "UnsafeOnCompletedInternal" ||
             method == "AwaitUnsafeOnCompleted";
 
-        private static bool IsKnownStateMachineBoxAwareAwaiter(string frameName) =>
-            frameName.IndexOf(
-                "+YieldAwaiter.System.Runtime.CompilerServices.IStateMachineBoxAwareAwaiter.",
-                StringComparison.Ordinal) >= 0 ||
-            frameName.IndexOf(
-                "+ForceYieldingAwaiter.System.Runtime.CompilerServices.IStateMachineBoxAwareAwaiter.",
-                StringComparison.Ordinal) >= 0;
+        private static bool IsKnownStateMachineBoxAwareAwaiter(string frameName)
+        {
+            const string qualification = ".System.Runtime.CompilerServices.IStateMachineBoxAwareAwaiter.";
+            int interfaceStart = frameName.IndexOf(qualification, StringComparison.Ordinal);
+            if (interfaceStart < 0)
+            {
+                return false;
+            }
+            // Explicit-interface qualification is part of the member name, not the declaring awaiter type.
+            string awaiterType = GetDeclaringTypeName(frameName.Remove(interfaceStart, qualification.Length - 1));
+            int genericArity = awaiterType?.IndexOf('`') ?? -1;
+            return IsKnownV1AwaiterType(genericArity < 0 ? awaiterType : awaiterType.Substring(0, genericArity));
+        }
 
         private static AsyncProfilerStitchSyncFrameKind ClassifySystemPrivateCoreLibAsyncBridge(
             string frameName,
@@ -770,25 +843,33 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             {
                 return AsyncProfilerStitchSyncFrameKind.ProfilerContextResume;
             }
-            if ((method == "ResetContext" &&
-                 IsMethodOnType(frameName, "System.Runtime.CompilerServices.AsyncProfiler+SyncPoint", method)) ||
-                ((method == "get_MethodId" || method == "get_StateOffset" || method == "cctor") &&
-                 IsMethodOnType(frameName, "System.Runtime.CompilerServices.AsyncStateMachineDiagnostics`1",
-                     method == "cctor" ? ".cctor" : method)) ||
-                ((method == "CallClassConstructor" || method == "InitClassHelper" || method == "InitClassSlow") &&
+            if (((method == "CallClassConstructor" || method == "InitClassHelper" || method == "InitClassSlow") &&
                  IsMethodOnType(frameName, "System.Runtime.CompilerServices.InitHelpers", method)) ||
                 (method == "GetNonGCStaticBaseSlow" &&
-                 IsMethodOnType(frameName, "System.Runtime.CompilerServices.StaticsHelpers", method)) ||
-                (method == "GetDiagnosticData" && IsCommonV1DispatcherInfrastructure(frameName)))
+                 IsMethodOnType(frameName, "System.Runtime.CompilerServices.StaticsHelpers", method)))
+            {
+                return AsyncProfilerStitchSyncFrameKind.RuntimeInitializationInfrastructure;
+            }
+            const string profilerType = "System.Runtime.CompilerServices.AsyncProfiler";
+            string member = method == "ctor" || method == "cctor" ? "." + method : method;
+            int typeStart = IsHostModuleQualifiedFrame(frameName) ? HostModuleName.Length + 1 : 0;
+            int typeEnd = typeStart + profilerType.Length;
+            if (IsCommonV1DispatcherInfrastructure(frameName) ||
+                IsMethodOnType(frameName, "System.Runtime.CompilerServices.AsyncStateMachineDiagnostics`1", member) ||
+                IsMethodOnType(frameName, "System.Runtime.CompilerServices.AsyncProfilerEventSource", member) ||
+                IsMethodOnType(frameName, profilerType, member) ||
+                (frameName.Length > typeEnd && frameName[typeEnd] == '+' &&
+                 string.CompareOrdinal(frameName, typeStart, profilerType, 0, profilerType.Length) == 0))
             {
                 return AsyncProfilerStitchSyncFrameKind.ProfilerInfrastructure;
             }
             return AsyncProfilerStitchSyncFrameKind.None;
         }
 
-        private static bool IsMethodOnType(string frameName, string fullTypeName, string method)
+        private static bool IsMethodOnType(string frameName, string fullTypeName, string method, string nestedTypeName = null)
         {
-            if (GetBareMethodName(frameName) != (method == ".cctor" ? "cctor" : method))
+            if (GetBareMethodName(frameName) !=
+                (method == ".ctor" ? "ctor" : method == ".cctor" ? "cctor" : method))
             {
                 return false;
             }
@@ -817,6 +898,17 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 {
                     return false;
                 }
+            }
+
+            if (nestedTypeName != null)
+            {
+                if (frameName.Length - typeEnd <= nestedTypeName.Length + 1 ||
+                    frameName[typeEnd] != '+' ||
+                    string.CompareOrdinal(frameName, typeEnd + 1, nestedTypeName, 0, nestedTypeName.Length) != 0)
+                {
+                    return false;
+                }
+                typeEnd += nestedTypeName.Length + 1;
             }
 
             return typeEnd < frameName.Length &&
