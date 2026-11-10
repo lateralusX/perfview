@@ -3,6 +3,7 @@
 
 using System;
 using System.Diagnostics;
+using System.IO;
 using System.Text;
 
 using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
@@ -418,10 +419,47 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
         private static readonly string[] s_payloadNames = new[] { "Length", "Buffer" };
 
         /// <summary>The length (in bytes) of the encoded buffer (an EventSource int32 length prefix).</summary>
-        public int Length { get { return GetInt32At(0); } }
+        public int Length
+        {
+            get
+            {
+                if (EventDataLength < sizeof(int))
+                {
+                    throw new InvalidDataException("AsyncEvents payload is missing its length prefix.");
+                }
+                return GetInt32At(0);
+            }
+        }
 
         /// <summary>The encoded async-profiler buffer. Decode with <see cref="AsyncProfilerTraceEventParser.ParseBuffer(byte[], ISubEventSink)"/>.</summary>
-        public byte[] Buffer { get { return EventData(null, 0, 4, Length); } }
+        public byte[] Buffer
+        {
+            get
+            {
+                if (!TryGetBuffer(out byte[] buffer))
+                {
+                    throw new InvalidDataException("Invalid or truncated AsyncEvents envelope.");
+                }
+                return buffer;
+            }
+        }
+
+        internal bool TryGetBuffer(out byte[] buffer)
+        {
+            // Validate here instead of asserting during dispatch, so malformed envelopes reach parse-error recovery.
+            buffer = null;
+            if (EventDataLength < sizeof(int))
+            {
+                return false;
+            }
+            int length = GetInt32At(0);
+            if (length < 0 || length > EventDataLength - sizeof(int))
+            {
+                return false;
+            }
+            buffer = EventData(null, 0, sizeof(int), length);
+            return true;
+        }
 
         #region Private
         internal AsyncProfilerTraceEvent(Action<AsyncProfilerTraceEvent> action, int eventID, int task, string taskName, Guid taskGuid, int opcode, string opcodeName, Guid providerGuid, string providerName)
@@ -433,12 +471,6 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
         protected internal override void Dispatch()
         {
             m_target?.Invoke(this);
-        }
-
-        protected internal override void Validate()
-        {
-            Debug.Assert(4 <= EventDataLength);
-            Debug.Assert(4 + Length <= EventDataLength);
         }
 
         protected internal override Delegate Target

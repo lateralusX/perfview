@@ -17,7 +17,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// </remarks>
     public sealed class AsyncProfilerCallStackComputer
     {
-        /// <summary>Creates a query computer for <paramref name="traceLog"/>.</summary>
+        /// <summary>Creates an async profiler callstack computer for <paramref name="traceLog"/>.</summary>
         /// <exception cref="ArgumentNullException"><paramref name="traceLog"/> is null.</exception>
         public AsyncProfilerCallStackComputer(TraceLog traceLog)
         {

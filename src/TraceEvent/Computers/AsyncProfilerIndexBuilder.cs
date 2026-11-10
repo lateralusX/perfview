@@ -400,7 +400,15 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         private void OnRawTraceEvent(AsyncProfilerTraceEvent data)
         {
-            Process(data.Buffer, _processIndexOf(data));
+            _currentProcessIndex = _processIndexOf(data);
+            if (data.TryGetBuffer(out byte[] buffer))
+            {
+                Process(buffer, _currentProcessIndex);
+            }
+            else
+            {
+                ((ISubEventSink)this).OnParseError(new ParseError("Invalid or truncated AsyncEvents envelope.", 0));
+            }
         }
 
         private AsyncProfilerThreadKey ThreadKeyOf(ulong osThreadId) =>

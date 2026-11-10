@@ -28,10 +28,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     {
         /// <summary>The V1 or V2 instrumentation family that emitted these frames.</summary>
         public AsyncCallstackKind Kind { get; }
+
         /// <summary>The number of frames, ordered leaf-to-root.</summary>
         public int FrameCount => _methodIds.Length;
+
         /// <summary>The native code IP emitted for a frame, or 0 for a runtime-emitted sentinel.</summary>
         public ulong MethodIdAt(int index) => _methodIds[index];
+
         /// <summary>The raw signed V1 compiler state for a frame, not an IL/native offset; 0 for V2.</summary>
         public int FrameStateAt(int index) => _frameStates != null ? _frameStates[index] : 0;
 

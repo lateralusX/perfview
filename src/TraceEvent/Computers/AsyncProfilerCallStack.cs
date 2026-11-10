@@ -71,6 +71,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         /// <summary>The inclusive resume timestamp in the trace's QPC domain.</summary>
         public long StartQpc { get; private set; }
+
         /// <summary>The exclusive end timestamp in the trace's QPC domain; <see cref="long.MaxValue"/> if open at stream end.</summary>
         public long EndQpc { get; private set; }
 
@@ -182,6 +183,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         internal AsyncProfilerCallStackFrames Frames { get; private set; }
 
         internal IReadOnlyList<CompletionDelta> MethodCompletions => _methodCompletions;
+
         internal IReadOnlyList<CompletionDelta> ExceptionCompletions => _exceptionCompletions;
 
         internal void Reset(AsyncProfilerThreadKey thread, ulong dispatcherId,

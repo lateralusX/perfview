@@ -245,12 +245,17 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
             uint codeAddressIndex = (uint)frameIndex - (uint)StackSourceFrameIndex.Start;
             if (codeAddressIndex >= m_log.CodeAddresses.Count)
             {
-                return TryGetAsyncProfilerCallStackFrameInfo(frameIndex, out AsyncProfilerCallStackSourceFrameInfo asyncProfilerFrame)
-                    ? asyncProfilerFrame.CodeAddress
-                    : CodeAddressIndex.Invalid;
+                return GetGeneratedFrameCodeAddress(frameIndex);
             }
 
             return (CodeAddressIndex)codeAddressIndex;
+        }
+
+        internal virtual CodeAddressIndex GetGeneratedFrameCodeAddress(StackSourceFrameIndex frameIndex)
+        {
+            return TryGetAsyncProfilerCallStackFrameInfo(frameIndex, out AsyncProfilerCallStackSourceFrameInfo asyncProfilerFrame)
+                ? asyncProfilerFrame.CodeAddress
+                : CodeAddressIndex.Invalid;
         }
 
         /// <summary>
@@ -899,6 +904,23 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
 
         internal bool IsFinalized { get; private set; }
 
+        internal void SetFrameCodeAddress(StackSourceFrameIndex frameIndex, CodeAddressIndex codeAddress)
+        {
+            if (m_generatedFrameCodeAddresses == null)
+            {
+                m_generatedFrameCodeAddresses = new Dictionary<StackSourceFrameIndex, CodeAddressIndex>();
+            }
+            m_generatedFrameCodeAddresses[frameIndex] = codeAddress;
+        }
+
+        internal override CodeAddressIndex GetGeneratedFrameCodeAddress(StackSourceFrameIndex frameIndex)
+        {
+            return m_generatedFrameCodeAddresses != null &&
+                m_generatedFrameCodeAddresses.TryGetValue(frameIndex, out CodeAddressIndex codeAddress)
+                ? codeAddress
+                : base.GetGeneratedFrameCodeAddress(frameIndex);
+        }
+
         internal void SetAsyncProfilerCallStackFrameInfo(
             StackSourceFrameIndex frameIndex,
             AsyncProfilerCallStackSourceFrameInfo frameInfo)
@@ -1176,6 +1198,7 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
         /// </summary>
         protected StackSourceInterner m_Interner;
         private int m_nextAsyncProfilerCallStackFrameIdentityTag;
+        private Dictionary<StackSourceFrameIndex, CodeAddressIndex> m_generatedFrameCodeAddresses;
 
         /// <summary>
         /// private

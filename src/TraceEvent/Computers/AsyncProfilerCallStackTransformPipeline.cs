@@ -182,6 +182,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             {
                 if (allowCompletionUnwind &&
                     frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCompletionUnwind &&
+                    !frame.IsDispatcherTailUnwind &&
                     frame.ContextKind == AsyncProfilerStitchedFrameContextKind.Active &&
                     ReferenceEquals(frame.Context, activation) &&
                     completed == activation.Frames.FrameCount &&
@@ -256,7 +257,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// Matches using captured candidate ownership. Application-led startup layouts use the owning sample's
         /// runtime rather than treating the application's module version as a CoreLib version.
         /// </summary>
-        internal AsyncProfilerRuntimeSequenceMatch MatchRuntimeSequence(AsyncProfilerRuntimeSequenceKind kind, int start, int end)
+        internal AsyncProfilerRuntimeSequenceMatch MatchRuntimeSequence(
+            AsyncProfilerRuntimeSequenceKind kind, int start, int end, bool allowRuntimeInteriors = false)
         {
             if (start < 0 || end < start || end > Frames.Count)
             {
@@ -268,7 +270,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
             bool startup = kind == AsyncProfilerRuntimeSequenceKind.V1Startup;
             AsyncProfilerRuntimeRuleProfile profile = startup ? RuntimeProfile : GetRuntimeProfile(Frames[start].CodeAddress);
-            AsyncProfilerRuntimeSequenceMatch match = profile.MatchSequence(kind, this, start, end);
+            AsyncProfilerRuntimeSequenceMatch match = profile.MatchSequence(kind, this, start, end, allowRuntimeInteriors);
             if (match.Length > end - start)
             {
                 throw new InvalidOperationException("A runtime sequence matcher returned a span outside its candidate range.");

@@ -63,12 +63,18 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         private const int SerializationVersion = 1;
 
         private readonly List<AsyncProfilerCallStackFrames> _internedCallStackFrames = new List<AsyncProfilerCallStackFrames>();
+
         private readonly Dictionary<FrameKey, AsyncProfilerCallStackFramesIndex> _frameKeyToIndex = new Dictionary<FrameKey, AsyncProfilerCallStackFramesIndex>();
+
         private readonly Dictionary<AsyncProfilerThreadKey, ThreadCallStacks> _threads = new Dictionary<AsyncProfilerThreadKey, ThreadCallStacks>();
+
         private readonly List<DispatcherRecord> _dispatchers =
             new List<DispatcherRecord>();
+
         private readonly object _dispatcherIndexLock = new object();
+
         private Dictionary<DispatcherKey, List<int>> _dispatchersById;
+
         private Dictionary<DispatcherKey, List<int>> _dispatchersByParentId;
 
         private readonly Dictionary<ProcessIndex, List<CompletionAvailabilityEpoch>> _completionAvailability =
@@ -216,10 +222,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <paramref name="thread"/> at <paramref name="timestampQpc"/>, or null when no matching resume interval covers the
         /// timestamp.
         /// </summary>
-        public AsyncProfilerCallStack GetCallStack(
-            AsyncProfilerThreadKey thread,
-            ulong dispatcherId,
-            long timestampQpc)
+        public AsyncProfilerCallStack GetCallStack(AsyncProfilerThreadKey thread, ulong dispatcherId, long timestampQpc)
         {
             IReadOnlyList<AsyncProfilerCallStack> callStacks = GetCallStacks(thread, timestampQpc);
             for (int i = callStacks.Count - 1; i >= 0; i--)
@@ -259,8 +262,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             {
                 throw new ArgumentNullException(nameof(callStack));
             }
-            CompletionAvailabilityEpoch epoch = FindCompletionEpoch(
-                callStack.Thread.ProcessIndex, callStack.StartQpc);
+            CompletionAvailabilityEpoch epoch = FindCompletionEpoch(callStack.Thread.ProcessIndex, callStack.StartQpc);
             return epoch != null && epoch.ExceptionObserved(callStack.Frames.Kind);
         }
 
@@ -268,10 +270,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// Returns the latest recorded metadata for <paramref name="dispatcherId"/> with a creation QPC at or before
         /// <paramref name="timestampQpc"/> in <paramref name="processIndex"/>, or null when no such metadata was recorded.
         /// </summary>
-        public AsyncProfilerDispatcherInfo GetDispatcherInfo(
-            ProcessIndex processIndex,
-            ulong dispatcherId,
-            long timestampQpc)
+        public AsyncProfilerDispatcherInfo GetDispatcherInfo(ProcessIndex processIndex, ulong dispatcherId, long timestampQpc)
         {
             int dispatcherIndex = GetDispatcherIndex(processIndex, dispatcherId, timestampQpc);
             return dispatcherIndex < 0 ? null : MaterializeDispatcherInfo(_dispatchers[dispatcherIndex]);
@@ -284,16 +283,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             {
                 throw new ArgumentNullException(nameof(callStack));
             }
-            return GetDispatcherInfo(
-                callStack.Thread.ProcessIndex,
-                callStack.DispatcherId,
-                callStack.StartQpc);
+            return GetDispatcherInfo(callStack.Thread.ProcessIndex, callStack.DispatcherId, callStack.StartQpc);
         }
 
         /// <summary>Returns metadata for all recorded children of a parent dispatcher, ordered by creation QPC.</summary>
-        public IReadOnlyList<AsyncProfilerDispatcherInfo> GetChildDispatcherInfos(
-            ProcessIndex processIndex,
-            ulong parentDispatcherId)
+        public IReadOnlyList<AsyncProfilerDispatcherInfo> GetChildDispatcherInfos(ProcessIndex processIndex, ulong parentDispatcherId)
         {
             EnsureDispatcherIndexes();
             var key = new DispatcherKey(processIndex, parentDispatcherId);
@@ -307,6 +301,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             {
                 result[i] = MaterializeDispatcherInfo(_dispatchers[dispatcherIndices[i]]);
             }
+
             return result;
         }
 
@@ -320,9 +315,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 throw new ArgumentNullException(nameof(parent));
             }
 
-            IReadOnlyList<AsyncProfilerDispatcherInfo> candidates = GetChildDispatcherInfos(
-                parent.Thread.ProcessIndex,
-                parent.DispatcherId);
+            IReadOnlyList<AsyncProfilerDispatcherInfo> candidates = GetChildDispatcherInfos(parent.Thread.ProcessIndex, parent.DispatcherId);
             if (candidates.Count == 0)
             {
                 return candidates;
@@ -339,6 +332,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     result.Add(dispatcher);
                 }
             }
+
             return result;
         }
 
@@ -355,10 +349,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// Recorded completion deltas can be queried at that QPC when the required events were captured.
         /// Intervening synchronous frames are not represented by this relationship.
         /// </summary>
-        public bool TryGetParentCallStack(
-            AsyncProfilerCallStack child,
-            out AsyncProfilerCallStack parent,
-            out long parentQpc)
+        public bool TryGetParentCallStack(AsyncProfilerCallStack child, out AsyncProfilerCallStack parent, out long parentQpc)
         {
             if (child == null)
             {
@@ -370,6 +361,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             parent = dispatcher == null || dispatcher.ParentDispatcherId == 0
                 ? null
                 : GetCallStack(dispatcher.CreationThread, dispatcher.ParentDispatcherId, dispatcher.CreationQpc);
+
             return parent != null;
         }
 
@@ -383,6 +375,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             {
                 throw new ArgumentNullException(nameof(child));
             }
+
             if (candidates == null)
             {
                 throw new ArgumentNullException(nameof(candidates));

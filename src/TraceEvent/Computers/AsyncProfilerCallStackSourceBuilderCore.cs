@@ -73,7 +73,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             ProcessIndex processIndex = thread.Process.ProcessIndex;
             m_index.GetCallStacks(
                 new AsyncProfilerThreadKey(processIndex, (ulong)thread.ThreadID), timestampQpc, m_segments);
-            if (m_segments.Count == 0)
+            if (!AsyncProfilerCallStackStitcher.HasUsableSegments(m_segments))
             {
                 return false;
             }
@@ -92,7 +92,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 parentContextsAvailable =
                     m_parentContextAugmenter.Prepare(m_index, m_segments);
             }
-            bool collectPlacements = parentContextsAvailable || m_transforms.EnableInfrastructureCleanup;
+            bool collectPlacements = parentContextsAvailable || m_transforms.EnableNormalization ||
+                m_transforms.EnableInfrastructureCleanup;
             if (collectPlacements && m_segmentPlacements == null)
             {
                 m_segmentPlacements = new List<AsyncProfilerSegmentPlacement>();
@@ -411,7 +412,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                         m_outputStackSource.Interner.FrameIntern(
                             AsyncProfilerCallStackStitchBoundary.FormatLogicalStateMachineMethodName(
                                 logicalName, stateMachineSuffix),
-                            module);
+                            module, m_outputStackSource.NextAsyncProfilerCallStackFrameIdentityTag());
+                    m_outputStackSource.SetFrameCodeAddress(logicalFrame, frame.CodeAddress);
                     m_logicalSyncFrameByCodeAddress.Add(frame.CodeAddress, logicalFrame);
                     return logicalFrame;
                 }

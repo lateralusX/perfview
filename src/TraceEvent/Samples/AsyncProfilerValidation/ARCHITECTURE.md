@@ -1359,6 +1359,14 @@ recorded full completion plus a verified, uniquely ordered physical return
 span. It emits a logical-root unwind role with displayed state `-2`; merely
 seeing a completed count is not sufficient to fold an arbitrary stack.
 
+When all normal completions are recorded and no application body remains,
+a verified consumed V1 dispatcher and contiguous resolved execution boxes
+matching the captured leaf can establish a dispatcher-return tail instead.
+This emits the same logical-root unwind role without inventing an executing
+body. Native/JIT callees remain physical; interrupted, foreign, unresolved,
+or completion-inconsistent box tails are not folded. This narrower evidence
+does not authorize cleanup of the external completion trigger or user callback.
+
 The same return-spine proof also handles a partially completed V1 activation
 whose dispatcher and current body were lost to root-side truncation. The
 surviving outermost physical span must contain at least two unique, consecutive
@@ -1403,6 +1411,15 @@ classification is not await registration, a dispatch boundary, or completion
 evidence, and does not include other awaiter methods. Pooled ValueTasks use
 the same ValueTask awaiters; backing-source `GetStatus` implementations are
 not included.
+
+Once a machinery entry pattern is verified, contiguous captured-CoreLib
+profiler type families can extend its group without a method-by-method list.
+This includes `AsyncProfiler` and its nested types, diagnostics, dispatchers,
+and state-machine box helpers. Explicit-interface members are classified by
+their implementing type. A bounded V1 await-registration group can therefore
+include profiler callees above `CreateDispatcher`, while retaining native/JIT,
+application, unresolved, or differently owned frames. Logical current/target
+frames remain protected. This is opt-in machinery cleanup only.
 
 V1 and V2 share the bounded `YieldAwaitable` type-family resumption rule,
 including nested/generic helper types, without depending on generated callback
@@ -1506,7 +1523,15 @@ TaskAwaiter methods and its generated nested callbacks are classified as CoreLib
 awaiter infrastructure and can extend these verified contiguous machinery spans;
 classification does not authorize individual-frame cleanup.
 TaskAwaiter application work outside a proven span, including direct `GetResult`
-calls, remains visible. The same awaiter classification is accepted inside a
+calls, remains visible. Exact CoreLib `Task.TrySetException`, `Task.AddException`,
+and `TaskExceptionHolder.AddFaultException` helpers can also extend an owned
+dispatcher span, but cannot start one or establish completion evidence.
+An individually grouped completion helper that joins this same-owner fault span
+can continue extending it during the same pass, including contiguous TaskAwaiter
+callbacks. Application handlers and their callees, native exception dispatch,
+and unknown or foreign interruptions remain physical; eligible helpers above
+an interruption do not restart the group.
+The same awaiter classification is accepted inside a
 fully completed V1 return spine, still requiring exact recorded completion,
 unique ordered captured methods, matching box/body evidence, and resolved
 same-runtime helpers. Unknown, foreign, or unresolved intervening frames reject
@@ -1523,6 +1548,48 @@ An independent profile-matched completion pair can also own its contiguous
 awaiter/box prefix when the activation has a verified physical V1 completion
 anchor. Profile rejections remain protected, and this grouping stops at callers
 such as `WhenAllPromise.Invoke` rather than hiding their aggregation work.
+
+Optional cleanup can additionally recognize wider runtime-owned interiors
+between operation-specific anchors. `TaskCompletion` describes normal Task or
+value-task-source completion, while `TaskExceptionCompletion` describes fault
+and cancellation completion, including source-core `SetException` paths.
+`TaskCompletionChain` retains the additional TaskCompletionSource trigger,
+and `V1AwaitRegistration` describes registration; only cleanup requests the
+optional matching mode. Structural completion evidence, conservative
+normalization, and the default sequence matchers remain strict; exceptional
+completion matching is available only in the optional mode. Existing fully
+recognized helper layouts retain their original paths and diagnostics.
+
+The common optional layouts are leaf-to-root:
+
+| Leaf anchor | Root anchor | Additional required evidence |
+|---|---|---|
+| `Task.RunContinuations` | `Task.TrySetResult` | Same captured runtime and active context throughout. |
+| The above widened Task completion span | `TaskCompletionSource.SetResult` | The complete preceding span must end in `Task.TrySetResult`, not value-task-source completion. |
+| `TaskExceptionHolder.AddFaultException` or `SetCancellationException` | Known builder `SetException` | Corresponding `Task.TrySetException` or `Task.TrySetCanceled` inside the span. |
+| `Task.RunContinuations` | Known builder `SetException` | Either Task fault/cancellation transition inside the span. |
+| `ManualResetValueTaskSourceCore<T>.SignalCompletion` or `ManualResetValueTaskSourceCoreShared.InvokeContinuationWithContext` | Source-core `SetResult` or `SetException` | Exact CoreLib source types. A pooled builder's `StateMachineBox.SetResult`/`SetException` may be the root only with the corresponding source-core completion inside the span. |
+| `Task.AddTaskContinuation` | `TaskAwaiter.OnCompletedInternal` or `UnsafeOnCompletedInternal` | `Task.SetContinuationForAwait` or `UnsafeSetContinuationForAwait` inside the span. |
+| Source-core `OnCompleted` | Known explicit box-aware ValueTask awaiter registration | CoreLib pooling builder `StateMachineBox.OnCompleted` inside the span, never an arbitrary application `IValueTaskSource`. |
+
+Every widened span also requires a structurally consumed, verified dispatcher
+entry for that activation, complete segment processing, and no missing boundary,
+adjacency mismatch, or ambiguous V1 completion alignment. All interior frames
+must be resolved, synchronous, and belong to that same active context, canonical
+captured CoreLib owner, and runtime-profile instance. Linked native/IL module
+aliases use the shared ownership table; matching module names alone are
+insufficient. The inter-activation handoff rule uses this same captured-owner
+and profile invariant rather than module-name-only membership.
+
+Application frames, native or unresolved work, foreign owners/profiles, logical
+frames, state-machine bodies/carriers, and profiler boundaries stop widening.
+Callees above the leaf anchor and callers below the root anchor are not included
+by the bounded proof; existing independently justified helper cleanup can still
+apply. Explicit sequence rejections protect the candidate during prefix and
+individual-helper cleanup too. Missing or inlined required anchors leave wider
+plumbing visible rather than guessing ownership. None of these optional matches
+provides new completion attribution, changes logical roles or captured states,
+or changes sample timestamps, weights, or counts.
 
 Recursive completion alignment remains conservative in structural stitching.
 For a single active V1 activation, normalization can resolve one recorded normal
@@ -1546,8 +1613,19 @@ same-runtime plumbing; profile vetoes still apply. This can normalize a physical
 stack truncated before its dispatcher into a logical-root `AsyncCompletionUnwind`,
 without assigning individual recursive copies or inventing pending/executing
 methods. Native leaf work and the `BROKEN` physical-root marker remain visible.
-Partially completed, mixed-identity, single-body, interrupted, or unowned recursive
-layouts still use the existing conservative fallback.
+For a partially completed, truncated homogeneous recursive chain, the same proof
+can group at least two older completion-return bodies into an
+`[Async completion unwind]` marker. The youngest physical body and all its callees
+remain untouched, since its individual captured slot and completion status are
+ambiguous. Each older body requires matching box-entry evidence and its own
+same-runtime completion pair and builder; their count cannot exceed recorded
+normal completions, and exception progress rejects the fold. The marker has
+activation ownership but no method, captured slot, or current/completing role;
+it cannot authorize external completion-trigger cleanup. All pending captured
+frames, including the otherwise implicit next slot, remain logical ancestry,
+and the unavailable root remains `BROKEN`. Structural stitching is unchanged.
+Mixed-identity, insufficient-body, interrupted, or unowned recursive layouts
+still use the existing conservative fallback.
 
 That completion proof can also authorize a bounded YieldAwaitable-family bridge
 before the scheduler anchor. A normalized `AsyncCompletionUnwind` root can supply

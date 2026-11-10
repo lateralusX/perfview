@@ -57,7 +57,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// </summary>
         AsyncContextParentCurrent,
 
-        /// <summary>A caller-supplied presentation label with no physical or async identity.</summary>
+        /// <summary>A presentation label with no physical or async-method identity.</summary>
         Synthetic,
     }
 
@@ -153,6 +153,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         /// <summary><c>Task.TrySetResult</c> or <c>Task&lt;T&gt;.TrySetResult</c>, distinguished for exact opt-in completion-chain cleanup.</summary>
         SystemPrivateCoreLibTaskTrySetResult,
+
+        /// <summary>
+        /// Exact CoreLib Task fault-recording helpers. They can extend a verified contiguous dispatcher span,
+        /// but do not establish completion evidence or authorize individual-frame cleanup.
+        /// </summary>
+        SystemPrivateCoreLibTaskExceptionInfrastructure,
 
         /// <summary>
         /// <c>TaskCompletionSource.SetResult</c> or <c>TaskCompletionSource&lt;T&gt;.SetResult</c>.
@@ -305,6 +311,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     ? AsyncProfilerStitchedFrameContextKind.ParentContext
                     : AsyncProfilerStitchedFrameContextKind.Active);
 
+        /// <summary>True when only a verified dispatcher box tail, not a physical completion spine, survived.</summary>
+        internal bool IsDispatcherTailUnwind => m_isDispatcherTailUnwind;
+
         private AsyncProfilerStitchedFrame(
             AsyncProfilerStitchedFrameOrigin origin,
             CodeAddressIndex codeAddress,
@@ -314,7 +323,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             AsyncProfilerStitchSyncFrameKind syncFrameKind,
             AsyncProfilerStitchedFramePresentation presentation,
             AsyncProfilerCallStack context,
-            MethodIndex boxedStateMachineMethod = MethodIndex.Invalid)
+            MethodIndex boxedStateMachineMethod = MethodIndex.Invalid,
+            bool isDispatcherTailUnwind = false)
         {
             Origin = origin;
             CodeAddress = codeAddress;
@@ -325,12 +335,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             SyncFrameKind = syncFrameKind;
             Presentation = presentation;
             Context = context;
+            m_isDispatcherTailUnwind = isDispatcherTailUnwind;
         }
 
-        private AsyncProfilerStitchedFrame(string displayName)
+        private AsyncProfilerStitchedFrame(string displayName, AsyncProfilerCallStack context)
             : this(
                 AsyncProfilerStitchedFrameOrigin.Synthetic, CodeAddressIndex.Invalid, MethodIndex.Invalid, null, -1,
-                AsyncProfilerStitchSyncFrameKind.None, AsyncProfilerStitchedFramePresentation.Native, null)
+                AsyncProfilerStitchSyncFrameKind.None, AsyncProfilerStitchedFramePresentation.Native, context)
         {
             m_segmentOrDisplayName = displayName;
         }
@@ -387,12 +398,14 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 AsyncProfilerStitchSyncFrameKind.None, AsyncProfilerStitchedFramePresentation.LogicalStateMachineMethod, context);
 
         /// <summary>Attributes verified V1 return-unwind work to the completed activation's logical root.</summary>
-        public static AsyncProfilerStitchedFrame CreateAsyncCompletionUnwind(AsyncProfilerCallStack context) =>
+        public static AsyncProfilerStitchedFrame CreateAsyncCompletionUnwind(
+            AsyncProfilerCallStack context, bool isDispatcherTailUnwind = false) =>
             new AsyncProfilerStitchedFrame(
                 AsyncProfilerStitchedFrameOrigin.AsyncCompletionUnwind,
                 context.Frames.CodeAddressAt(context.Frames.FrameCount - 1),
                 MethodIndex.Invalid, context.Frames, context.Frames.FrameCount - 1,
-                AsyncProfilerStitchSyncFrameKind.None, AsyncProfilerStitchedFramePresentation.LogicalStateMachineMethod, context);
+                AsyncProfilerStitchSyncFrameKind.None, AsyncProfilerStitchedFramePresentation.LogicalStateMachineMethod,
+                context, isDispatcherTailUnwind: isDispatcherTailUnwind);
 
         /// <summary>Creates a suspended async caller frame from an async call-stack segment.</summary>
         public static AsyncProfilerStitchedFrame CreateAsync(AsyncProfilerCallStack context, int segmentFrameIndex) =>
@@ -455,8 +468,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 AsyncProfilerStitchedFrameOrigin.IncompleteRoot, CodeAddressIndex.Invalid, MethodIndex.Invalid, null, -1,
                 AsyncProfilerStitchSyncFrameKind.None, AsyncProfilerStitchedFramePresentation.Native, null);
 
-        internal static AsyncProfilerStitchedFrame CreateSynthetic(string displayName) =>
-            new AsyncProfilerStitchedFrame(displayName);
+        internal static AsyncProfilerStitchedFrame CreateSynthetic(
+            string displayName, AsyncProfilerCallStack context = null) =>
+            new AsyncProfilerStitchedFrame(displayName, context);
 
         /// <summary>Returns this frame with a different presentation while preserving its structural identity.</summary>
         public AsyncProfilerStitchedFrame WithPresentation(AsyncProfilerStitchedFramePresentation presentation) =>
@@ -470,6 +484,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             SegmentFrameIndex == other.SegmentFrameIndex &&
             SyncFrameKind == other.SyncFrameKind &&
             Presentation == other.Presentation &&
+            m_isDispatcherTailUnwind == other.m_isDispatcherTailUnwind &&
             ReferenceEquals(Context, other.Context) &&
             object.Equals(m_segmentOrDisplayName, other.m_segmentOrDisplayName);
 
@@ -487,6 +502,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 hash = (hash * 397) ^ SegmentFrameIndex;
                 hash = (hash * 397) ^ (int)SyncFrameKind;
                 hash = (hash * 397) ^ (int)Presentation;
+                hash = (hash * 397) ^ m_isDispatcherTailUnwind.GetHashCode();
                 hash = (hash * 397) ^ (Context?.GetHashCode() ?? 0);
                 return (hash * 397) ^ (m_segmentOrDisplayName?.GetHashCode() ?? 0);
             }
@@ -494,6 +510,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         // Synthetic labels reuse the segment reference slot to keep ordinary stitched frames compact.
         private readonly object m_segmentOrDisplayName;
+        private readonly bool m_isDispatcherTailUnwind;
     }
 
     /// <summary>The complete leaf-to-root output span emitted for one active async activation.</summary>
@@ -984,7 +1001,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             // identify an active async context, but it has no current frame with which to align a physical boundary.
             // In either case emit the sync stack verbatim so no continuation-wrapper or dispatcher frame is removed
             // without logical async frames to replace it.
-            if (segmentsRootToLeaf is null || segmentsRootToLeaf.Count == 0 || HasEmptySegment(segmentsRootToLeaf))
+            if (!HasUsableSegments(segmentsRootToLeaf))
             {
                 for (int i = 0; i < syncLeafToRoot.Count; i++)
                 {
@@ -1737,16 +1754,20 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             return true;
         }
 
-        private static bool HasEmptySegment(IReadOnlyList<AsyncProfilerCallStack> segments)
+        internal static bool HasUsableSegments(IReadOnlyList<AsyncProfilerCallStack> segments)
         {
+            if (segments == null || segments.Count == 0)
+            {
+                return false;
+            }
             for (int i = 0; i < segments.Count; i++)
             {
                 if (segments[i].Frames.FrameCount == 0)
                 {
-                    return true;
+                    return false;
                 }
             }
-            return false;
+            return true;
         }
 
         /// <summary>

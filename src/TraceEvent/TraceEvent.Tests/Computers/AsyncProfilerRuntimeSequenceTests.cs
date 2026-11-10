@@ -184,7 +184,7 @@ namespace TraceEventTests
                 ? AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult
                 : base.ClassifySynchronousFrame(frameName, isHostModule);
 
-        protected override AsyncProfilerRuntimeSequenceMatch MatchTaskCompletionPair(
+        protected override AsyncProfilerRuntimeSequenceMatch MatchTaskCompletion(
             AsyncProfilerCallStackTransformState context, int start, int end)
         {
             if (start == end || !IsKind(context.Frames[start], AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskRunContinuations))

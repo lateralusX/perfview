@@ -189,7 +189,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 return awaiterKind;
             }
 
-            if (method == "SetExistingTaskResult" && builderType == "AsyncTaskMethodBuilder")
+            if ((method == "SetExistingTaskResult" && builderType == "AsyncTaskMethodBuilder") ||
+                (method == "SetResult" &&
+                 (IsMethodOnType(frameName, "System.Runtime.CompilerServices.AsyncValueTaskMethodBuilder", method) ||
+                  IsMethodOnType(frameName, "System.Runtime.CompilerServices.AsyncValueTaskMethodBuilder`1", method))))
             {
                 return AsyncProfilerStitchSyncFrameKind.V1MethodBuilderCompletion;
             }
@@ -361,7 +364,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             kind == AsyncProfilerStitchSyncFrameKind.ProfilerInfrastructure ||
             kind == AsyncProfilerStitchSyncFrameKind.V1StateMachineBoxExecutionContextCallback ||
             kind == AsyncProfilerStitchSyncFrameKind.V1AwaiterRegistrationInfrastructure ||
-            kind == AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibAwaiterInfrastructure;
+            kind == AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibAwaiterInfrastructure ||
+            kind == AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskExceptionInfrastructure;
 
         /// <summary>Optional individual-helper policy, applied only outside protected/rejected spans.</summary>
         public virtual bool IsOptionalInfrastructureFrame(AsyncProfilerStitchedFrame frame, AsyncProfilerCallStackStitchBoundaryKind boundary) =>
@@ -383,22 +387,34 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <summary>
         /// Matches a layout inside [start, end). A rejection protects its candidate span; a match only establishes
         /// layout. The context validates captured module/profile identity, and transforms retain activation guards.
+        /// Wider runtime interiors are opt-in presentation evidence, never structural completion evidence.
         /// </summary>
         public AsyncProfilerRuntimeSequenceMatch MatchSequence(
-            AsyncProfilerRuntimeSequenceKind kind, AsyncProfilerCallStackTransformState context, int start, int end)
+            AsyncProfilerRuntimeSequenceKind kind, AsyncProfilerCallStackTransformState context, int start, int end,
+            bool allowRuntimeInteriors = false)
         {
+            AsyncProfilerRuntimeSequenceMatch match;
             switch (kind)
             {
-                case AsyncProfilerRuntimeSequenceKind.TaskCompletionPair:
-                    return MatchTaskCompletionPair(context, start, end);
+                case AsyncProfilerRuntimeSequenceKind.TaskCompletion:
+                    match = MatchTaskCompletion(context, start, end);
+                    return allowRuntimeInteriors && match.Length == 0
+                        ? MatchOptionalTaskCompletion(context, start, end) : match;
+                case AsyncProfilerRuntimeSequenceKind.TaskExceptionCompletion:
+                    return allowRuntimeInteriors
+                        ? MatchOptionalTaskExceptionCompletion(context, start, end) : default;
                 case AsyncProfilerRuntimeSequenceKind.TaskCompletionChain:
-                    return MatchTaskCompletionChain(context, start, end);
+                    match = MatchTaskCompletionChain(context, start, end);
+                    return allowRuntimeInteriors && match.Length == 0
+                        ? MatchOptionalTaskCompletionChain(context, start, end) : match;
                 case AsyncProfilerRuntimeSequenceKind.V2CompletionHandoff:
                     return MatchV2CompletionHandoff(context, start, end);
                 case AsyncProfilerRuntimeSequenceKind.V1Startup:
                     return MatchV1Startup(context, start, end);
                 case AsyncProfilerRuntimeSequenceKind.V1AwaitRegistration:
-                    return MatchV1AwaitRegistration(context, start, end);
+                    match = MatchV1AwaitRegistration(context, start, end);
+                    return allowRuntimeInteriors && match.Length == 0
+                        ? MatchOptionalV1AwaitRegistration(context, start, end) : match;
                 case AsyncProfilerRuntimeSequenceKind.ProfilerEntry:
                     return MatchProfilerEntry(context, start, end);
                 case AsyncProfilerRuntimeSequenceKind.RuntimeResumptionBridge:
@@ -406,6 +422,43 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 default:
                     throw new ArgumentOutOfRangeException(nameof(kind));
             }
+        }
+
+        /// <summary>Identifies optional sequence roots without authorizing removal of their callers or callees.</summary>
+        public virtual bool TryGetOptionalSequenceKind(
+            string rootName, AsyncProfilerStitchSyncFrameKind kind, out AsyncProfilerRuntimeSequenceKind sequence)
+        {
+            sequence = default;
+            string method = GetBareMethodName(rootName);
+            bool sourceCompletion = (method == "SetResult" || method == "SetException") &&
+                (IsMethodOnType(rootName, ValueTaskSourceCoreTypeName, method) ||
+                 IsPooledValueTaskBoxMethod(rootName, method));
+            if (kind == AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult ||
+                (method == "SetResult" && sourceCompletion))
+            {
+                sequence = AsyncProfilerRuntimeSequenceKind.TaskCompletion;
+                return true;
+            }
+            if (method == "SetException" &&
+                (kind == AsyncProfilerStitchSyncFrameKind.V1MethodBuilderInfrastructure || sourceCompletion))
+            {
+                sequence = AsyncProfilerRuntimeSequenceKind.TaskExceptionCompletion;
+                return true;
+            }
+            if (kind == AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskCompletionSourceSetResult)
+            {
+                sequence = AsyncProfilerRuntimeSequenceKind.TaskCompletionChain;
+                return true;
+            }
+            if (IsMethodOnType(rootName, "System.Runtime.CompilerServices.TaskAwaiter", "UnsafeOnCompletedInternal") ||
+                IsMethodOnType(rootName, "System.Runtime.CompilerServices.TaskAwaiter", "OnCompletedInternal") ||
+                (kind == AsyncProfilerStitchSyncFrameKind.V1AwaiterRegistrationInfrastructure &&
+                 IsKnownStateMachineBoxAwareAwaiter(rootName)))
+            {
+                sequence = AsyncProfilerRuntimeSequenceKind.V1AwaitRegistration;
+                return true;
+            }
+            return false;
         }
 
         /// <summary>Recognizes implementation-dependent box/dispatcher helper types, not splice boundaries.</summary>
@@ -512,7 +565,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     frame.SyncFrameKind == AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskRunContinuations ||
                     frame.SyncFrameKind == AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult;
                 AsyncProfilerRuntimeSequenceMatch pair = context.MatchRuntimeSequence(
-                    AsyncProfilerRuntimeSequenceKind.TaskCompletionPair, i, end);
+                    AsyncProfilerRuntimeSequenceKind.TaskCompletion, i, end);
                 candidate |= pair.IsMatch || pair.IsRejected;
                 pairMatched |= pair.IsMatch;
                 pairRejected |= pair.IsRejected;
@@ -583,7 +636,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// The common layout is RunContinuations/TrySetResult. Version-specific overrides can include precisely
         /// identified helpers and return a longer span; chains and completed-dispatch tails reuse that span.
         /// </summary>
-        protected virtual AsyncProfilerRuntimeSequenceMatch MatchTaskCompletionPair(
+        protected virtual AsyncProfilerRuntimeSequenceMatch MatchTaskCompletion(
             AsyncProfilerCallStackTransformState context, int start, int end) =>
             end - start >= 2 &&
             IsSyncFrameKind(context.Frames[start], AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskRunContinuations) &&
@@ -591,11 +644,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 ? AsyncProfilerRuntimeSequenceMatch.Match(2)
                 : default;
 
-        /// <summary>The common chain appends the public SetResult trigger to a profile-specific completion pair.</summary>
+        /// <summary>The common chain appends the public SetResult trigger to a profile-specific completion span.</summary>
         protected virtual AsyncProfilerRuntimeSequenceMatch MatchTaskCompletionChain(
             AsyncProfilerCallStackTransformState context, int start, int end)
         {
-            AsyncProfilerRuntimeSequenceMatch pair = MatchTaskCompletionPair(context, start, end);
+            AsyncProfilerRuntimeSequenceMatch pair = MatchTaskCompletion(context, start, end);
             if (!pair.IsMatch)
             {
                 return pair.IsRejected
@@ -610,7 +663,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         /// <summary>
-        /// A completed V2 tail contains a bridge, the profile's completion pair, and two distinct contract
+        /// A completed V2 tail contains a bridge, the profile's completion span, and two distinct contract
         /// dispatch-continuation methods. It does not establish ownership of an active V1 anchor or its caller.
         /// </summary>
         protected virtual AsyncProfilerRuntimeSequenceMatch MatchV2CompletionHandoff(
@@ -621,7 +674,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             {
                 return default;
             }
-            AsyncProfilerRuntimeSequenceMatch pair = MatchTaskCompletionPair(context, start + 1, end);
+            AsyncProfilerRuntimeSequenceMatch pair = MatchTaskCompletion(context, start + 1, end);
             if (!pair.IsMatch)
             {
                 return pair.IsRejected
@@ -641,7 +694,158 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 : default;
         }
 
+        /// <summary>Matches normal Task or value-task-source completion anchors with a wider runtime-owned interior.</summary>
+        protected virtual AsyncProfilerRuntimeSequenceMatch MatchOptionalTaskCompletion(
+            AsyncProfilerCallStackTransformState context, int start, int end)
+        {
+            if (context.TraceLog == null || end - start < 2)
+            {
+                return default;
+            }
+            if (IsSyncFrameKind(context.Frames[end - 1], AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult))
+            {
+                return IsSyncFrameKind(context.Frames[start], AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskRunContinuations)
+                    ? AsyncProfilerRuntimeSequenceMatch.Match(end - start) : default;
+            }
+            return MatchOptionalValueTaskSourceCompletion(context, start, end, "SetResult");
+        }
+
+        /// <summary>Matches fault/cancellation completion anchors without supplying structural completion evidence.</summary>
+        protected virtual AsyncProfilerRuntimeSequenceMatch MatchOptionalTaskExceptionCompletion(
+            AsyncProfilerCallStackTransformState context, int start, int end)
+        {
+            if (context.TraceLog == null || end - start < 2)
+            {
+                return default;
+            }
+            AsyncProfilerRuntimeSequenceMatch source = MatchOptionalValueTaskSourceCompletion(
+                context, start, end, "SetException");
+            if (source.IsMatch)
+            {
+                return source;
+            }
+            if (end - start < 3 ||
+                !IsSyncFrameKind(context.Frames[end - 1], AsyncProfilerStitchSyncFrameKind.V1MethodBuilderInfrastructure) ||
+                GetBareMethodName(GetFrameName(context, end - 1)) != "SetException")
+            {
+                return default;
+            }
+            string leaf = GetFrameName(context, start);
+            bool continuation = IsSyncFrameKind(context.Frames[start],
+                AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskRunContinuations);
+            bool canceled = IsMethodOnType(leaf, "System.Threading.Tasks.TaskExceptionHolder", "SetCancellationException");
+            if (!continuation && !canceled &&
+                !IsMethodOnType(leaf, "System.Threading.Tasks.TaskExceptionHolder", "AddFaultException"))
+            {
+                return default;
+            }
+            for (int i = start + 1; i < end - 1; i++)
+            {
+                string name = GetFrameName(context, i);
+                if (IsTaskMethod(name, canceled ? "TrySetCanceled" : "TrySetException") ||
+                    (continuation && IsTaskMethod(name, "TrySetCanceled")))
+                {
+                    return AsyncProfilerRuntimeSequenceMatch.Match(end - start);
+                }
+            }
+            return default;
+        }
+
+        /// <summary>Keeps the completion-source trigger as the root of an optionally widened Task completion span.</summary>
+        protected virtual AsyncProfilerRuntimeSequenceMatch MatchOptionalTaskCompletionChain(
+            AsyncProfilerCallStackTransformState context, int start, int end)
+        {
+            if (end - start < 4 ||
+                !IsSyncFrameKind(context.Frames[end - 1],
+                    AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskCompletionSourceSetResult) ||
+                !IsSyncFrameKind(context.Frames[start],
+                    AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskRunContinuations) ||
+                !IsSyncFrameKind(context.Frames[end - 2],
+                    AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult))
+            {
+                return default;
+            }
+            AsyncProfilerRuntimeSequenceMatch pair = context.MatchRuntimeSequence(
+                AsyncProfilerRuntimeSequenceKind.TaskCompletion, start, end - 1, allowRuntimeInteriors: true);
+            return pair.IsRejected ? AsyncProfilerRuntimeSequenceMatch.Reject(end - start) :
+                pair.IsMatch && pair.Length == end - start - 1
+                    ? AsyncProfilerRuntimeSequenceMatch.Match(end - start) : default;
+        }
+
+        /// <summary>Matches Task-backed or CoreLib pooled-ValueTask registration, never an arbitrary value-task source.</summary>
+        protected virtual AsyncProfilerRuntimeSequenceMatch MatchOptionalV1AwaitRegistration(
+            AsyncProfilerCallStackTransformState context, int start, int end)
+        {
+            if (context.TraceLog == null || end - start < 3)
+            {
+                return default;
+            }
+            if (MatchV1AwaitRegistration(context, end - 1, end).IsRejected)
+            {
+                return AsyncProfilerRuntimeSequenceMatch.Reject(end - start);
+            }
+            string leaf = GetFrameName(context, start);
+            string root = GetFrameName(context, end - 1);
+            bool task = IsTaskMethod(leaf, "AddTaskContinuation") &&
+                (IsMethodOnType(root, "System.Runtime.CompilerServices.TaskAwaiter", "UnsafeOnCompletedInternal") ||
+                 IsMethodOnType(root, "System.Runtime.CompilerServices.TaskAwaiter", "OnCompletedInternal"));
+            bool pooled = IsMethodOnType(leaf, ValueTaskSourceCoreTypeName, "OnCompleted") &&
+                IsKnownStateMachineBoxAwareAwaiter(root);
+            for (int i = start + 1; i < end - 1 && (task || pooled); i++)
+            {
+                string name = GetFrameName(context, i);
+                if ((task && (IsTaskMethod(name, "SetContinuationForAwait") || IsTaskMethod(name, "UnsafeSetContinuationForAwait"))) ||
+                    (pooled && IsPooledValueTaskBoxMethod(name, "OnCompleted")))
+                {
+                    return AsyncProfilerRuntimeSequenceMatch.Match(end - start);
+                }
+            }
+            return default;
+        }
+
         #region private
+
+        private static AsyncProfilerRuntimeSequenceMatch MatchOptionalValueTaskSourceCompletion(
+            AsyncProfilerCallStackTransformState context, int start, int end, string method)
+        {
+            string root = GetFrameName(context, end - 1);
+            bool source = IsMethodOnType(root, ValueTaskSourceCoreTypeName, method);
+            if (!source && !IsPooledValueTaskBoxMethod(root, method))
+            {
+                return default;
+            }
+            string leaf = GetFrameName(context, start);
+            if (!IsMethodOnType(leaf, ValueTaskSourceCoreTypeName, "SignalCompletion") &&
+                !IsMethodOnType(leaf, "System.Threading.Tasks.Sources.ManualResetValueTaskSourceCoreShared",
+                    "InvokeContinuationWithContext"))
+            {
+                return default;
+            }
+            if (source)
+            {
+                return AsyncProfilerRuntimeSequenceMatch.Match(end - start);
+            }
+            for (int i = start + 1; i < end - 1; i++)
+            {
+                if (IsMethodOnType(GetFrameName(context, i), ValueTaskSourceCoreTypeName, method))
+                {
+                    return AsyncProfilerRuntimeSequenceMatch.Match(end - start);
+                }
+            }
+            return default;
+        }
+
+        private static string GetFrameName(AsyncProfilerCallStackTransformState context, int index) =>
+            AsyncProfilerCallStackStitchBoundary.NormalizeMethodName(
+                context.TraceLog.CodeAddresses[context.Frames[index].CodeAddress].FullMethodName);
+
+        private static bool IsTaskMethod(string frameName, string method) =>
+            IsMethodOnType(frameName, "System.Threading.Tasks.Task", method) ||
+            IsMethodOnType(frameName, "System.Threading.Tasks.Task`1", method);
+
+        private static bool IsPooledValueTaskBoxMethod(string frameName, string method) =>
+            IsMethodOnType(frameName, "System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder`1+StateMachineBox", method) ||
+            IsMethodOnType(frameName, "System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder`1", method, "StateMachineBox");
 
         private static bool IsYieldAwaitableMethod(string methodName)
         {
@@ -687,14 +891,55 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 return false;
             }
 
+            return IsV1DispatcherTypeName(declaringType);
+        }
+
+        private static bool IsV1DispatcherImplementingType(string frameName)
+        {
+            if (!IsRuntimeCompilerServicesMethod(frameName))
+            {
+                return false;
+            }
+            int start = (IsHostModuleQualifiedFrame(frameName) ? HostModuleName.Length + 1 : 0) +
+                "System.Runtime.CompilerServices.".Length;
+            int depth = 0;
+            for (int i = start; i < frameName.Length; i++)
+            {
+                char c = frameName[i];
+                if (c == '[')
+                {
+                    depth++;
+                }
+                else if (c == ']')
+                {
+                    if (--depth < 0) { return false; }
+                }
+                else if (depth == 0 && c == '+')
+                {
+                    start = i + 1;
+                }
+                else if (depth == 0 && c == '.')
+                {
+                    // The first member separator follows the implementing type, even for interface members.
+                    return IsV1DispatcherTypeName(frameName.Substring(start, i - start));
+                }
+                else if (depth == 0 && c == '(')
+                {
+                    return false;
+                }
+            }
+            return false;
+        }
+
+        private static bool IsV1DispatcherTypeName(string declaringType)
+        {
             int genericArity = declaringType.IndexOf('`');
             if (genericArity >= 0)
             {
                 declaringType = declaringType.Substring(0, genericArity);
             }
-
             return declaringType.EndsWith(AsyncStateMachineBoxTypeSuffix, StringComparison.Ordinal) ||
-                   declaringType == AsyncStateMachineDispatcherTypeName;
+                declaringType == AsyncStateMachineDispatcherTypeName;
         }
 
         private static bool IsKnownV1MethodBuilderType(string builderType)
@@ -785,6 +1030,16 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 {
                     return AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult;
                 }
+                if (method == "TrySetException" || method == "AddException")
+                {
+                    return AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskExceptionInfrastructure;
+                }
+            }
+
+            if (method == "AddFaultException" &&
+                IsMethodOnType(frameName, "System.Threading.Tasks.TaskExceptionHolder", method))
+            {
+                return AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskExceptionInfrastructure;
             }
 
             if ((IsMethodOnType(frameName, "System.Threading.Tasks.TaskCompletionSource", method) ||
@@ -855,6 +1110,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             int typeStart = IsHostModuleQualifiedFrame(frameName) ? HostModuleName.Length + 1 : 0;
             int typeEnd = typeStart + profilerType.Length;
             if (IsCommonV1DispatcherInfrastructure(frameName) ||
+                IsV1DispatcherImplementingType(frameName) ||
                 IsMethodOnType(frameName, "System.Runtime.CompilerServices.AsyncStateMachineDiagnostics`1", member) ||
                 IsMethodOnType(frameName, "System.Runtime.CompilerServices.AsyncProfilerEventSource", member) ||
                 IsMethodOnType(frameName, profilerType, member) ||
@@ -947,6 +1203,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         /// <summary>The common box-family suffix, retained separately from profiler boundary contracts.</summary>
+        private const string ValueTaskSourceCoreTypeName = "System.Threading.Tasks.Sources.ManualResetValueTaskSourceCore`1";
         private const string AsyncStateMachineBoxTypeSuffix = "AsyncStateMachineBox";
 
         private static readonly char[] s_versionSuffixes = { '-', '+', ' ' };

@@ -127,6 +127,142 @@ namespace TraceEventTests
             }
         }
 
+        [Theory]
+        [InlineData(0, 0, false)]
+        [InlineData(0, 3, false)]
+        [InlineData(-1, 4, false)]
+        [InlineData(-1, 4, true)]
+        [InlineData(8, 4, false)]
+        [InlineData(int.MaxValue, 4, false)]
+        public void InvalidEventEnvelopes_AreLoggedAndRecoverWithoutLosingFinalizedCoverage(
+            int declaredLength, int payloadSize, bool keepRawEvents)
+        {
+            const int ProcessId = 1234;
+            const int OtherProcessId = 2345;
+            const int OsThreadId = 5000;
+            const int GhostOsThreadId = 6000;
+            const int OtherOsThreadId = 7000;
+            const long ThreadStreamIndex = 7;
+            const long OtherThreadStreamIndex = 8;
+            const long StartQpc = 100_000;
+            var malformed = new byte[payloadSize];
+            Array.Copy(BitConverter.GetBytes(declaredLength), malformed, Math.Min(sizeof(int), payloadSize));
+            var writer = new EventPipeWriterV6();
+            writer.WriteHeaders();
+            writer.WriteMetadataBlock(
+                new EventMetadata(1, AsyncProfilerTraceEventParser.ProviderName, "AsyncEvents", AsyncProfilerTraceEventParser.AsyncEventsEventId),
+                new EventMetadata(2, "TestSampleProfiler", "Sample", 1));
+            writer.WriteThreadBlock(w =>
+            {
+                w.WriteThreadEntry(ThreadStreamIndex, threadId: OsThreadId, processId: ProcessId);
+                w.WriteThreadEntry(OtherThreadStreamIndex, threadId: OtherOsThreadId, processId: OtherProcessId);
+            });
+            writer.WriteEventBlock(w =>
+            {
+                int sequenceNumber = 0;
+                WriteEventOptions Options(long timestamp, long threadStreamIndex = ThreadStreamIndex) =>
+                    new WriteEventOptions
+                    {
+                        MetadataId = 1,
+                        ThreadIndexOrId = threadStreamIndex,
+                        CaptureThreadIndexOrId = threadStreamIndex,
+                        SequenceNumber = threadStreamIndex == ThreadStreamIndex ? ++sequenceNumber : 1,
+                        Timestamp = timestamp,
+                        IsSorted = true,
+                    };
+                void WriteBuffer(byte[] buffer, long timestamp, long threadStreamIndex = ThreadStreamIndex)
+                {
+                    w.WriteEventBlob(Options(timestamp, threadStreamIndex), p =>
+                    {
+                        p.Write(buffer.Length);
+                        p.Write(buffer);
+                        p.Write(0x12345678); // Future outer fields must not change the declared buffer's extent.
+                    });
+                }
+                WriteEventOptions sampleOptions = Options(StartQpc + 5);
+                sampleOptions.MetadataId = 2;
+                w.WriteEventBlob(sampleOptions, p => { });
+                WriteBuffer(new AsyncProfilerBufferBuilder(OsThreadId, startQpc: StartQpc)
+                    .Armed(StartQpc)
+                    .ResumeStack(StartQpc + 10, 1, new ulong[] { 0xA }).Suspend(StartQpc + 15)
+                    .ResumeStack(StartQpc + 20, 2, new ulong[] { 0xB }).Build(), StartQpc + 30);
+                WriteBuffer(new AsyncProfilerBufferBuilder(GhostOsThreadId, startQpc: StartQpc)
+                    .Reset(StartQpc).ResumeStack(StartQpc + 20, 3, new ulong[] { 0xC }).Build(), StartQpc + 40);
+                WriteBuffer(new AsyncProfilerBufferBuilder(OtherOsThreadId, startQpc: StartQpc)
+                    .Armed(StartQpc).ResumeStack(StartQpc + 20, 1, new ulong[] { 0xD }).Build(),
+                    StartQpc + 45, OtherThreadStreamIndex);
+                w.WriteEventBlob(Options(StartQpc + 50), p => p.Write(malformed));
+                WriteBuffer(new AsyncProfilerBufferBuilder(OsThreadId, startQpc: StartQpc)
+                    .Reset(StartQpc + 60).ResumeStack(StartQpc + 61, 4, new ulong[] { 0xE })
+                    .Suspend(StartQpc + 65).Build(), StartQpc + 70);
+                WriteBuffer(new AsyncProfilerBufferBuilder(GhostOsThreadId, startQpc: StartQpc)
+                    .Reset(StartQpc + 60).ResumeStack(StartQpc + 61, 5, new ulong[] { 0xF })
+                    .Suspend(StartQpc + 65).Build(), StartQpc + 75);
+                WriteBuffer(new AsyncProfilerBufferBuilder(OsThreadId, startQpc: StartQpc)
+                    .Armed(StartQpc + 80).ResumeStack(StartQpc + 81, 6, new ulong[] { 0xAA })
+                    .Suspend(StartQpc + 90).Build(), StartQpc + 100);
+                WriteBuffer(new AsyncProfilerBufferBuilder(GhostOsThreadId, startQpc: StartQpc)
+                    .ResumeStack(StartQpc + 81, 7, new ulong[] { 0xBB }).Suspend(StartQpc + 82)
+                    .Reset(StartQpc + 83).ResumeStack(StartQpc + 84, 8, new ulong[] { 0xCC })
+                    .Suspend(StartQpc + 95).Build(), StartQpc + 105);
+            });
+            writer.WriteEndBlock();
+
+            void AssertCoverage(TraceLog traceLog)
+            {
+                var query = new AsyncProfilerCallStackComputer(traceLog);
+                AsyncProfilerCallStack finalized = Assert.Single(query.GetCallStacks(ProcessId, (ulong)OsThreadId, StartQpc + 12));
+                Assert.Equal(0xAUL, finalized.Frames.MethodIdAt(0));
+                Assert.Equal(StartQpc + 15, finalized.EndQpc);
+                foreach (int threadId in new[] { OsThreadId, GhostOsThreadId })
+                {
+                    Assert.Empty(query.GetCallStacks(ProcessId, (ulong)threadId, StartQpc + 25));
+                    Assert.Empty(query.GetCallStacks(ProcessId, (ulong)threadId, StartQpc + 62));
+                }
+                Assert.Empty(query.GetCallStacks(ProcessId, (ulong)GhostOsThreadId, StartQpc + 81));
+                Assert.Equal(0xAAUL,
+                    Assert.Single(query.GetCallStacks(ProcessId, (ulong)OsThreadId, StartQpc + 85)).Frames.MethodIdAt(0));
+                Assert.Equal(0xCCUL,
+                    Assert.Single(query.GetCallStacks(ProcessId, (ulong)GhostOsThreadId, StartQpc + 85)).Frames.MethodIdAt(0));
+                AsyncProfilerCallStack unaffected = Assert.Single(query.GetCallStacks(OtherProcessId, (ulong)OtherOsThreadId, StartQpc + 85));
+                Assert.Equal(0xDUL, unaffected.Frames.MethodIdAt(0));
+                Assert.Equal(long.MaxValue, unaffected.EndQpc);
+            }
+
+            string nettracePath = Path.Combine(Path.GetTempPath(), $"asyncprofiler_envelopes_{Guid.NewGuid():N}.nettrace");
+            string etlxPath = null;
+            try
+            {
+                File.WriteAllBytes(nettracePath, writer.ToArray());
+                using (var conversionLog = new StringWriter())
+                {
+                    etlxPath = TraceLog.CreateFromEventPipeDataFile(nettracePath, null,
+                        new TraceLogOptions { ConversionLog = conversionLog, KeepAsyncProfilerEvents = keepRawEvents });
+                    string diagnostics = conversionLog.ToString();
+                    Assert.Contains("AsyncProfiler reported 1 parse errors", diagnostics);
+                    Assert.Contains("AsyncProfiler PID 1234, process index", diagnostics);
+                    Assert.Contains("Invalid or truncated AsyncEvents envelope.", diagnostics);
+                }
+                using (var traceLog = new TraceLog(etlxPath))
+                {
+                    AssertCoverage(traceLog);
+                    Assert.True(traceLog.ReleaseAsyncProfilerCallStacks());
+                    AssertCoverage(traceLog);
+                }
+            }
+            finally
+            {
+                if (File.Exists(nettracePath))
+                {
+                    File.Delete(nettracePath);
+                }
+                if (etlxPath != null && File.Exists(etlxPath))
+                {
+                    File.Delete(etlxPath);
+                }
+            }
+        }
+
         [Fact]
         public void EndToEnd_CallStacks_RoundTripThroughTraceLog()
         {

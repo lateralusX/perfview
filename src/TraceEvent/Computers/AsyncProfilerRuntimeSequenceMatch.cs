@@ -8,13 +8,14 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// <summary>Implementation-dependent layouts recognized by captured-runtime profiles.</summary>
     internal enum AsyncProfilerRuntimeSequenceKind
     {
-        TaskCompletionPair,
+        TaskCompletion,
         TaskCompletionChain,
         V2CompletionHandoff,
         V1Startup,
         V1AwaitRegistration,
         ProfilerEntry,
         RuntimeResumptionBridge,
+        TaskExceptionCompletion,
     }
 
     /// <summary>Replaceable presentation stages; flags and execution order remain pipeline policy.</summary>
