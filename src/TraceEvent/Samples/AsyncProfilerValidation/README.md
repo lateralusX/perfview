@@ -113,20 +113,21 @@ The following paths are relative to `src\TraceEvent`:
 
 | Layer | Implementation | Main tests |
 |---|---|---|
-| Buffer decoding and manifest framing | `Parsers\AsyncProfilerTraceEventParser.cs`, `Parsers\AsyncProfilerTypes.cs` | `TraceEvent.Tests\Parsing\AsyncProfilerParsing.cs` |
-| Activation lifecycle and completion timelines | `Computers\AsyncProfilerIndexBuilder.cs` | `AsyncProfilerIndexBuilderTests.cs` |
-| Public activation and frame views | `Computers\AsyncProfilerCallStack.cs`, `Computers\AsyncProfilerCallStackFrame.cs`, `Computers\AsyncProfilerCallStackKind.cs` | `AsyncProfilerIndexBuilderTests.cs`, `AsyncProfilerStitchIntegrationTests.cs` |
-| Internal frame storage and thread identity | `Computers\AsyncProfilerCallStackFrames.cs`, `Computers\AsyncProfilerThreadKey.cs` | `AsyncProfilerIndexBuilderTests.cs`, `AsyncProfilerTraceLogTests.cs` |
-| Persisted/lazy index and symbol binding | `Computers\AsyncProfilerCallStacksIndex.cs`, `TraceLog.cs` | `AsyncProfilerTraceLogTests.cs` |
-| Public segment queries and standalone reconstruction | `Computers\AsyncProfilerCallStackComputer.cs`, `Computers\AsyncProfilerCallStackSourceBuilder.cs` | `AsyncProfilerTraceLogTests.cs`, `AsyncProfilerStitchIntegrationTests.cs` |
-| Structural matching, boundaries, missing roots | `Computers\AsyncProfilerCallStackStitcher.cs`, `Computers\AsyncProfilerCallStackStitchBoundary.cs` | `AsyncProfilerCallStackStitcherTests.cs`, `AsyncProfilerCallStackStitchBoundaryTests.cs` |
-| Runtime ownership and sequence recognition | `Computers\AsyncProfilerRuntimeRuleProfile*.cs`, `Computers\AsyncProfilerRuntimeSequenceMatch.cs` | `AsyncProfilerRuntimeRuleProfileTests.cs`, `AsyncProfilerRuntimeSequenceTests.cs`, `AsyncProfilerRuntimeProfileExtensibilityTests.cs` |
-| Presentation and provenance emission | `Computers\AsyncCallStackTransforms.cs`, `Computers\AsyncProfilerCallStackTransformPipeline.cs`, `Computers\AsyncProfilerCallStackTransformPasses.cs`, `Computers\AsyncProfilerCallStackSourceBuilderCore.cs`, `TraceEventStacks.cs` | `AsyncProfilerCallStackTransformPipelineTests.cs`, `AsyncProfilerStitchIntegrationTests.cs` |
+| Buffer decoding and manifest framing | `AsyncProfiler\AsyncProfilerTraceEventParser.cs`, `AsyncProfiler\AsyncProfilerTypes.cs` | `TraceEvent.Tests\AsyncProfiler\AsyncProfilerParsing.cs` |
+| Activation lifecycle and completion timelines | `AsyncProfiler\AsyncProfilerIndexBuilder.cs` | `AsyncProfilerIndexBuilderTests.cs` |
+| Public activation and frame views | `AsyncProfiler\AsyncProfilerCallStack.cs`, `AsyncProfiler\AsyncProfilerCallStackFrame.cs`, `AsyncProfiler\AsyncProfilerCallStackKind.cs` | `AsyncProfilerIndexBuilderTests.cs`, `AsyncProfilerStitchIntegrationTests.cs` |
+| Internal frame storage and thread identity | `AsyncProfiler\AsyncProfilerCallStackFrames.cs`, `AsyncProfiler\AsyncProfilerThreadKey.cs` | `AsyncProfilerIndexBuilderTests.cs`, `AsyncProfilerTraceLogTests.cs` |
+| Persisted/lazy index and symbol binding | `AsyncProfiler\AsyncProfilerCallStacksIndex.cs`, `TraceLog.cs` | `AsyncProfilerTraceLogTests.cs` |
+| Public segment queries and standalone reconstruction | `AsyncProfiler\AsyncProfilerCallStackComputer.cs`, `AsyncProfiler\AsyncProfilerCallStackSourceBuilder.cs` | `AsyncProfilerTraceLogTests.cs`, `AsyncProfilerStitchIntegrationTests.cs` |
+| Structural matching, boundaries, missing roots | `AsyncProfiler\AsyncProfilerCallStackStitcher.cs`, `AsyncProfiler\AsyncProfilerCallStackStitchBoundary.cs` | `AsyncProfilerCallStackStitcherTests.cs`, `AsyncProfilerCallStackStitchBoundaryTests.cs` |
+| Shared symbol and generated-name parsing | `AsyncProfiler\AsyncProfilerMethodNames.cs` | `AsyncProfilerMethodNamesTests.cs` |
+| Runtime ownership and sequence recognition | `AsyncProfiler\AsyncProfilerRuntimeRuleProfile*.cs`, `AsyncProfiler\AsyncProfilerRuntimeSequenceMatch.cs` | `AsyncProfilerRuntimeRuleProfileTests.cs`, `AsyncProfilerRuntimeSequenceTests.cs`, `AsyncProfilerRuntimeProfileExtensibilityTests.cs` |
+| Presentation and provenance emission | `AsyncProfiler\AsyncCallStackTransforms.cs`, `AsyncProfiler\AsyncProfilerCallStackTransformPipeline.cs`, `AsyncProfiler\AsyncProfilerCallStackTransformPasses.cs`, `AsyncProfiler\AsyncProfilerCallStackSourceBuilderCore.cs`, `TraceEventStacks.cs` | `AsyncProfilerCallStackTransformPipelineTests.cs`, `AsyncProfilerStitchIntegrationTests.cs` |
 | End-to-end sample projection | `Computers\SampleProfilerThreadTimeComputer.cs`, `Computers\ThreadTimeComputer.cs` | `AsyncProfilerStitchIntegrationTests.cs` |
-| Speedscope output | `Stacks\SpeedScopeStackSourceWriter.cs`, `Stacks\StackSourceWriterHelper.cs` | `TraceEvent.Tests\Speedscope\SpeedScopeExporterTests.cs` |
+| Speedscope output | `Stacks\SpeedScopeStackSourceWriter.cs`, `Stacks\StackSourceWriterHelper.cs` | `AsyncCallStackExporterTests.cs`, `TraceEvent.Tests\Speedscope\SpeedScopeExporterTests.cs` |
 
 Unless qualified otherwise, test filenames in the table live under
-`src\TraceEvent\TraceEvent.Tests\Computers`.
+`src\TraceEvent\TraceEvent.Tests\AsyncProfiler`.
 The integration suite builds synthetic EventPipe traces, converts and reopens
 ETLX, and runs the real computers. Reuse its fixtures rather than building a
 parallel test-only stitcher. Its default callstack kind is RuntimeAsync: set
@@ -1234,8 +1235,8 @@ The helper writes:
 | `<view>.emitted.jsonl` | Timestamp-candidate generated stacks, original export ordinals, actual metrics, full names/roots, code-address identities, and `TryGetAsyncProfilerCallStackFrameInfo` role flags/captured state |
 | `<view>.summary.json`, `probe.summary.json` | Selected physical/projected counts, callback counts, stitching initialization, symbol policy, and aggregate diagnostics |
 
-Array order is leaf-to-root for frames and outermost-to-innermost for active
-intervals. `CapturedState` and emitted `Async.State` retain the captured value,
+Frame arrays and active-interval arrays are both leaf-to-root.
+`CapturedState` and emitted `Async.State` retain the captured value,
 not a live state-field read. `RecordedCompleted` is the event-derived sum,
 **not** the stitcher's inferred wrapper/physical fallback result. Use the
 captured wrapper base/reset counts, classified wrapper slot, and structural
@@ -1315,7 +1316,7 @@ For each returned activation, dump:
 
 - `Thread`, `DispatcherId`, `Depth`, `FramesIndex`, `StartQpc`, `EndQpc`,
   `Frames.Kind`, `ContinuationIndexBase`, and `WrapperCount`.
-- Every captured frame's ordinal, `MethodIdAt(i)`, `FrameStateAt(i)`,
+- Every captured frame's ordinal, `InstructionPointerAt(i)`, `FrameStateAt(i)`,
   `CodeAddressAt(i)`, resolved method/module, and unresolved status.
 - `GetMethodCompletedFrameCount(qpc)`,
   `GetExceptionCompletedFrameCount(qpc)`, `GetCompletedFrameCount(qpc)`,
@@ -1331,8 +1332,8 @@ captured frame count. The wrapper overload takes a physical wrapper slot for
 that activation, not an ordinal in the captured frame list.
 
 Intervals are half-open `[StartQpc, EndQpc)`; open-at-EOF intervals end at
-`long.MaxValue`. Activations are returned outermost-to-innermost; captured method
-frames are leaf-first. A dispatcher may have multiple resume intervals:
+`long.MaxValue`. Call stacks are returned leaf-to-root; captured method
+frames are leaf-to-root. A dispatcher may have multiple resume intervals:
 dispatcher ID alone is not an activation identity.
 
 ### Inspect structural and presentation evidence

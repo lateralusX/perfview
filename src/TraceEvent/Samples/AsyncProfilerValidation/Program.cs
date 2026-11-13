@@ -193,7 +193,10 @@ namespace AsyncProfilerValidation
             {
                 using var log = new TraceLog(etlx);
                 using var symbols = new SymbolReader(Console.Error);
-                if (kernelCpu) { InputQuality.ResolveRuntimeSymbols(log, symbols, targetPid); }
+                if (kernelCpu)
+                {
+                    InputQuality.ResolveRuntimeSymbols(log, symbols, targetPid);
+                }
                 var source = new MutableTraceEventStackSource(log) { OnlyManagedCodeStacks = !kernelCpu };
                 var computer = CreateComputer(log, symbols, view, enableParentContexts, kernelCpu);
                 computer.TargetPid = targetPid;
@@ -258,7 +261,10 @@ namespace AsyncProfilerValidation
             using (var log = new TraceLog(etlx))
             using (var symbols = new SymbolReader(Console.Error))
             {
-                if (kernelCpu) { InputQuality.ResolveRuntimeSymbols(log, symbols, targetPid); }
+                if (kernelCpu)
+                {
+                    InputQuality.ResolveRuntimeSymbols(log, symbols, targetPid);
+                }
                 string path = Path.Combine(output, "async-timeline.speedscope.json");
                 if (asyncSampleInterval.HasValue)
                 {
@@ -301,7 +307,10 @@ namespace AsyncProfilerValidation
             using (var symbols = new SymbolReader(Console.Error))
             using (var raw = new StreamWriter(Path.Combine(output, "physical-and-index.jsonl")))
             {
-                if (kernelCpu) { InputQuality.ResolveRuntimeSymbols(log, symbols, pid); }
+                if (kernelCpu)
+                {
+                    InputQuality.ResolveRuntimeSymbols(log, symbols, pid);
+                }
                 var callStackComputer = new AsyncProfilerCallStackComputer(log);
                 void OnSample(TraceEvent data)
                 {
@@ -377,7 +386,10 @@ namespace AsyncProfilerValidation
             {
                 using var log = new TraceLog(etlx);
                 using var symbols = new SymbolReader(Console.Error);
-                if (kernelCpu) { InputQuality.ResolveRuntimeSymbols(log, symbols, pid); }
+                if (kernelCpu)
+                {
+                    InputQuality.ResolveRuntimeSymbols(log, symbols, pid);
+                }
                 using var transforms = new StreamWriter(Path.Combine(output, view.Name + ".transforms.jsonl"));
                 using var emitted = new StreamWriter(Path.Combine(output, view.Name + ".emitted.jsonl"));
                 var source = new MutableTraceEventStackSource(log) { OnlyManagedCodeStacks = !kernelCpu };
@@ -531,7 +543,10 @@ namespace AsyncProfilerValidation
             {
                 set
                 {
-                    if (m_kernel != null) { m_kernel.TraceAsyncProfilerCallStackSteps = value; }
+                    if (m_kernel != null)
+                    {
+                        m_kernel.TraceAsyncProfilerCallStackSteps = value;
+                    }
                     else { m_eventPipe.TraceAsyncProfilerCallStackSteps = value; }
                 }
             }
@@ -608,7 +623,7 @@ namespace AsyncProfilerValidation
                 Frames = Enumerable.Range(0, activation.Frames.FrameCount).Select(i => new
                 {
                     Ordinal = i,
-                    MethodId = "0x" + activation.Frames.MethodIdAt(i).ToString("X", CultureInfo.InvariantCulture),
+                    MethodId = "0x" + activation.Frames.InstructionPointerAt(i).ToString("X", CultureInfo.InvariantCulture),
                     CapturedState = activation.Frames.FrameStateAt(i),
                     Address = AddressInfo(log, activation.Frames.CodeAddressAt(i))
                 }).ToArray()

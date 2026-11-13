@@ -24,21 +24,33 @@ namespace AsyncProfilerValidation
             using var log = new TraceLog(etlx);
             using var events = log.Events.GetSource();
             using var symbols = new SymbolReader(Console.Error);
-            if (kernelCpu) { ResolveRuntimeSymbols(log, symbols, pid); }
+            if (kernelCpu)
+            {
+                ResolveRuntimeSymbols(log, symbols, pid);
+            }
             var builder = new AsyncProfilerIndexBuilder();
             var errors = new List<string>();
             builder.ParseError += (process, error) =>
             {
-                if (errors.Count < 20) { errors.Add($"ProcessIndex {(int)process}: {error}"); }
+                if (errors.Count < 20)
+                {
+                    errors.Add($"ProcessIndex {(int)process}: {error}");
+                }
             };
             var counts = new EventCounts();
             var manifests = new Dictionary<ProcessIndex, Manifest>();
             long buffers = 0;
             new AsyncProfilerTraceEventParser(events).AsyncEvents += data =>
             {
-                if (pid != 0 && data.ProcessID != pid) { return; }
+                if (pid != 0 && data.ProcessID != pid)
+                {
+                    return;
+                }
                 TraceProcess process = data.Process();
-                if (process == null) { throw new InvalidDataException("Async buffer has no process-instance identity."); }
+                if (process == null)
+                {
+                    throw new InvalidDataException("Async buffer has no process-instance identity.");
+                }
                 buffers++;
                 if (!manifests.TryGetValue(process.ProcessIndex, out var manifest))
                 {
@@ -54,9 +66,15 @@ namespace AsyncProfilerValidation
             using var physical = new StreamWriter(Path.Combine(output, "cpu-anchors.jsonl"));
             void OnSample(TraceEvent data)
             {
-                if (pid != 0 && data.ProcessID != pid) { return; }
+                if (pid != 0 && data.ProcessID != pid)
+                {
+                    return;
+                }
                 TraceThread thread = data.Thread();
-                if (thread == null) { throw new InvalidDataException("CPU sample has no thread/process-instance identity."); }
+                if (thread == null)
+                {
+                    throw new InvalidDataException("CPU sample has no thread/process-instance identity.");
+                }
 #pragma warning disable CS0618 // Preserve the exact kernel/EventPipe anchor for forensic correlation.
                 long qpc = data.TimeStampQPC;
 #pragma warning restore CS0618
@@ -68,7 +86,10 @@ namespace AsyncProfilerValidation
                     var address = log.CodeAddresses[index];
                     frames.Add(new { CodeAddressIndex = (int)index, address.Address, address.FullMethodName, address.ModuleFilePath });
                 }
-                if (frames.Count != 0) { withPhysicalStack++; }
+                if (frames.Count != 0)
+                {
+                    withPhysicalStack++;
+                }
                 physical.WriteLine(JsonSerializer.Serialize(new
                 {
                     EventIndex = (uint)data.EventIndex, TimestampQpc = qpc,
@@ -76,7 +97,10 @@ namespace AsyncProfilerValidation
                     ProcessIndex = (int)thread.Process.ProcessIndex, Frames = frames
                 }));
             }
-            if (kernelCpu) { events.Kernel.PerfInfoSample += OnSample; }
+            if (kernelCpu)
+            {
+                events.Kernel.PerfInfoSample += OnSample;
+            }
             else { new SampleProfilerTraceEventParser(events).ThreadSample += OnSample; }
             events.Process();
             builder.Finish();
@@ -96,7 +120,10 @@ namespace AsyncProfilerValidation
                 foreach (var sample in samples)
                 {
                     var active = persisted?.GetCallStacks(sample.Thread, sample.Qpc);
-                    if (active == null || active.Count == 0) { continue; }
+                    if (active == null || active.Count == 0)
+                    {
+                        continue;
+                    }
                     withAsync++;
                     foreach (var activation in active)
                     {
@@ -114,7 +141,7 @@ namespace AsyncProfilerValidation
                                 var address = activation.Frames.CodeAddressAt(i);
                                 return new
                                 {
-                                    MethodId = activation.Frames.MethodIdAt(i),
+                                    MethodId = activation.Frames.InstructionPointerAt(i),
                                     State = activation.Frames.FrameStateAt(i), CodeAddressIndex = (int)address,
                                     Name = address == CodeAddressIndex.Invalid ? null : log.CodeAddresses[address].FullMethodName
                                 };
@@ -167,7 +194,10 @@ namespace AsyncProfilerValidation
             var seen = new HashSet<ModuleFileIndex>();
             foreach (TraceProcess process in log.Processes)
             {
-                if (pid != 0 && process.ProcessID != pid) { continue; }
+                if (pid != 0 && process.ProcessID != pid)
+                {
+                    continue;
+                }
                 foreach (TraceLoadedModule loaded in process.LoadedModules)
                 {
                     TraceModuleFile module = loaded.ModuleFile;
@@ -193,7 +223,10 @@ namespace AsyncProfilerValidation
                 Add(unchecked((long)sample.Thread.OsThreadId));
                 var active = index?.GetCallStacks(sample.Thread, sample.Qpc);
                 Add(active?.Count ?? 0);
-                if (active == null) { continue; }
+                if (active == null)
+                {
+                    continue;
+                }
                 foreach (var activation in active)
                 {
                     Add(unchecked((long)activation.DispatcherId));
@@ -209,7 +242,7 @@ namespace AsyncProfilerValidation
                     Add(activation.Frames.FrameCount);
                     for (int i = 0; i < activation.Frames.FrameCount; i++)
                     {
-                        Add(unchecked((long)activation.Frames.MethodIdAt(i)));
+                        Add(unchecked((long)activation.Frames.InstructionPointerAt(i)));
                         Add(activation.Frames.FrameStateAt(i));
                     }
                 }

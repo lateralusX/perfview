@@ -81,7 +81,10 @@ namespace Microsoft.Diagnostics.Tracing.Stacks.Formats
         public static void WriteAsyncCallStacksAsJson(TraceLog traceLog, string filePath,
             TimeSpan sampleInterval, int processId = 0)
         {
-            if (traceLog == null) { throw new ArgumentNullException(nameof(traceLog)); }
+            if (traceLog == null)
+            {
+                throw new ArgumentNullException(nameof(traceLog));
+            }
             double ticks = sampleInterval.Ticks * (traceLog.QPCFreq / (double)TimeSpan.TicksPerSecond);
             if (ticks < 1 || ticks >= long.MaxValue)
             {
@@ -117,7 +120,7 @@ namespace Microsoft.Diagnostics.Tracing.Stacks.Formats
                     ids = new int[context.Frames.FrameCount];
                     for (int i = 0; i < ids.Length; i++)
                     {
-                        if (context.Frames.MethodIdAt(i) == 0)
+                        if (context.Frames.InstructionPointerAt(i) == 0)
                         {
                             ids[i] = -1;
                             continue;
@@ -217,7 +220,10 @@ namespace Microsoft.Diagnostics.Tracing.Stacks.Formats
             var previous = new List<(AsyncProfilerCallStack Context, int Slot, int Id)>();
             var current = new List<(AsyncProfilerCallStack Context, int Slot, int Id)>();
             var result = new List<ProfileEvent>();
-            if (changes.Count == 0) { return result; }
+            if (changes.Count == 0)
+            {
+                return result;
+            }
             bool sampled = sampleIntervalQpc > 0;
             long qpc = sampled ? startQpc : changes[0].Qpc;
             int position = 0;
@@ -253,7 +259,7 @@ namespace Microsoft.Diagnostics.Tracing.Stacks.Formats
                     // Progress counts captured slots, including hidden zero-IP sentinels.
                     for (int slot = state.Context.Frames.FrameCount - 1; slot >= state.Completed; slot--)
                     {
-                        if (state.Context.Frames.MethodIdAt(slot) != 0)
+                        if (state.Context.Frames.InstructionPointerAt(slot) != 0)
                         {
                             current.Add((state.Context, slot, frameId(state.Context, slot)));
                         }
@@ -281,12 +287,18 @@ namespace Microsoft.Diagnostics.Tracing.Stacks.Formats
                 current = temporary;
                 if (sampled)
                 {
-                    if (previous.Count == 0 && position == changes.Count) { break; }
+                    if (previous.Count == 0 && position == changes.Count)
+                    {
+                        break;
+                    }
                     // Skip empty time without re-anchoring a thread's grid at its next activation.
                     long steps = previous.Count == 0
                         ? (changes[position].Qpc - qpc - 1) / sampleIntervalQpc + 1
                         : 1;
-                    if (steps > (endQpc - qpc - 1) / sampleIntervalQpc) { break; }
+                    if (steps > (endQpc - qpc - 1) / sampleIntervalQpc)
+                    {
+                        break;
+                    }
                     qpc += steps * sampleIntervalQpc;
                 }
                 else if (position < changes.Count)
@@ -317,12 +329,12 @@ namespace Microsoft.Diagnostics.Tracing.Stacks.Formats
                 if (!string.IsNullOrEmpty(code.FullMethodName))
                 {
                     if (frames.Kind == AsyncCallstackKind.StateMachineAsync &&
-                        AsyncProfilerCallStackStitchBoundary.TryGetLogicalStateMachineMethodName(
-                            AsyncProfilerCallStackStitchBoundary.NormalizeMethodName(code.FullMethodName),
+                        AsyncProfilerMethodNames.TryGetLogicalStateMachineMethodName(
+                            AsyncProfilerMethodNames.NormalizeMethodName(code.FullMethodName),
                             out string logicalName, out string stateMachineSuffix))
                     {
                         return prefix + code.ModuleName + "!" +
-                            AsyncProfilerCallStackStitchBoundary.FormatLogicalStateMachineMethodName(
+                            AsyncProfilerMethodNames.FormatLogicalStateMachineMethodName(
                                 logicalName, stateMachineSuffix, frames.FrameStateAt(slot));
                     }
                     name = code.ModuleName + "!" + code.FullMethodName;
@@ -330,7 +342,7 @@ namespace Microsoft.Diagnostics.Tracing.Stacks.Formats
             }
             if (name == null)
             {
-                name = "AsyncFrame(0x" + frames.MethodIdAt(slot).ToString("x", CultureInfo.InvariantCulture) + ")";
+                name = "AsyncFrame(0x" + frames.InstructionPointerAt(slot).ToString("x", CultureInfo.InvariantCulture) + ")";
             }
             if (frames.Kind == AsyncCallstackKind.StateMachineAsync)
             {

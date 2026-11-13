@@ -2186,16 +2186,8 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
             // parsed property and then copied into the resulting ETLX file in their final form.
             GC.KeepAlive(new GCDynamicTraceEventParser(rawEvents));
 
-            // Build the per-thread active async call stack index (RuntimeAsync + StateMachineAsync) from the
-            // AsyncProfilerEventSource while the raw events are processed (like the GC dynamic parser above,
-            // it must be created here so the AsyncEvents are observed during processing). The raw AsyncEvents
-            // records are omitted after indexing by default; callers may preserve them via
-            // TraceLogOptions.KeepAsyncProfilerEvents (or KeepAllEvents).
-            //
-            // The async buffer's internal QPC timestamps are recorded and queried as-is: because the
-            // AsyncEvents are carried in the same ETW/EventPipe file, their QPC is the same clock domain as
-            // the file's event timestamps, so no conversion is needed (the metadata qpcSync/utcSync is only
-            // for correlating with events from a different file).
+            // Build the async index while processing raw events. Internal buffer timestamps use the trace's
+            // QPC domain unchanged. Raw batches are omitted unless KeepAsyncProfilerEvents or KeepAllEvents is set.
             var asyncProfilerParser = new AsyncProfilerTraceEventParser(rawEvents);
             var asyncProfilerComputer = new AsyncProfilerIndexBuilder(
                 asyncProfilerParser,
@@ -2217,20 +2209,11 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
                 asyncProfilerParser.AsyncEvents += delegate { removeFromStream = true; };
             }
 
-            // Symbolize the async call stack frames incrementally, driven by the frames actually present (not the total
-            // method count). Each frame stores only a CodeAddressIndex, pointing into TraceLog's already-persisted
-            // CodeAddresses table. Every frame's methodId is a native code IP - a resume IP for RuntimeAsync, and the
-            // MoveNext body IP for StateMachineAsync (the runtime emits the method's code address as its id) - so both
-            // kinds resolve identically: register the IP as a code address and remember it, so a covering method load /
-            // rundown / ProcessSymbol binds it BEFORE ForAllUnresolvedCodeAddressesInRange resolves and REMOVES the raw
-            // address from the address->index map. Interning a frame set (at close, or at end-of-trace drain for async
-            // call stacks still live at capture end via Finish()) then just reuses the remembered index, so drained
-            // frames stay resolved. A StateMachine frame's state selects a resume IP within the same method (not a
-            // different method name) and is preserved per frame separately, so keying by methodId (the body IP) is right.
+            // Both instrumentation families emit native IPs. Register them before rundown and retain their indices:
+            // resolution removes raw addresses from the lookup map, but some activations are interned only at trace end.
+            // Persist only CodeAddressIndex references; compiler state remains separate from address identity.
             var asyncProfilerFrameCodeAddressByMethodId = new Dictionary<(ProcessIndex ProcessIndex, ulong MethodId), CodeAddressIndex>();
 
-            // Registers (once) and remembers the resolved code address for a frame identity (its methodId == a code IP),
-            // keyed so a later intern reuses it even after rundown removed the raw address from the address->index map.
             Func<ProcessIndex, ulong, CodeAddressIndex> rememberAsyncProfilerFrameCodeAddress = delegate (ProcessIndex processIndex, ulong methodId)
             {
                 if (methodId == 0)
@@ -2255,7 +2238,7 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
             {
                 for (int i = 0; i < frames.FrameCount; i++)
                 {
-                    CodeAddressIndex codeAddress = rememberAsyncProfilerFrameCodeAddress(frames.ProcessIndex, frames.MethodIdAt(i));
+                    CodeAddressIndex codeAddress = rememberAsyncProfilerFrameCodeAddress(frames.ProcessIndex, frames.InstructionPointerAt(i));
                     if (codeAddress != CodeAddressIndex.Invalid)
                     {
                         frames.SetCodeAddressAt(i, codeAddress);
@@ -2265,9 +2248,6 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
 
             asyncProfilerComputer.OnFrameObserved = delegate (ProcessIndex processIndex, ulong methodId, AsyncCallstackKind kind)
             {
-                // Register a frame's code address as soon as it is seen in the event stream, so a covering method load /
-                // rundown / ProcessSymbol binds it BEFORE interning - which for async call stacks still live at capture
-                // end happens only at Finish().
                 rememberAsyncProfilerFrameCodeAddress(processIndex, methodId);
             };
 
@@ -2541,8 +2521,7 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
                     asyncProfilerComputer.ParseErrorCount, MaxAsyncProfilerErrorDetails), null);
             }
 
-            // Capture the built async call stack index (null it out when empty so we don't persist nothing). Its
-            // frames were symbolized incrementally during processing (see OnFrameObserved / OnFrameInterned above).
+            // Avoid persisting an empty index.
             asyncProfilerCallStacks = asyncProfilerComputer.Index.IsEmpty ? null : asyncProfilerComputer.Index;
 
             if (maxEventCount != -1 && eventCount >= maxEventCount)
