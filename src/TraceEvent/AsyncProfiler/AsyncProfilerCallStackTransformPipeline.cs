@@ -27,7 +27,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile> runtimeProfileResolver = null,
             AsyncProfilerRuntimeRuleProfile runtimeProfile = null,
             AsyncProfilerRuntimeRuleProfileCache runtimeProfiles = null,
-            IReadOnlyList<AsyncProfilerSegmentPlacement> segmentPlacements = null,
+            IReadOnlyList<AsyncProfilerCallStackPlacement> segmentPlacements = null,
             Func<CodeAddressIndex, MethodIndex> methodOf = null)
         {
             TraceLog = traceLog;
@@ -109,9 +109,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 return false;
             }
             ModuleFileIndex owner = GetHostModuleOwner(bridge);
-            foreach (AsyncProfilerSegmentPlacement placement in m_segmentPlacements)
+            foreach (AsyncProfilerCallStackPlacement placement in m_segmentPlacements)
             {
-                if (ReferenceEquals(placement.Activation, activation) &&
+                if (ReferenceEquals(placement.CallStack, activation) &&
                     owner != ModuleFileIndex.Invalid &&
                     owner == GetHostModuleOwner(placement.InstrumentedDispatch) &&
                     ReferenceEquals(GetRuntimeProfile(bridge), GetRuntimeProfile(placement.InstrumentedDispatch)) &&
@@ -136,9 +136,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 return false;
             }
             ModuleFileIndex owner = GetHostModuleOwner(bridge);
-            foreach (AsyncProfilerSegmentPlacement placement in m_segmentPlacements)
+            foreach (AsyncProfilerCallStackPlacement placement in m_segmentPlacements)
             {
-                if (!ReferenceEquals(placement.Activation, activation) ||
+                if (!ReferenceEquals(placement.CallStack, activation) ||
                     owner == ModuleFileIndex.Invalid || owner != GetHostModuleOwner(placement.Dispatch) ||
                     !ReferenceEquals(GetRuntimeProfile(bridge), GetRuntimeProfile(placement.Dispatch)) ||
                     ClassifyBoundary(placement.Dispatch).Kind != AsyncProfilerCallStackStitchBoundaryKind.V1Dispatcher ||
@@ -189,7 +189,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             foreach (AsyncProfilerStitchedFrame frame in Frames)
             {
                 if (allowCompletionUnwind &&
-                    frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCompletionUnwind &&
+                    frame.Origin == AsyncProfilerStitchedFrameOrigin.V1CompletionReturn &&
                     !frame.IsDispatcherTailUnwind &&
                     frame.ContextKind == AsyncProfilerStitchedFrameContextKind.Active &&
                     ReferenceEquals(frame.Context, activation) &&
@@ -202,7 +202,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 {
                     return true;
                 }
-                if (frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCompleting &&
+                if (frame.Origin == AsyncProfilerStitchedFrameOrigin.V1CompletedBody &&
                     frame.ContextKind == AsyncProfilerStitchedFrameContextKind.Active &&
                     ReferenceEquals(frame.Context, activation) &&
                     frame.SegmentFrameIndex == completed - 1 &&
@@ -241,16 +241,16 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     return false;
                 }
             }
-            foreach (AsyncProfilerSegmentPlacement outer in m_segmentPlacements)
+            foreach (AsyncProfilerCallStackPlacement outer in m_segmentPlacements)
             {
-                if (!ReferenceEquals(outer.Activation, activation) ||
+                if (!ReferenceEquals(outer.CallStack, activation) ||
                     outer.LeafIndex != outer.RootIndexExclusive)
                 {
                     continue;
                 }
-                foreach (AsyncProfilerSegmentPlacement inner in m_segmentPlacements)
+                foreach (AsyncProfilerCallStackPlacement inner in m_segmentPlacements)
                 {
-                    if (ReferenceEquals(inner.Activation, Segments[Segments.Count - 2]) &&
+                    if (ReferenceEquals(inner.CallStack, Segments[Segments.Count - 2]) &&
                         inner.LeafIndex < inner.RootIndexExclusive &&
                         inner.RootIndexExclusive == outer.LeafIndex)
                     {
@@ -285,7 +285,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
             if (match.IsMatch &&
                 (startup
-                    ? !IsSyncFrameKind(Frames[start], AsyncProfilerStitchSyncFrameKind.V1StateMachineMoveNext) ||
+                    ? !IsSyncFrameKind(Frames[start], AsyncProfilerStitchSyncFrameKind.V1StateMachineBody) ||
                       !IsSameRuntimeSpan(profile, start + 1, match.Length - 1)
                     : !IsSameRuntimeSpan(profile, start, match.Length)))
             {
@@ -381,7 +381,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         private readonly Func<CodeAddressIndex, AsyncProfilerCallStackStitchBoundaryInfo> m_classifyBoundary;
         private readonly Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile> m_runtimeProfileResolver;
         private readonly AsyncProfilerRuntimeRuleProfileCache m_runtimeProfiles;
-        private readonly IReadOnlyList<AsyncProfilerSegmentPlacement> m_segmentPlacements;
+        private readonly IReadOnlyList<AsyncProfilerCallStackPlacement> m_segmentPlacements;
         private readonly Func<CodeAddressIndex, MethodIndex> m_methodOf;
 
         #endregion

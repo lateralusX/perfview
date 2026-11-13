@@ -7,6 +7,8 @@ using Microsoft.Diagnostics.Tracing.Computers;
 using Microsoft.Diagnostics.Tracing.Etlx;
 using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
 
+using static Microsoft.Diagnostics.Tracing.Computers.AsyncProfilerRuntimeRuleProfile;
+
 namespace TraceEventBenchmarks
 {
     /// <summary>Measures presentation of one preclassified stack, excluding structural stitching and stack-source generation.</summary>
@@ -27,13 +29,13 @@ namespace TraceEventBenchmarks
             m_input = new[]
             {
                 Sync(10),
-                Sync(11, AsyncProfilerStitchSyncFrameKind.V1StateMachineMoveNext),
-                Sync(12, AsyncProfilerStitchSyncFrameKind.V1MethodBuilderStart),
-                Sync(13, AsyncProfilerStitchSyncFrameKind.V1MethodBuilderStart),
+                Sync(11, AsyncProfilerStitchSyncFrameKind.V1StateMachineBody),
+                Sync(12, HelperKind.V1Startup),
+                Sync(13, HelperKind.V1Startup),
                 Sync(14),
-                Sync(15, AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskRunContinuations),
-                Sync(16, AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskTrySetResult),
-                Sync(17, AsyncProfilerStitchSyncFrameKind.SystemPrivateCoreLibTaskCompletionSourceSetResult),
+                Sync(15, HelperKind.TaskContinuations),
+                Sync(16, HelperKind.TaskResult),
+                Sync(17, HelperKind.TaskCompletionSourceResult),
                 Sync(18),
                 AsyncProfilerStitchedFrame.CreateAsync(m_segment, 0),
             };
@@ -89,7 +91,7 @@ namespace TraceEventBenchmarks
         }
 
         private AsyncProfilerStitchedFrame Sync(int codeAddress,
-            AsyncProfilerStitchSyncFrameKind kind = AsyncProfilerStitchSyncFrameKind.None) =>
+            FrameClassification kind = default) =>
             AsyncProfilerStitchedFrame.CreateSync(
                 new AsyncProfilerStitchSyncFrame((CodeAddressIndex)codeAddress, MethodIndex.Invalid, kind), m_segment);
 

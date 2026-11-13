@@ -1385,9 +1385,9 @@ do not infer it solely from a missing body or a familiar generic box name.
 | Retained synchronous frame | Physical captured evidence; may be a callee or still-returning invocation, not necessarily the logically current async method |
 | `AsyncCurrent` / `info.IsCurrent` | Physically matched current application method; annotated V1 display infers `-1` |
 | `AsyncDispatchTarget` / `info.IsDispatchTarget` | Identified resumption target without a separately matched body; a V1 box carrier retains captured state |
-| `AsyncCompleting` / `info.IsCompleting` | Completion records prove a physically present V1 method logically completed; display infers `-2` |
-| `AsyncCompletionUnwind` / `info.IsCompletionUnwind` | Verified return work attributed to the completed activation's logical root; display infers `-2` without claiming the root body is physically present |
-| `AsyncRemaining` | Captured suspended async callers, not proof of current execution |
+| `V1CompletedBody` / `info.IsCompleting` | Completion records prove a physically present V1 method logically completed; display infers `-2` |
+| `V1CompletionReturn` / `info.IsCompletionUnwind` | Verified return work attributed to the completed activation's logical root; display infers `-2` without claiming the root body is physically present |
+| `AsyncCaller` | Captured async frames used as logical caller ancestry, not proof of current execution |
 | Historical parent / `info.IsParentContext` | Creation causality, not necessarily an active physical caller |
 | `AsyncContextParentCurrent` / `info.IsParentContextCurrent` | First surviving logical parent frame at child creation, inferred with both progress record types; V1 displays `-1`, while captured state/IP remain unchanged and `IsCurrent` stays false |
 | `BROKEN` | Missing physical root evidence, independent of whether the logical activation is complete |

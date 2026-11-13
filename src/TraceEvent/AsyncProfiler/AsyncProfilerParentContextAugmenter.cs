@@ -44,7 +44,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         internal void Augment(
             AsyncProfilerCallStacksIndex index,
             IReadOnlyList<AsyncProfilerCallStack> activeSegments,
-            IReadOnlyList<AsyncProfilerSegmentPlacement> placements,
+            IReadOnlyList<AsyncProfilerCallStackPlacement> placements,
             List<AsyncProfilerStitchedFrame> frames,
             int maximumDepth)
         {
@@ -64,8 +64,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             // invalidate the still-pending lower insertion indices.
             for (int placementIndex = placements.Count - 1; placementIndex >= 0; placementIndex--)
             {
-                AsyncProfilerSegmentPlacement placement = placements[placementIndex];
-                CollectMissingParents(index, placement.Activation, maximumDepth);
+                AsyncProfilerCallStackPlacement placement = placements[placementIndex];
+                CollectMissingParents(index, placement.CallStack, maximumDepth);
                 if (m_chain.Count == 0)
                 {
                     continue;

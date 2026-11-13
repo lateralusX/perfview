@@ -19,7 +19,7 @@ namespace TraceEventBenchmarks
             _boundaries = new Dictionary<CodeAddressIndex, AsyncProfilerCallStackStitchBoundaryInfo>();
             _methods = new Dictionary<CodeAddressIndex, MethodIndex>();
             _output = new List<AsyncProfilerStitchedFrame>(64);
-            _placements = new List<AsyncProfilerSegmentPlacement>(1);
+            _placements = new List<AsyncProfilerCallStackPlacement>(1);
             _diagnostics = new AsyncProfilerCallStackDiagnostics();
             _augmenter = new AsyncProfilerParentContextAugmenter();
             _classify = Classify;
@@ -132,7 +132,7 @@ namespace TraceEventBenchmarks
             return _output.Count;
         }
 
-        private void Stitch(IReadOnlyList<AsyncProfilerCallStack> segments, List<AsyncProfilerSegmentPlacement> placements)
+        private void Stitch(IReadOnlyList<AsyncProfilerCallStack> segments, List<AsyncProfilerCallStackPlacement> placements)
         {
             AsyncProfilerCallStackStitcher.StitchInto(
                 _sync, segments, Qpc, _classify, _methodCompletionObserved,
@@ -275,7 +275,7 @@ namespace TraceEventBenchmarks
         private Dictionary<CodeAddressIndex, AsyncProfilerCallStackStitchBoundaryInfo> _boundaries;
         private Dictionary<CodeAddressIndex, MethodIndex> _methods;
         private List<AsyncProfilerStitchedFrame> _output;
-        private List<AsyncProfilerSegmentPlacement> _placements;
+        private List<AsyncProfilerCallStackPlacement> _placements;
         private AsyncProfilerCallStackDiagnostics _diagnostics;
         private AsyncProfilerParentContextAugmenter _augmenter;
         private Func<CodeAddressIndex, AsyncProfilerCallStackStitchBoundaryInfo> _classify;

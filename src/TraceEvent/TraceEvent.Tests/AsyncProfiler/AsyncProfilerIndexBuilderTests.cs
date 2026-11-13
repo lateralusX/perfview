@@ -594,7 +594,7 @@ namespace TraceEventTests
                     };
                     var placements = new[]
                     {
-                        new AsyncProfilerSegmentPlacement(child, leafIndex: 0, rootIndexExclusive: 1),
+                        new AsyncProfilerCallStackPlacement(child, leafIndex: 0, rootIndexExclusive: 1),
                     };
 
                     augmenter.Augment(index, new[] { child }, placements, frames, maximumDepth: 1);

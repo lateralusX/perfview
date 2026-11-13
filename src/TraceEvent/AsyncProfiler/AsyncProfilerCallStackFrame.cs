@@ -49,7 +49,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         public bool IsPhysical => m_initialized &&
             (m_frame.Origin == AsyncProfilerStitchedFrameOrigin.Sync ||
              (m_frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent && !m_frame.IsStateMachineBoxCarrier) ||
-             m_frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCompleting);
+             m_frame.Origin == AsyncProfilerStitchedFrameOrigin.V1CompletedBody);
 
         /// <summary>True for the physically matched current async method. Dispatch targets are excluded.</summary>
         public bool IsCurrent => m_frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent;

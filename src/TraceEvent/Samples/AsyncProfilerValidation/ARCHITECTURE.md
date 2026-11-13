@@ -1194,7 +1194,7 @@ complete rootward physical tail, including any Task/WhenAll completion bridge
 and older dispatchers, in order. The sampled prefix and marker belong to the
 active segment. The marker separates dispatch-owned work from the first
 remaining logical frame, emitted as `AsyncDispatchTarget`, followed by
-`AsyncRemaining` callers. It remains even with no sampled callees, so runtime
+`AsyncCaller` callers. It remains even with no sampled callees, so runtime
 dispatch self-cost does not appear as application-body execution. The captured
 target IP is continuation provenance, not an invented executing instruction.
 The marker is structural and independent of normalization, infrastructure
@@ -1276,9 +1276,13 @@ or automatically run presentation transforms. The normal host computers
 prepare richer physical metadata, canonical method identities, and runtime
 ownership, so they are the supported application-facing integration.
 
-`AsyncProfilerStitchSyncFrame` contains `CodeAddress`, `Method`, optional
-`AsyncProfilerStitchSyncFrameKind`, and optional `BoxedStateMachineMethod`. Approved box
-identity associates a physical runtime helper with its application state
+`AsyncProfilerStitchSyncFrame` contains `CodeAddress`, `Method`, cached
+`Classification`, and optional `BoxedStateMachineMethod`. Its `Kind` exposes
+only the shared `AsyncProfilerStitchSyncFrameKind` role. Runtime profiles keep
+finer helper identities in their own `HelperKind`; sequence matching uses those
+details without exposing runtime method names to shared rules. Classification
+is cached once per code address and retained through stitching and presentation.
+Approved box identity associates a physical runtime helper with its application state
 machine; it does not turn that helper IP into evidence of body execution.
 `AsyncProfilerStitchResult` contains leaf-to-root `Frames` and `Diagnostics`.
 
@@ -1303,8 +1307,8 @@ optional `BoxedStateMachineMethod`, `Segment` and `SegmentFrameIndex`,
 `SyncFrameKind`, `Presentation`, and `Context`. `ContextKind` distinguishes
 active and historical contexts. Factory methods (`CreateSync`,
 `CreateAsyncCurrent`, `CreateAsync`, `CreateAsyncDispatchTarget`,
-`CreateAsyncCompleting`, `CreateAsyncCompletionUnwind`,
-`CreateAsyncContextParent`, `CreateIncompleteRoot`) preserve those
+`CreateV1CompletedBody`, `CreateV1CompletionReturn`,
+`CreateAsyncContextParent`, `CreateIncompletePhysicalRoot`) preserve those
 distinctions; `WithPresentation(...)` changes presentation without changing
 structural identity.
 
@@ -1312,12 +1316,14 @@ structural identity.
 |---|---|
 | `Sync` | Retained physical frame; it can still belong to an active context. |
 | `AsyncCurrent` | Physically matched current async method, retaining the sampled address. |
-| `AsyncRemaining` | Captured suspended continuation callers, not physical execution. |
+| `AsyncCaller` | Captured async frames used as logical caller ancestry, not physically matched bodies. |
 | `AsyncDispatchTarget` | Indexed target, possibly represented by a physical V1 box carrier; no body-execution claim. |
-| `AsyncCompleting` | Physically present V1 method established as logically completed, still finishing its invocation. |
-| `AsyncCompletionUnwind` | Verified fully completed V1 return work attributed to the logical root; no claim the root body is physically executing. |
-| `AsyncContextParent` | Historical creation-parent context. |
-| `IncompleteRoot` | Unavailable physical root, without an async-method or execution-host identity. |
+| `V1CompletedBody` | Physically present V1 method established as logically completed, still finishing its invocation. |
+| `V1CompletionReturn` | Verified fully completed V1 return work attributed to the logical root; its body need not be physically present. |
+| `AsyncContextParent` | Logical frame from the child's historical parent call stack, not evidence of execution at sample time. |
+| `AsyncContextParentCurrent` | Historical parent frame inferred as current when the child was created, not at sample time. |
+| `IncompletePhysicalRoot` | Unavailable physical root, without an async-method or execution-host identity. |
+| `Synthetic` | Display label without physical or captured async-method identity. |
 
 ### Pipeline configuration and ordering
 
@@ -1378,8 +1384,8 @@ completed method identities in return order, a physical body for the last
 recorded completed frame, matching box/completion evidence, and only resolved
 same-runtime infrastructure between identities. Its exact remaining logical suffix
 must agree with the recorded progress. The finishing body keeps its sampled
-address and `AsyncCompleting` role (displayed `-2`); the next captured method is
-restored as `AsyncRemaining`, not an executing body or a dispatch target.
+address and `V1CompletedBody` role (displayed `-2`); the next captured method is
+restored as `AsyncCaller`, not an executing body or a dispatch target.
 Native and arbitrary leaf callees remain outside the fold, and one `BROKEN`
 root preserves the missing host. Cuts inside verified helpers or bodies need
 no fixed stack depth or assumed thread-pool caller. Interrupted, unresolved,
@@ -1614,7 +1620,7 @@ progress. At least two physical bodies must match that method, each with matchin
 box-entry evidence and an owned completion pair immediately before its builder
 completion. Every intervening/root-side helper must be resolved, contiguous,
 same-runtime infrastructure; profile vetoes still apply. This can normalize a physical
-stack truncated before its dispatcher into a logical-root `AsyncCompletionUnwind`,
+stack truncated before its dispatcher into a logical-root `V1CompletionReturn`,
 without assigning individual recursive copies or inventing pending/executing
 methods. Native leaf work and the `BROKEN` physical-root marker remain visible.
 For a partially completed, truncated homogeneous recursive chain, the same proof
@@ -1632,7 +1638,7 @@ Mixed-identity, insufficient-body, interrupted, or unowned recursive layouts
 still use the existing conservative fallback.
 
 That completion proof can also authorize a bounded YieldAwaitable-family bridge
-before the scheduler anchor. A normalized `AsyncCompletionUnwind` root can supply
+before the scheduler anchor. A normalized `V1CompletionReturn` root can supply
 this ownership too, provided recorded completion covers the entire activation
 and its consumed dispatcher belongs to the bridge's captured runtime/profile.
 This additional proof applies only to the bounded Yield bridge, not general

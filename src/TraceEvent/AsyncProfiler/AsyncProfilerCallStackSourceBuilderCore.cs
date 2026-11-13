@@ -8,6 +8,8 @@ using Microsoft.Diagnostics.Tracing.Etlx;
 using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
 using Microsoft.Diagnostics.Tracing.Stacks;
 
+using static Microsoft.Diagnostics.Tracing.Computers.AsyncProfilerRuntimeRuleProfile;
+
 namespace Microsoft.Diagnostics.Tracing.Computers
 {
     /// <summary>
@@ -122,12 +124,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
             bool collectPlacements = parentContextsAvailable || m_transforms.EnableNormalization || m_transforms.EnableInfrastructureCleanup;
 
-            List<AsyncProfilerSegmentPlacement> segmentPlacements = null;
+            List<AsyncProfilerCallStackPlacement> segmentPlacements = null;
             if (collectPlacements)
             {
                 if (m_segmentPlacements == null)
                 {
-                    m_segmentPlacements = new List<AsyncProfilerSegmentPlacement>();
+                    m_segmentPlacements = new List<AsyncProfilerCallStackPlacement>();
                 }
 
                 segmentPlacements = m_segmentPlacements;
@@ -246,7 +248,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             m_segments = new List<AsyncProfilerCallStack>();
             m_syncFrames = new List<AsyncProfilerStitchSyncFrame>();
             m_stitchedFrames = new List<AsyncProfilerStitchedFrame>();
-            m_syncFrameMetadata = new Dictionary<CodeAddressIndex, (AsyncProfilerStitchSyncFrameKind Kind, AsyncProfilerRuntimeRuleProfile Profile)>();
+            m_syncFrameMetadata = new Dictionary<CodeAddressIndex, (FrameClassification Classification, AsyncProfilerRuntimeRuleProfile Profile)>();
             m_boxedStateMachineMethods = new Dictionary<CodeAddressIndex, MethodIndex>();
             m_logicalSyncFrameByCodeAddress = new Dictionary<CodeAddressIndex, StackSourceFrameIndex>();
             m_frameByIdentity = new Dictionary<CallStackSourceFrameIdentity, StackSourceFrameIndex>();
@@ -283,7 +285,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     ? GetBoxedStateMachineMethod(codeAddressIndex)
                     : MethodIndex.Invalid;
 
-                m_syncFrames.Add(new AsyncProfilerStitchSyncFrame(codeAddressIndex, method, metadata.Kind, boxedMethod));
+                m_syncFrames.Add(new AsyncProfilerStitchSyncFrame(codeAddressIndex, method, metadata.Classification, boxedMethod));
             }
 
             return physicalRoot;
@@ -393,7 +395,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         private StackSourceCallStackIndex InternStitchedStack(StackSourceCallStackIndex root, ProcessIndex processIndex, CallStackIndex physicalRoot)
         {
             StackSourceCallStackIndex caller = root;
-            if (physicalRoot != CallStackIndex.Invalid && !m_stitchedFrames.Exists(frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.IncompleteRoot))
+            if (physicalRoot != CallStackIndex.Invalid && !m_stitchedFrames.Exists(frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.IncompletePhysicalRoot))
             {
                 // Keep the synchronous root policy without duplicating a recovered BROKEN root.
                 caller = m_outputStackSource.GetCallerIndex(m_outputStackSource.GetCallStack(physicalRoot, root));
@@ -426,7 +428,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 return m_outputStackSource.Interner.FrameIntern(frame.DisplayName);
             }
 
-            if (frame.Origin == AsyncProfilerStitchedFrameOrigin.IncompleteRoot)
+            if (frame.Origin == AsyncProfilerStitchedFrameOrigin.IncompletePhysicalRoot)
             {
                 // Use a named BROKEN frame; exporters omit the reserved Broken index.
                 return m_outputStackSource.Interner.FrameIntern("BROKEN", m_outputStackSource.Interner.ModuleIntern(string.Empty));
@@ -499,8 +501,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             bool dispatchTarget = frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget;
             bool current = frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent;
             bool parentContextCurrent = frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncContextParentCurrent;
-            bool completing = frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCompleting;
-            bool completionUnwind = frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCompletionUnwind;
+            bool completing = frame.Origin == AsyncProfilerStitchedFrameOrigin.V1CompletedBody;
+            bool completionUnwind = frame.Origin == AsyncProfilerStitchedFrameOrigin.V1CompletionReturn;
 
             // Only labels use the inferred state; frame metadata keeps the captured state.
             int presentationState = state;
@@ -772,10 +774,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         private List<AsyncProfilerCallStack> m_segments;
         private List<AsyncProfilerStitchSyncFrame> m_syncFrames;
         private List<AsyncProfilerStitchedFrame> m_stitchedFrames;
-        private List<AsyncProfilerSegmentPlacement> m_segmentPlacements;
+        private List<AsyncProfilerCallStackPlacement> m_segmentPlacements;
         private AsyncProfilerParentContextAugmenter m_parentContextAugmenter;
 
-        private Dictionary<CodeAddressIndex, (AsyncProfilerStitchSyncFrameKind Kind, AsyncProfilerRuntimeRuleProfile Profile)> m_syncFrameMetadata;
+        private Dictionary<CodeAddressIndex, (FrameClassification Classification, AsyncProfilerRuntimeRuleProfile Profile)> m_syncFrameMetadata;
         private Dictionary<CodeAddressIndex, MethodIndex> m_boxedStateMachineMethods;
         private Dictionary<string, MethodIndex> m_stateMachineMethodByTypeName;
         private Dictionary<CodeAddressIndex, StackSourceFrameIndex> m_logicalSyncFrameByCodeAddress;

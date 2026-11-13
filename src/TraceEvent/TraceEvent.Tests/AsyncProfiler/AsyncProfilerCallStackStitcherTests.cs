@@ -11,6 +11,8 @@ using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
 
 using Xunit;
 
+using static Microsoft.Diagnostics.Tracing.Computers.AsyncProfilerRuntimeRuleProfile;
+
 namespace TraceEventTests
 {
     /// <summary>
@@ -37,7 +39,7 @@ namespace TraceEventTests
             {
                 s.Sync(50, 10),
                 s.Boundary(51, kind == AsyncCallstackKind.StateMachineAsync ? s_v1Dispatcher : Wrapper(0)),
-                s.Sync(52, 90, AsyncProfilerStitchSyncFrameKind.V1MethodBuilderInfrastructure),
+                s.Sync(52, 90, AsyncProfilerStitchSyncFrameKind.V1MethodHelper),
                 s.Boundary(53, crossesBoundary ? s_v1Dispatcher :
                     kind == AsyncCallstackKind.StateMachineAsync ? s_v1Infrastructure : s_dispatchContinuation),
                 s.Sync(54, 99),
@@ -60,7 +62,7 @@ namespace TraceEventTests
             var sync = new[]
             {
                 s.Sync(50, 10), s.Boundary(51, s_v1Dispatcher),
-                s.Sync(52, 90, AsyncProfilerStitchSyncFrameKind.V1MethodBuilderInfrastructure),
+                s.Sync(52, 90, AsyncProfilerStitchSyncFrameKind.V1MethodHelper),
             };
             Assert.Throws<InvalidOperationException>(() =>
                 s.Run(sync, new[] { segment }, new StructuralRulesProfile(10)));
@@ -90,6 +92,8 @@ namespace TraceEventTests
         [Fact]
         public void StitchedFrame_BoxCarrierMetadata_PreservesCompactStorage()
         {
+            Assert.Equal(4 * sizeof(int),
+                System.Runtime.CompilerServices.Unsafe.SizeOf<AsyncProfilerStitchSyncFrame>());
             Assert.Equal(6 * sizeof(int) + 2 * IntPtr.Size,
                 System.Runtime.CompilerServices.Unsafe.SizeOf<AsyncProfilerStitchedFrame>());
         }
@@ -122,7 +126,7 @@ namespace TraceEventTests
                         AsyncProfilerStitchSyncFrameKind.None, Scenario.MI(30)), activation),
                 AsyncProfilerStitchedFrame.CreateSync(
                     new AsyncProfilerStitchSyncFrame(Scenario.CA(40), Scenario.MI(41),
-                        AsyncProfilerStitchSyncFrameKind.V1StateMachineMoveNext, Scenario.MI(30)), activation),
+                        AsyncProfilerStitchSyncFrameKind.V1StateMachineBody, Scenario.MI(30)), activation),
                 AsyncProfilerStitchedFrame.CreateSync(
                     new AsyncProfilerStitchSyncFrame(Scenario.CA(40), Scenario.MI(41),
                         AsyncProfilerStitchSyncFrameKind.None, Scenario.MI(31)), activation),
@@ -358,9 +362,9 @@ namespace TraceEventTests
             Assert.Equal(4, result.Frames.Count);
             Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, result.Frames[0].Origin);
             Assert.Equal(Scenario.CA(90), result.Frames[0].CodeAddress);           // retain sampled code address
-            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCaller, result.Frames[1].Origin);
             Assert.Equal(Scenario.CA(203), result.Frames[1].CodeAddress);          // A1
-            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[2].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCaller, result.Frames[2].Origin);
             Assert.Equal(Scenario.CA(204), result.Frames[2].CodeAddress);          // A2
             Assert.Equal(AsyncProfilerStitchedFrameOrigin.Sync, result.Frames[3].Origin);
             Assert.Equal(Scenario.CA(92), result.Frames[3].CodeAddress);           // root
@@ -395,7 +399,7 @@ namespace TraceEventTests
             // completed=1 -> current=frames[1]; splice frames[2]=302.
             Assert.Equal(3, result.Frames.Count);
             Assert.Equal(Scenario.CA(80), result.Frames[0].CodeAddress);
-            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCaller, result.Frames[1].Origin);
             Assert.Equal(Scenario.CA(302), result.Frames[1].CodeAddress);
             Assert.Equal(Scenario.CA(82), result.Frames[2].CodeAddress);
             Assert.Equal(1, result.Diagnostics.V2WrapperFallbackUsed);
@@ -431,7 +435,7 @@ namespace TraceEventTests
             Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, result.Frames[1].Origin);
             Assert.Equal(1, result.Frames[1].SegmentFrameIndex);
             Assert.Same(segment, result.Frames[1].Context);
-            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[2].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCaller, result.Frames[2].Origin);
             Assert.Equal(0, result.Diagnostics.AdjacencyMismatches);
             Assert.Equal(1, result.Diagnostics.V2InfrastructureFramesCollapsed);
         }
@@ -676,7 +680,7 @@ namespace TraceEventTests
             Assert.Equal(new[] { 70, 401, 72 }.Select(Scenario.CA), result.Frames.Select(frame => frame.CodeAddress));
             Assert.Equal(AsyncProfilerStitchedFrameOrigin.Sync, result.Frames[0].Origin);
             Assert.Equal(Scenario.MI(999), result.Frames[0].Method);
-            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCaller, result.Frames[1].Origin);
         }
 
         [Fact]
@@ -742,7 +746,7 @@ namespace TraceEventTests
             Assert.Equal(3, result.Frames.Count);
             Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, result.Frames[0].Origin);
             Assert.Equal(Scenario.CA(40), result.Frames[0].CodeAddress);
-            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCaller, result.Frames[1].Origin);
             Assert.Equal(Scenario.CA(503), result.Frames[1].CodeAddress); // P1 caller
             Assert.Equal(Scenario.CA(44), result.Frames[2].CodeAddress);  // root
             Assert.Equal(1, result.Diagnostics.V1InlineFallbackUsed);
@@ -900,7 +904,7 @@ namespace TraceEventTests
             Assert.Equal(Scenario.CA(42), target.CodeAddress);
             Assert.Equal(Scenario.MI(32), target.BoxedStateMachineMethod);
             Assert.Equal(Scenario.CA(503), result.Frames[4].CodeAddress);
-            Assert.Equal(truncated ? AsyncProfilerStitchedFrameOrigin.IncompleteRoot : AsyncProfilerStitchedFrameOrigin.Sync,
+            Assert.Equal(truncated ? AsyncProfilerStitchedFrameOrigin.IncompletePhysicalRoot : AsyncProfilerStitchedFrameOrigin.Sync,
                 result.Frames[5].Origin);
             Assert.Equal(truncated ? 1 : 0, result.Diagnostics.IncompleteAsyncRootsNormalized);
             Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent);
@@ -952,7 +956,7 @@ namespace TraceEventTests
             Assert.Equal(new[] { Scenario.CA(40), Scenario.CA(501), Scenario.CA(44), Scenario.CA(45) },
                 result.Frames.Select(frame => frame.CodeAddress));
             Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, result.Frames[0].Origin);
-            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCaller, result.Frames[1].Origin);
             Assert.Equal(2, result.Diagnostics.V1InfrastructureFramesCollapsed);
         }
 
@@ -986,7 +990,7 @@ namespace TraceEventTests
             Assert.Equal(segment.Frames.CodeAddressAt(0), target.CodeAddress);
             Assert.Equal(MethodIndex.Invalid, target.Method);
             Assert.Same(segment, target.Context);
-            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[dispatcher + 2].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCaller, result.Frames[dispatcher + 2].Origin);
             Assert.Equal(Scenario.CA(501), result.Frames[dispatcher + 2].CodeAddress);
             Assert.Equal(Scenario.CA(42), result.Frames[dispatcher + 3].CodeAddress);
             Assert.Equal(dispatcher + 4, result.Frames.Count);
@@ -1069,9 +1073,9 @@ namespace TraceEventTests
             var sync = new[]
             {
                 s.Sync(40, 70), // CPU work
-                s.Sync(41, 71, AsyncProfilerStitchSyncFrameKind.V1StateMachineMoveNext),
-                s.Sync(42, 72, AsyncProfilerStitchSyncFrameKind.V1MethodBuilderStart),
-                s.Sync(43, 73, AsyncProfilerStitchSyncFrameKind.V1MethodBuilderStart),
+                s.Sync(41, 71, AsyncProfilerStitchSyncFrameKind.V1StateMachineBody),
+                s.Sync(42, 72, HelperKind.V1Startup),
+                s.Sync(43, 73, HelperKind.V1Startup),
                 s.Sync(44, 30), // child kickoff/current async method
                 s.Boundary(45, s_v1Dispatcher),
                 s.Sync(46, 99),
@@ -1101,7 +1105,7 @@ namespace TraceEventTests
             var sync = new[]
             {
                 s.Sync(40, 70),
-                s.Sync(41, 71, AsyncProfilerStitchSyncFrameKind.V1StateMachineMoveNext),
+                s.Sync(41, 71, AsyncProfilerStitchSyncFrameKind.V1StateMachineBody),
                 s.Sync(42, 72), // unknown frame interrupts the required contiguous pattern
                 s.Sync(43, 30),
                 s.Boundary(44, s_v1Dispatcher),
@@ -1140,10 +1144,10 @@ namespace TraceEventTests
             Assert.Equal(5, result.Frames.Count);
             Assert.Equal(AsyncProfilerStitchedFrameOrigin.Sync, result.Frames[0].Origin);
             Assert.Equal(Scenario.CA(40), result.Frames[0].CodeAddress);        // real sync leaf, not Invalid
-            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[3].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCaller, result.Frames[3].Origin);
             Assert.Equal(Scenario.CA(503), result.Frames[3].CodeAddress);       // P1
             // No spliced async frame is the Invalid 0-IP current frame.
-            Assert.DoesNotContain(result.Frames.Where(f => f.Origin == AsyncProfilerStitchedFrameOrigin.AsyncRemaining),
+            Assert.DoesNotContain(result.Frames.Where(f => f.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCaller),
                 f => f.CodeAddress == CodeAddressIndex.Invalid);
         }
 
@@ -1172,7 +1176,7 @@ namespace TraceEventTests
             // Recorded progress, not the physical-stack scan, selects the current method and remaining caller.
             Assert.Equal(3, result.Frames.Count);
             Assert.Equal(Scenario.CA(40), result.Frames[0].CodeAddress);
-            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCaller, result.Frames[1].Origin);
             Assert.Equal(Scenario.CA(502), result.Frames[1].CodeAddress); // A2 caller
             Assert.Equal(Scenario.CA(44), result.Frames[2].CodeAddress);
             Assert.Equal(0, result.Diagnostics.V1InlineFallbackUsed);
@@ -1204,7 +1208,7 @@ namespace TraceEventTests
             Assert.Equal(new[] { Scenario.CA(40), Scenario.CA(41), Scenario.CA(502), Scenario.CA(503),
                 Scenario.CA(504), Scenario.CA(45) }, result.Frames.Select(frame => frame.CodeAddress));
             AsyncProfilerStitchedFrame finishing = result.Frames[1];
-            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCompleting, finishing.Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.V1CompletedBody, finishing.Origin);
             Assert.Equal(1, finishing.SegmentFrameIndex);
             Assert.Equal(Scenario.MI(31), finishing.Method);
             Assert.Same(segment, finishing.Context);
@@ -1235,7 +1239,7 @@ namespace TraceEventTests
 
             Assert.Equal(new[] { Scenario.CA(40), Scenario.CA(41), Scenario.CA(43) },
                 result.Frames.Select(frame => frame.CodeAddress));
-            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCompleting, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.V1CompletedBody, result.Frames[1].Origin);
             Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget);
         }
 
@@ -1291,7 +1295,7 @@ namespace TraceEventTests
             sync.Add(s.Sync(44, 99));
             AsyncProfilerStitchResult result = s.Run(sync, new[] { segment });
 
-            Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCompleting);
+            Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.V1CompletedBody);
             Assert.Equal(0, result.Diagnostics.V1CompletionTailUsed);
         }
 
@@ -1313,7 +1317,7 @@ namespace TraceEventTests
                 result.Frames.Select(frame => frame.CodeAddress));
             Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, result.Frames[1].Origin);
             Assert.Equal(2, result.Frames[1].SegmentFrameIndex);
-            Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCompleting);
+            Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.V1CompletedBody);
             Assert.Equal(0, result.Diagnostics.V1CompletionAlignmentAmbiguous);
         }
 
@@ -1334,7 +1338,7 @@ namespace TraceEventTests
             Assert.Equal(sync.Take(4).Select(frame => frame.CodeAddress),
                 result.Frames.Take(4).Select(frame => frame.CodeAddress));
             Assert.DoesNotContain(result.Frames, frame =>
-                frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCompleting || frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent);
+                frame.Origin == AsyncProfilerStitchedFrameOrigin.V1CompletedBody || frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent);
             Assert.Equal(1, result.Diagnostics.V1CompletionAlignmentAmbiguous);
             Assert.Equal(3, result.Frames[4].SegmentFrameIndex);
         }
@@ -1360,12 +1364,12 @@ namespace TraceEventTests
                 sync, new[] { segment }, Qpc + 1, s.Classify, s.MethodCompletionObserved, s.MethodOf);
 
             Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, atSample.Frames[1].Origin);
-            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCompleting, afterUnwind.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.V1CompletedBody, afterUnwind.Frames[1].Origin);
             Assert.Equal(Scenario.CA(41), atSample.Frames[1].CodeAddress);
             Assert.Equal(Scenario.CA(41), afterUnwind.Frames[1].CodeAddress);
             Assert.Equal(1, atSample.Frames[1].SegmentFrameIndex);
             Assert.Equal(1, afterUnwind.Frames[1].SegmentFrameIndex);
-            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, atSample.Frames[2].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCaller, atSample.Frames[2].Origin);
             Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget, afterUnwind.Frames[2].Origin);
             Assert.Equal(2, afterUnwind.Frames[2].SegmentFrameIndex);
         }
@@ -1382,7 +1386,7 @@ namespace TraceEventTests
                 new[] { segment });
 
             Assert.DoesNotContain(result.Frames, frame =>
-                frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent || frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCompleting);
+                frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent || frame.Origin == AsyncProfilerStitchedFrameOrigin.V1CompletedBody);
             Assert.Equal(Scenario.CA(41), result.Frames[1].CodeAddress);
             Assert.Equal(1, result.Diagnostics.V1CompletionAlignmentAmbiguous);
         }
@@ -1398,7 +1402,7 @@ namespace TraceEventTests
                 new[] { s.Sync(40, 90), s.Sync(41, 31), s.Boundary(42, s_v1Dispatcher), s.Sync(43, 99) },
                 new[] { segment });
 
-            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCompleting, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.V1CompletedBody, result.Frames[1].Origin);
             Assert.Equal(1, result.Frames[1].SegmentFrameIndex);
             Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget, result.Frames[2].Origin);
             Assert.Equal(2, result.Frames[2].SegmentFrameIndex);
@@ -1432,7 +1436,7 @@ namespace TraceEventTests
                 new[] { Scenario.CA(40), Scenario.CA(41), CodeAddressIndex.Invalid },
                 result.Frames.Select(frame => frame.CodeAddress));
             Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, result.Frames[1].Origin);
-            Assert.Equal(AsyncProfilerStitchedFrameOrigin.IncompleteRoot, result.Frames[2].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.IncompletePhysicalRoot, result.Frames[2].Origin);
             Assert.Null(result.Frames[2].Context);
             Assert.Equal(1, result.Diagnostics.BoundariesNotFound);
             Assert.Equal(1, result.Diagnostics.V1InlineFallbackUsed);
@@ -1479,7 +1483,7 @@ namespace TraceEventTests
             Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, result.Frames[1].Origin);
             Assert.Equal(4, result.Frames[1].SegmentFrameIndex);
             Assert.Equal(Scenario.MI(34), result.Frames[1].Method);
-            Assert.Equal(AsyncProfilerStitchedFrameOrigin.IncompleteRoot, result.Frames[4].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.IncompletePhysicalRoot, result.Frames[4].Origin);
             Assert.Equal(AsyncProfilerStitchedFrameContextKind.None, result.Frames[4].ContextKind);
             Assert.Equal(1, result.Diagnostics.IncompleteAsyncRootsNormalized);
             Assert.Equal(kind == AsyncCallstackKind.RuntimeAsync ? 1 : 0,
@@ -1518,11 +1522,11 @@ namespace TraceEventTests
             Assert.Equal(normalize ? 1 : 0, result.Diagnostics.IncompleteAsyncRootsNormalized);
             if (normalize)
             {
-                Assert.Equal(AsyncProfilerStitchedFrameOrigin.IncompleteRoot, result.Frames[result.Frames.Count - 1].Origin);
+                Assert.Equal(AsyncProfilerStitchedFrameOrigin.IncompletePhysicalRoot, result.Frames[result.Frames.Count - 1].Origin);
             }
             else
             {
-                Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.IncompleteRoot);
+                Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.IncompletePhysicalRoot);
                 Assert.Contains(result.Frames,
                     frame => frame.CodeAddress == Scenario.CA(44) && frame.Origin == AsyncProfilerStitchedFrameOrigin.Sync);
             }
@@ -1555,7 +1559,7 @@ namespace TraceEventTests
             Assert.Contains(result.Frames, frame => frame.CodeAddress == Scenario.CA(44));
             Assert.Equal(sync.Select(frame => frame.CodeAddress),
                 result.Frames.Take(sync.Length).Select(frame => frame.CodeAddress));
-            Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.IncompleteRoot);
+            Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.IncompletePhysicalRoot);
         }
 
         [Theory]
@@ -1607,7 +1611,7 @@ namespace TraceEventTests
 
             Assert.Equal(new[] { Scenario.CA(40), Scenario.CA(41), Scenario.CA(501), CodeAddressIndex.Invalid },
                 result.Frames.Select(frame => frame.CodeAddress));
-            Assert.Equal(AsyncProfilerStitchedFrameOrigin.IncompleteRoot, result.Frames.Last().Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.IncompletePhysicalRoot, result.Frames.Last().Origin);
             Assert.Null(result.Frames.Last().Context);
             Assert.Equal(0, result.Diagnostics.BoundariesNotFound);
             Assert.Equal(infrastructureLength, result.Diagnostics.V1InfrastructureFramesCollapsed);
@@ -1633,7 +1637,7 @@ namespace TraceEventTests
                     ? AsyncProfilerRuntimeRuleProfile.Common : profile);
 
             Assert.Equal(Scenario.CA(43), result.Frames.Last().CodeAddress);
-            Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.IncompleteRoot);
+            Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.IncompletePhysicalRoot);
         }
 
         [Fact]
@@ -1651,7 +1655,7 @@ namespace TraceEventTests
 
             AsyncProfilerStitchResult result = s.Run(sync, new[] { segment });
 
-            Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.IncompleteRoot);
+            Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.IncompletePhysicalRoot);
         }
 
         [Theory]
@@ -1682,8 +1686,8 @@ namespace TraceEventTests
                     Scenario.CA(40), Scenario.CA(601), Scenario.CA(43),
                     Scenario.CA(44), Scenario.CA(501), CodeAddressIndex.Invalid,
                 }, result.Frames.Select(frame => frame.CodeAddress));
-            Assert.Single(result.Frames.Where(frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.IncompleteRoot));
-            Assert.Equal(AsyncProfilerStitchedFrameOrigin.IncompleteRoot, result.Frames.Last().Origin);
+            Assert.Single(result.Frames.Where(frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.IncompletePhysicalRoot));
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.IncompletePhysicalRoot, result.Frames.Last().Origin);
             Assert.Equal(2, result.Diagnostics.SegmentsProcessed);
         }
 
@@ -1757,7 +1761,7 @@ namespace TraceEventTests
                 result.Frames.Select(frame => frame.CodeAddress));
             Assert.Equal(2, result.Diagnostics.SegmentsProcessed);
             Assert.Equal(1, result.Diagnostics.IncompleteAsyncRootsNormalized);
-            Assert.Equal(AsyncProfilerStitchedFrameOrigin.IncompleteRoot, result.Frames[result.Frames.Count - 1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.IncompletePhysicalRoot, result.Frames[result.Frames.Count - 1].Origin);
         }
 
         [Theory]
@@ -1813,9 +1817,9 @@ namespace TraceEventTests
 
             Assert.Equal(0, result.Diagnostics.V1TruncatedSuffixFallbackUsed);
             Assert.Equal(0, result.Diagnostics.IncompleteAsyncRootsNormalized);
-            Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.IncompleteRoot);
+            Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.IncompletePhysicalRoot);
             Assert.Equal(1, result.Diagnostics.V1InlineFallbackUsed);
-            Assert.Contains(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncRemaining);
+            Assert.Contains(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCaller);
         }
 
         [Fact]
@@ -1844,7 +1848,7 @@ namespace TraceEventTests
             Assert.Equal(3, result.Frames.Count);
             Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, result.Frames[0].Origin);
             Assert.Equal(Scenario.CA(40), result.Frames[0].CodeAddress);
-            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCaller, result.Frames[1].Origin);
             Assert.Equal(Scenario.CA(503), result.Frames[1].CodeAddress); // P1 caller
             Assert.Equal(Scenario.CA(44), result.Frames[2].CodeAddress);
             Assert.Equal(1, result.Diagnostics.V1InlineFallbackUsed);
@@ -1875,7 +1879,7 @@ namespace TraceEventTests
             Assert.Equal(new[] { Scenario.CA(40), Scenario.CA(503), Scenario.CA(43) },
                 result.Frames.Select(frame => frame.CodeAddress));
             Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, result.Frames[0].Origin);
-            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCaller, result.Frames[1].Origin);
             Assert.Equal(1, result.Diagnostics.V1InlineFallbackUsed);
         }
 
@@ -1904,7 +1908,7 @@ namespace TraceEventTests
 
             Assert.Equal(3, result.Frames.Count);
             Assert.Equal(Scenario.CA(40), result.Frames[0].CodeAddress);
-            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCaller, result.Frames[1].Origin);
             Assert.Equal(Scenario.CA(503), result.Frames[1].CodeAddress); // A1 caller
             Assert.Equal(Scenario.CA(44), result.Frames[2].CodeAddress);
             Assert.Equal(0, result.Diagnostics.V1InlineFallbackUsed); // events used, not the scan
@@ -1928,7 +1932,7 @@ namespace TraceEventTests
             Assert.Equal(3, result.Frames.Count);
             Assert.Equal(AsyncProfilerStitchedFrameOrigin.Sync, result.Frames[0].Origin);
             Assert.Equal(AsyncProfilerStitchedFrameOrigin.Sync, result.Frames[1].Origin);
-            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[2].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCaller, result.Frames[2].Origin);
             Assert.Equal(Scenario.CA(601), result.Frames[2].CodeAddress);
             Assert.Equal(1, result.Diagnostics.BoundariesNotFound);
         }
@@ -1962,23 +1966,23 @@ namespace TraceEventTests
             Assert.Equal(6, result.Frames.Count);
             Assert.Equal(Scenario.CA(50), result.Frames[0].CodeAddress);
             Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, result.Frames[0].Origin);
-            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCaller, result.Frames[1].Origin);
             Assert.Equal(Scenario.CA(701), result.Frames[1].CodeAddress);
             Assert.Equal(Scenario.CA(55), result.Frames[2].CodeAddress);
             Assert.Equal(AsyncProfilerStitchedFrameOrigin.Sync, result.Frames[2].Origin);
             Assert.Equal(Scenario.CA(52), result.Frames[3].CodeAddress);
             Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, result.Frames[3].Origin);
-            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[4].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCaller, result.Frames[4].Origin);
             Assert.Equal(Scenario.CA(801), result.Frames[4].CodeAddress);
             Assert.Equal(Scenario.CA(54), result.Frames[5].CodeAddress);
             Assert.Equal(2, result.Diagnostics.SegmentsProcessed);
             Assert.Equal(0, result.Diagnostics.BoundariesNotFound);
 
             Assert.Equal(2, result.SegmentPlacements.Count);
-            Assert.Same(leaf, result.SegmentPlacements[0].Activation);
+            Assert.Same(leaf, result.SegmentPlacements[0].CallStack);
             Assert.Equal(0, result.SegmentPlacements[0].LeafIndex);
             Assert.Equal(2, result.SegmentPlacements[0].RootIndexExclusive);
-            Assert.Same(root, result.SegmentPlacements[1].Activation);
+            Assert.Same(root, result.SegmentPlacements[1].CallStack);
             Assert.Equal(2, result.SegmentPlacements[1].LeafIndex);
             Assert.Equal(5, result.SegmentPlacements[1].RootIndexExclusive);
         }
@@ -2043,10 +2047,10 @@ namespace TraceEventTests
             Assert.Equal(methodEvents ? 0 : 1, result.Diagnostics.V1TruncatedSuffixFallbackUsed);
             Assert.Equal(1, result.Diagnostics.V2InfrastructureFramesCollapsed);
             Assert.Equal(0, result.Diagnostics.IncompleteAsyncRootsNormalized);
-            Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.IncompleteRoot);
-            Assert.Same(inner, result.SegmentPlacements[0].Activation);
+            Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.IncompletePhysicalRoot);
+            Assert.Same(inner, result.SegmentPlacements[0].CallStack);
             Assert.Equal(carrier ? 4 : 3, result.SegmentPlacements[0].RootIndexExclusive);
-            Assert.Same(outer, result.SegmentPlacements[1].Activation);
+            Assert.Same(outer, result.SegmentPlacements[1].CallStack);
             Assert.Equal(carrier ? 4 : 3, result.SegmentPlacements[1].LeafIndex);
             Assert.Equal(carrier ? 8 : 7, result.SegmentPlacements[1].RootIndexExclusive);
         }
@@ -2212,7 +2216,7 @@ namespace TraceEventTests
                 new[]
                 {
                     AsyncProfilerStitchedFrameOrigin.AsyncCurrent,
-                    AsyncProfilerStitchedFrameOrigin.AsyncRemaining,
+                    AsyncProfilerStitchedFrameOrigin.AsyncCaller,
                     AsyncProfilerStitchedFrameOrigin.AsyncContextParent,
                     AsyncProfilerStitchedFrameOrigin.AsyncContextParent,
                     AsyncProfilerStitchedFrameOrigin.AsyncContextParent,
@@ -2220,7 +2224,7 @@ namespace TraceEventTests
                     AsyncProfilerStitchedFrameOrigin.AsyncContextParent,
                     AsyncProfilerStitchedFrameOrigin.AsyncContextParent,
                     AsyncProfilerStitchedFrameOrigin.AsyncCurrent,
-                    AsyncProfilerStitchedFrameOrigin.AsyncRemaining,
+                    AsyncProfilerStitchedFrameOrigin.AsyncCaller,
                     AsyncProfilerStitchedFrameOrigin.Sync,
                 },
                 frames.Select(frame => frame.Origin));
@@ -2332,7 +2336,7 @@ namespace TraceEventTests
             };
             var placements = new[]
             {
-                new AsyncProfilerSegmentPlacement(child, leafIndex: 0, rootIndexExclusive: 3),
+                new AsyncProfilerCallStackPlacement(child, leafIndex: 0, rootIndexExclusive: 3),
             };
 
             new AsyncProfilerParentContextAugmenter().Augment(
@@ -2384,7 +2388,7 @@ namespace TraceEventTests
             };
             var placements = new[]
             {
-                new AsyncProfilerSegmentPlacement(child, leafIndex: 0, rootIndexExclusive: 2),
+                new AsyncProfilerCallStackPlacement(child, leafIndex: 0, rootIndexExclusive: 2),
             };
 
             new AsyncProfilerParentContextAugmenter().Augment(
@@ -2428,7 +2432,7 @@ namespace TraceEventTests
             };
             var placements = new[]
             {
-                new AsyncProfilerSegmentPlacement(child, leafIndex: 0, rootIndexExclusive: 2),
+                new AsyncProfilerCallStackPlacement(child, leafIndex: 0, rootIndexExclusive: 2),
             };
 
             new AsyncProfilerParentContextAugmenter().Augment(
@@ -2472,7 +2476,7 @@ namespace TraceEventTests
             };
             var placements = new[]
             {
-                new AsyncProfilerSegmentPlacement(child, leafIndex: 0, rootIndexExclusive: 2),
+                new AsyncProfilerCallStackPlacement(child, leafIndex: 0, rootIndexExclusive: 2),
             };
 
             new AsyncProfilerParentContextAugmenter().Augment(
@@ -2514,7 +2518,7 @@ namespace TraceEventTests
             };
             var placements = new[]
             {
-                new AsyncProfilerSegmentPlacement(a, leafIndex: 0, rootIndexExclusive: 1),
+                new AsyncProfilerCallStackPlacement(a, leafIndex: 0, rootIndexExclusive: 1),
             };
             var augmenter = new AsyncProfilerParentContextAugmenter();
 
@@ -2570,7 +2574,7 @@ namespace TraceEventTests
                 };
                 var placements = new[]
                 {
-                    new AsyncProfilerSegmentPlacement(child, leafIndex: 0, rootIndexExclusive: 1),
+                    new AsyncProfilerCallStackPlacement(child, leafIndex: 0, rootIndexExclusive: 1),
                 };
 
                 Assert.True(augmenter.Prepare(index, new[] { child }));
@@ -2898,7 +2902,7 @@ namespace TraceEventTests
             };
             var placements = new[]
             {
-                new AsyncProfilerSegmentPlacement(child, leafIndex: 0, rootIndexExclusive: 1),
+                new AsyncProfilerCallStackPlacement(child, leafIndex: 0, rootIndexExclusive: 1),
             };
 
             new AsyncProfilerParentContextAugmenter().Augment(
@@ -2964,8 +2968,8 @@ namespace TraceEventTests
                 Scenario.CA(65), Scenario.CA(66),
             }, result.Frames.Select(frame => frame.CodeAddress));
             Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, result.Frames[1].Origin);
-            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[2].Origin);
-            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[7].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCaller, result.Frames[2].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCaller, result.Frames[7].Origin);
             Assert.Equal(2, result.Diagnostics.SegmentsProcessed);
             Assert.Equal(2, result.Diagnostics.V2InfrastructureFramesCollapsed);
             Assert.Equal(2, result.Diagnostics.V1InfrastructureFramesCollapsed);
@@ -2973,10 +2977,10 @@ namespace TraceEventTests
             Assert.Equal(0, result.Diagnostics.BoundariesNotFound);
 
             Assert.Equal(2, result.SegmentPlacements.Count);
-            Assert.Same(inner, result.SegmentPlacements[0].Activation);
+            Assert.Same(inner, result.SegmentPlacements[0].CallStack);
             Assert.Equal(0, result.SegmentPlacements[0].LeafIndex);
             Assert.Equal(3, result.SegmentPlacements[0].RootIndexExclusive);
-            Assert.Same(outer, result.SegmentPlacements[1].Activation);
+            Assert.Same(outer, result.SegmentPlacements[1].CallStack);
             Assert.Equal(3, result.SegmentPlacements[1].LeafIndex);
             Assert.Equal(8, result.SegmentPlacements[1].RootIndexExclusive);
         }
@@ -3073,7 +3077,7 @@ namespace TraceEventTests
                 s.Boundary(52, Wrapper(1)),
                 s.Boundary(53, s_dispatchContinuation),
                 s.Boundary(54, s_dispatchContinuation),
-                s.Sync(55, 91, AsyncProfilerStitchSyncFrameKind.V1MethodBuilderCompletion),
+                s.Sync(55, 91, AsyncProfilerStitchSyncFrameKind.V1MethodCompletion),
                 s.Sync(56, 21),
                 s.Sync(57, 92),
                 s.Sync(58, 20),
@@ -3210,8 +3214,8 @@ namespace TraceEventTests
                 Scenario.CA(65), Scenario.CA(66),
             }, result.Frames.Select(frame => frame.CodeAddress));
             Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, result.Frames[1].Origin);
-            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[2].Origin);
-            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[7].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCaller, result.Frames[2].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCaller, result.Frames[7].Origin);
             Assert.Equal(2, result.Diagnostics.SegmentsProcessed);
             Assert.Equal(1, result.Diagnostics.V1InlineFallbackUsed);
             Assert.Equal(2, result.Diagnostics.V2InfrastructureFramesCollapsed);
@@ -3246,7 +3250,7 @@ namespace TraceEventTests
             Assert.Equal(4, result.Frames.Count);
             Assert.Equal(Scenario.CA(90), result.Frames[0].CodeAddress);
             Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, result.Frames[0].Origin);
-            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCaller, result.Frames[1].Origin);
             Assert.Equal(Scenario.CA(201), result.Frames[1].CodeAddress);
             Assert.Equal(Scenario.CA(94), result.Frames[2].CodeAddress);
             Assert.Equal(Scenario.CA(95), result.Frames[3].CodeAddress);
@@ -3333,7 +3337,7 @@ namespace TraceEventTests
             Assert.Same(inner, result.Frames[1].Context);
             Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, result.Frames[3].Origin);
             Assert.Same(outer, result.Frames[3].Context);
-            Assert.Same(outer, Assert.Single(result.SegmentPlacements).Activation);
+            Assert.Same(outer, Assert.Single(result.SegmentPlacements).CallStack);
         }
 
         [Theory]
@@ -3370,7 +3374,7 @@ namespace TraceEventTests
             Assert.DoesNotContain(result.Frames, frame =>
                 frame.Presentation == AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames);
             Assert.Equal(obstruction != "invalid-slot",
-                result.Frames.Any(frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncRemaining));
+                result.Frames.Any(frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCaller));
             Assert.Single(result.SegmentPlacements);
         }
 
@@ -3404,14 +3408,14 @@ namespace TraceEventTests
             Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget, result.Frames[0].Origin);
             Assert.Same(seg, result.Frames[0].Context);
             Assert.Equal(AsyncProfilerStitchedFramePresentation.Native, result.Frames[0].Presentation);
-            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCaller, result.Frames[1].Origin);
             Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent);
             Assert.Equal(0, result.Diagnostics.V2SyncLayoutUsed);
             Assert.Equal(1, result.Diagnostics.V2LeafWrapperDropped);
             Assert.Equal(1, result.Diagnostics.SegmentsProcessed);
             Assert.Equal(1, result.Diagnostics.V2InfrastructureFramesCollapsed);
-            AsyncProfilerSegmentPlacement placement = Assert.Single(result.SegmentPlacements);
-            Assert.Same(seg, placement.Activation);
+            AsyncProfilerCallStackPlacement placement = Assert.Single(result.SegmentPlacements);
+            Assert.Same(seg, placement.CallStack);
             Assert.Equal(0, placement.LeafIndex);
             Assert.Equal(2, placement.RootIndexExclusive);
 
@@ -3472,7 +3476,7 @@ namespace TraceEventTests
                     .Concat(new[] { Scenario.CA(999) }),
                 result.Frames.Select(frame => frame.CodeAddress));
             Assert.All(result.Frames.Skip(1).Take(addresses.Length - expectedIndex - 1),
-                frame => Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, frame.Origin));
+                frame => Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCaller, frame.Origin));
             Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent);
             Assert.Equal(1, result.Diagnostics.SegmentsProcessed);
             Assert.Equal(methodEvents ? 0 : 1, result.Diagnostics.V2WrapperFallbackUsed);
@@ -3609,11 +3613,11 @@ namespace TraceEventTests
             Assert.Equal(2, target.SegmentFrameIndex);
             Assert.Equal(segment.Frames.CodeAddressAt(2), target.CodeAddress);
             Assert.All(result.Frames.Skip(3).Take(2), frame =>
-                Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, frame.Origin));
+                Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCaller, frame.Origin));
             Assert.All(result.Frames.Skip(5), frame => Assert.Null(frame.Context));
             Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent);
-            AsyncProfilerSegmentPlacement placement = Assert.Single(result.SegmentPlacements);
-            Assert.Same(segment, placement.Activation);
+            AsyncProfilerCallStackPlacement placement = Assert.Single(result.SegmentPlacements);
+            Assert.Same(segment, placement.CallStack);
             Assert.Equal(0, placement.LeafIndex);
             Assert.Equal(5, placement.RootIndexExclusive);
             Assert.Equal(1, result.Diagnostics.SegmentsProcessed);
@@ -3669,9 +3673,9 @@ namespace TraceEventTests
             Assert.Equal(exceptional, target.SegmentFrameIndex);
             Assert.Same(segment, target.Context);
             Assert.Equal(frameCount - exceptional - 1,
-                result.Frames.Count(frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncRemaining));
+                result.Frames.Count(frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCaller));
             Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent);
-            AsyncProfilerSegmentPlacement placement = Assert.Single(result.SegmentPlacements);
+            AsyncProfilerCallStackPlacement placement = Assert.Single(result.SegmentPlacements);
             Assert.Equal(0, placement.LeafIndex);
             Assert.Equal(physicalPrefixCount + 1 + frameCount - exceptional, placement.RootIndexExclusive);
             Assert.Null(result.Frames.Last().Context);
@@ -3817,8 +3821,8 @@ namespace TraceEventTests
             Assert.Equal(outerKind == AsyncCallstackKind.RuntimeAsync ? 2 : 0,
                 result.Diagnostics.V2InfrastructureFramesCollapsed);
             Assert.Equal(0, result.Diagnostics.BoundariesNotFound);
-            AsyncProfilerSegmentPlacement placement = Assert.Single(result.SegmentPlacements);
-            Assert.Same(outer, placement.Activation);
+            AsyncProfilerCallStackPlacement placement = Assert.Single(result.SegmentPlacements);
+            Assert.Same(outer, placement.CallStack);
             Assert.Equal(3, placement.LeafIndex);
             Assert.Equal(8, placement.RootIndexExclusive);
 
@@ -3920,9 +3924,9 @@ namespace TraceEventTests
             Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget, result.Frames[0].Origin);
             Assert.Equal(1, result.Frames[0].SegmentFrameIndex);
             Assert.Same(segments[3], result.Frames[0].Context);
-            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncRemaining, result.Frames[1].Origin);
+            Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCaller, result.Frames[1].Origin);
             Assert.Equal(4, result.SegmentPlacements.Count);
-            Assert.Same(segments[3], result.SegmentPlacements[0].Activation);
+            Assert.Same(segments[3], result.SegmentPlacements[0].CallStack);
             Assert.Equal(0, result.SegmentPlacements[0].LeafIndex);
             Assert.Equal(2, result.SegmentPlacements[0].RootIndexExclusive);
             for (int i = 0; i < 3; i++)
@@ -3932,8 +3936,8 @@ namespace TraceEventTests
                 Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, current.Origin);
                 Assert.Equal(1, current.SegmentFrameIndex);
                 Assert.Same(activation, current.Context);
-                AsyncProfilerSegmentPlacement placement = result.SegmentPlacements[i + 1];
-                Assert.Same(activation, placement.Activation);
+                AsyncProfilerCallStackPlacement placement = result.SegmentPlacements[i + 1];
+                Assert.Same(activation, placement.CallStack);
                 Assert.Equal(2 + i * 3, placement.LeafIndex);
                 Assert.Equal(5 + i * 3, placement.RootIndexExclusive);
             }
@@ -4088,7 +4092,7 @@ namespace TraceEventTests
 
             public AsyncProfilerStitchSyncFrame Sync(int codeAddr, int method) => new AsyncProfilerStitchSyncFrame(CA(codeAddr), MI(method));
 
-            public AsyncProfilerStitchSyncFrame Sync(int codeAddr, int method, AsyncProfilerStitchSyncFrameKind kind) =>
+            public AsyncProfilerStitchSyncFrame Sync(int codeAddr, int method, FrameClassification kind) =>
                 new AsyncProfilerStitchSyncFrame(CA(codeAddr), MI(method), kind);
 
             public AsyncProfilerStitchSyncFrame BoxCarrier(int codeAddr, int boxedMethod) =>
@@ -4147,7 +4151,7 @@ namespace TraceEventTests
             {
                 var output = new List<AsyncProfilerStitchedFrame>();
                 var diagnostics = new AsyncProfilerCallStackDiagnostics();
-                var placements = new List<AsyncProfilerSegmentPlacement>();
+                var placements = new List<AsyncProfilerCallStackPlacement>();
                 AsyncProfilerCallStackStitcher.StitchInto(sync, segments, Qpc, Classify,
                     (process, kind, start) => MethodCompletionObserved(kind), ProcessIndex.Invalid, MethodOf,
                     false, output, diagnostics, placements, index: index);
@@ -4189,7 +4193,7 @@ namespace TraceEventTests
                 AsyncCallstackKind kind, IReadOnlyList<AsyncProfilerStitchSyncFrame> frames, int start, int end,
                 Func<CodeAddressIndex, AsyncProfilerCallStackStitchBoundaryInfo> classify) =>
                 m_infrastructureLength != 0 && start < end &&
-                frames[start].Kind == AsyncProfilerStitchSyncFrameKind.V1MethodBuilderInfrastructure
+                frames[start].Kind == AsyncProfilerStitchSyncFrameKind.V1MethodHelper
                     ? AsyncProfilerRuntimeSequenceMatch.Match(m_infrastructureLength)
                     : base.MatchDispatchInfrastructure(kind, frames, start, end, classify);
 

@@ -454,9 +454,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// True if this call stack is active at <paramref name="timestampQpc"/> and has the thread's
         /// latest start time by then, with no ties.
         /// </summary>
-        internal bool IsLatestActivation(AsyncProfilerCallStack callStack, long timestampQpc)
+        internal bool IsLatestCallStack(AsyncProfilerCallStack callStack, long timestampQpc)
         {
-            return _threads.TryGetValue(callStack.Thread, out ThreadCallStacks callStacks) && callStacks.QueryIndex().IsLatestActivation(callStack, timestampQpc);
+            return _threads.TryGetValue(callStack.Thread, out ThreadCallStacks callStacks) && callStacks.QueryIndex().IsLatestCallStack(callStack, timestampQpc);
         }
 
         /// <summary>
@@ -1366,7 +1366,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 Stab(0, _byStart.Length - 1, timestampQpc, callStacks, result, owner, cacheMaterialized, ref count);
             }
 
-            public bool IsLatestActivation(AsyncProfilerCallStack callStack, long timestampQpc)
+            public bool IsLatestCallStack(AsyncProfilerCallStack callStack, long timestampQpc)
             {
                 int lo = 0;
                 int hi = _byStart.Length;
