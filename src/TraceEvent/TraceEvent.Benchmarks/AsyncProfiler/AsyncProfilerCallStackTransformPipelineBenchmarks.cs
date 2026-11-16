@@ -41,9 +41,11 @@ namespace TraceEventBenchmarks
             };
             m_frames = new List<AsyncProfilerStitchedFrame>(m_input.Length);
             m_diagnostics = new AsyncProfilerCallStackDiagnostics();
+            m_stitchingState = new AsyncProfilerCallStackStitchingState();
             m_context = new AsyncProfilerCallStackTransformState(
                 traceLog: null, segments: new[] { m_segment }, timestampQpc: 1,
                 classifyBoundary: _ => AsyncProfilerCallStackStitchBoundaryInfo.None,
+                stitchingState: m_stitchingState,
                 diagnostics: m_diagnostics, frames: m_frames);
             m_structural = new AsyncProfilerCallStackTransformPipeline { EnableNormalization = false };
             m_normalization = new AsyncProfilerCallStackTransformPipeline();
@@ -74,6 +76,7 @@ namespace TraceEventBenchmarks
             m_frames.Clear();
             m_frames.AddRange(m_input);
             m_diagnostics.Clear();
+            m_stitchingState.Clear();
             pipeline.ApplyInPlace(m_context);
             return m_frames.Count;
         }
@@ -99,6 +102,7 @@ namespace TraceEventBenchmarks
         private AsyncProfilerStitchedFrame[] m_input;
         private List<AsyncProfilerStitchedFrame> m_frames;
         private AsyncProfilerCallStackDiagnostics m_diagnostics;
+        private AsyncProfilerCallStackStitchingState m_stitchingState;
         private AsyncProfilerCallStackTransformState m_context;
         private AsyncProfilerCallStackTransformPipeline m_structural;
         private AsyncProfilerCallStackTransformPipeline m_normalization;

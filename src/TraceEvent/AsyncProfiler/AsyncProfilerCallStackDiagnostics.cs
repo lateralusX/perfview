@@ -9,7 +9,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// <summary>
     /// Counters and bounded messages gathered while stitching and applying presentation transforms.
     /// Includes successful processing and expected fallbacks as well as soft anomalies; nonzero counters do not
-    /// by themselves indicate failure. Diagnostic conditions do not throw.
+    /// by themselves indicate failure. These values report results; stitching decisions use
+    /// <see cref="AsyncProfilerCallStackStitchingState"/> instead. Diagnostic conditions do not throw.
     /// </summary>
     internal sealed class AsyncProfilerCallStackDiagnostics
     {
@@ -20,8 +21,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// physical alignment; otherwise stitching degrades conservatively.</summary>
         public int BoundariesNotFound;
 
-        /// <summary>V2 segments whose resolved current method did not match the resolved sync frame leaf-ward
-        /// of the boundary, skipping a recognized resume stub when present.</summary>
+        /// <summary>V2 segments whose resolved current method did not match the resolved sync frame immediately
+        /// before the boundary, skipping a recognized resume stub when present.</summary>
         public int AdjacencyMismatches;
 
         /// <summary>V2 segments whose completed-frame count came from the wrapper slot because normal
@@ -66,12 +67,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// or dropped from a retained synchronous layout by conservative presentation.</summary>
         public int V2LeafWrapperDropped;
 
-        /// <summary>V2 dispatch-continuation infrastructure collapsed root-ward of a stitched continuation-wrapper,
-        /// and verified resume stubs consumed immediately leaf-ward of it. The reconstructed async stack
+        /// <summary>V2 dispatch-continuation callers collapsed after a stitched continuation-wrapper,
+        /// and verified resume stubs consumed immediately before it. The reconstructed async stack
         /// represents that machinery.</summary>
         public int V2InfrastructureFramesCollapsed;
 
-        /// <summary>V1 CoreLib async-state-machine-box frames collapsed contiguously root-ward of a consumed
+        /// <summary>V1 CoreLib async-state-machine-box callers collapsed contiguously after a consumed
         /// dispatcher boundary.</summary>
         public int V1InfrastructureFramesCollapsed;
 

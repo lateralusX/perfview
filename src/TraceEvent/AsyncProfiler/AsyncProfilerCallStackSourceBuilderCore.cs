@@ -146,6 +146,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 TraceSteps,
                 m_stitchedFrames,
                 m_sampleDiagnostics,
+                m_stitchingState,
                 segmentPlacements,
                 m_runtimeProfileResolver,
                 runtimeProfile,
@@ -163,6 +164,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 m_segments,
                 timestampQpc,
                 m_classify,
+                m_stitchingState,
                 m_sampleDiagnostics,
                 m_stitchedFrames,
                 m_runtimeProfileResolver,
@@ -211,6 +213,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             m_boxedStateMachineMethods = null;
             m_stateMachineMethodByTypeName = null;
             m_sampleDiagnostics = null;
+            m_stitchingState = null;
             m_logicalSyncFrameByCodeAddress = null;
             m_frameByIdentity = null;
             m_rootFactory = null;
@@ -244,6 +247,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
             m_diagnostics = new AsyncProfilerCallStackDiagnostics();
             m_sampleDiagnostics = new AsyncProfilerCallStackDiagnostics();
+            m_stitchingState = new AsyncProfilerCallStackStitchingState();
 
             m_segments = new List<AsyncProfilerCallStack>();
             m_syncFrames = new List<AsyncProfilerStitchSyncFrame>();
@@ -770,6 +774,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         private readonly AsyncProfilerCallStackDiagnostics m_diagnostics;
         private AsyncProfilerCallStackDiagnostics m_sampleDiagnostics;
+        private AsyncProfilerCallStackStitchingState m_stitchingState;
 
         private List<AsyncProfilerCallStack> m_segments;
         private List<AsyncProfilerStitchSyncFrame> m_syncFrames;

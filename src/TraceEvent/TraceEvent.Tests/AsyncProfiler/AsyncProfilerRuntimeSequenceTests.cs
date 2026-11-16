@@ -131,7 +131,7 @@ namespace TraceEventTests
             };
             var context = new AsyncProfilerCallStackTransformState(
                 null, new List<AsyncProfilerCallStack>(), 1, _ => AsyncProfilerCallStackStitchBoundaryInfo.None,
-                new AsyncProfilerCallStackDiagnostics(), frames);
+                new AsyncProfilerCallStackStitchingState(), new AsyncProfilerCallStackDiagnostics(), frames);
 
             AsyncProfilerRuntimeSequenceMatch match = context.MatchRuntimeSequence(
                 AsyncProfilerRuntimeSequenceKind.V1AwaitRegistration, 0, 1);
@@ -158,7 +158,7 @@ namespace TraceEventTests
             };
             var context = new AsyncProfilerCallStackTransformState(
                 null, new List<AsyncProfilerCallStack>(), 1, _ => AsyncProfilerCallStackStitchBoundaryInfo.None,
-                new AsyncProfilerCallStackDiagnostics(), frames);
+                new AsyncProfilerCallStackStitchingState(), new AsyncProfilerCallStackDiagnostics(), frames);
 
             Assert.True(AsyncProfilerCallStackTransformHelpers.IsSyncFrameKind(
                 frames[0], AsyncProfilerStitchSyncFrameKind.ProfilerEntry));
@@ -221,7 +221,7 @@ namespace TraceEventTests
                     ca => m_pattern[(int)ca] == 'I' || m_pattern[(int)ca] == 'D'
                         ? new AsyncProfilerCallStackStitchBoundaryInfo(AsyncProfilerCallStackStitchBoundaryKind.V2DispatcherInfrastructure, -1)
                         : AsyncProfilerCallStackStitchBoundaryInfo.None,
-                    Diagnostics, Frames, runtimeProfileResolver ?? (_ => Profile));
+                    new AsyncProfilerCallStackStitchingState(), Diagnostics, Frames, runtimeProfileResolver ?? (_ => Profile));
 
             #region private
 

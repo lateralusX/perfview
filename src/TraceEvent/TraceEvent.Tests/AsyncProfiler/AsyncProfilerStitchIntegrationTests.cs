@@ -361,7 +361,7 @@ namespace TraceEventTests
                     var transforms = new AsyncCallStackTransforms(pipeline);
                     var state = new AsyncProfilerCallStackTransformState(
                         log, segments, 0, _ => AsyncProfilerCallStackStitchBoundaryInfo.None,
-                        new AsyncProfilerCallStackDiagnostics(), new List<AsyncProfilerStitchedFrame>(),
+                        new AsyncProfilerCallStackStitchingState(), new AsyncProfilerCallStackDiagnostics(), new List<AsyncProfilerStitchedFrame>(),
                         runtimeProfile: AsyncProfilerRuntimeRuleProfile.Common);
                     segments.ReadCount = 0;
                     pipeline.ApplyInPlace(state);
@@ -818,22 +818,23 @@ namespace TraceEventTests
                     .Select(i => (CodeAddressIndex)i).Single(ca =>
                         context.ClassifyBoundary(ca).Kind == AsyncProfilerCallStackStitchBoundaryKind.V1Dispatcher);
                 var placements = new[] { new AsyncProfilerCallStackPlacement(activation, 0, frames.Count, dispatch: dispatch) };
-                var diagnostics = new AsyncProfilerCallStackDiagnostics
+                var diagnostics = new AsyncProfilerCallStackDiagnostics();
+                var stitchingState = new AsyncProfilerCallStackStitchingState
                 {
-                    SegmentsProcessed = 1,
-                    BoundariesNotFound = obstruction == "missing-boundary" ? 1 : 0,
-                    V1CompletionAlignmentAmbiguous = obstruction == "ambiguous" ? 1 : 0,
+                    ProcessedCallStackCount = 1,
+                    HasConsistentPhysicalAlignment = obstruction != "missing-boundary",
+                    UnresolvedV1CompletionCount = obstruction == "ambiguous" ? 1 : 0,
                 };
                 var profile = new AsyncProfilerRejectRuntimeBridgeProfile();
                 var state = new AsyncProfilerCallStackTransformState(
-                    context.TraceLog, context.Segments, context.TimestampQpc, context.ClassifyBoundary, diagnostics, frames,
+                    context.TraceLog, context.Segments, context.TimestampQpc, context.ClassifyBoundary, stitchingState, diagnostics, frames,
                     runtimeProfileResolver: obstruction == "profile-veto"
                         ? (Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile>)(ca => profile) : null,
                     segmentPlacements: obstruction == "missing-placement" ? null : placements);
                 CodeAddressIndex bridge = frames.First(frame => frame.Context == null).CodeAddress;
                 Assert.Equal(obstruction == "profile-veto",
                     state.HasVerifiedV1CompletionAnchor(activation, bridge, allowCompletionUnwind: true));
-                new AsyncProfilerInfrastructureCleanupTransform().Apply(state);
+                new AsyncProfilerInfrastructureCleanupTransformPass().Apply(state);
                 Assert.Equal(context.Frames, frames);
                 Assert.Equal(0, diagnostics.RuntimeResumptionBridgeFramesCollapsed);
             };
@@ -3916,6 +3917,39 @@ namespace TraceEventTests
             scenario.AssertProductionStitch();
         }
 
+        [Fact]
+        public void StateMachineAsync_CompletedDispatcherTail_MissingRootAddressRemainsPhysical()
+        {
+            StitchScenario scenario = CreateV1CompletedDispatcherTailScenario();
+            scenario.EnableNormalization = false;
+            scenario.ExpectedStitched = scenario.ExpectedWithoutNormalization;
+            scenario.ExpectedDiagnostics = new CallStackDiagnosticsExpectation { SegmentsProcessed = 2 };
+            scenario.AssertTransformContext = context =>
+            {
+                AsyncProfilerCallStack callStack = Assert.Single(context.Segments);
+                int rootIndex = callStack.Frames.FrameCount - 1;
+                CodeAddressIndex rootAddress = callStack.Frames.CodeAddressAt(rootIndex);
+                var frames = context.Frames.ToList();
+                var diagnostics = new AsyncProfilerCallStackDiagnostics();
+                try
+                {
+                    callStack.Frames.SetCodeAddressAt(rootIndex, CodeAddressIndex.Invalid);
+                    new AsyncProfilerV1PresentationTransformPass().Apply(new AsyncProfilerCallStackTransformState(
+                        context.TraceLog, context.Segments, context.TimestampQpc, context.ClassifyBoundary,
+                        context.StitchingState.Copy(), diagnostics, frames, methodOf: context.GetMethod));
+
+                    Assert.Equal(context.Frames, frames);
+                    Assert.Equal(0, diagnostics.V1CompletionUnwindFramesCollapsed);
+                }
+                finally
+                {
+                    callStack.Frames.SetCodeAddressAt(rootIndex, rootAddress);
+                }
+            };
+
+            scenario.AssertProductionStitch();
+        }
+
         [Theory]
         [InlineData(5, 0)]
         [InlineData(3, 1)]
@@ -4040,12 +4074,13 @@ namespace TraceEventTests
                         obstruction == "wrong-context" ? null : original.Context);
                 }
                 var veto = new RejectingCompletionChainProfile();
-                var diagnostics = new AsyncProfilerCallStackDiagnostics { SegmentsProcessed = 1, BoundariesNotFound = 1 };
+                var diagnostics = new AsyncProfilerCallStackDiagnostics();
+                var stitchingState = new AsyncProfilerCallStackStitchingState { ProcessedCallStackCount = 1 };
                 AsyncProfilerStitchedFrame[] originalFrames = frames.ToArray();
-                new AsyncProfilerV1PresentationTransform().Apply(new AsyncProfilerCallStackTransformState(
+                new AsyncProfilerV1PresentationTransformPass().Apply(new AsyncProfilerCallStackTransformState(
                     context.TraceLog, context.Segments,
                     context.TimestampQpc - (obstruction == "future-completions" ? 10 : 0),
-                    context.ClassifyBoundary, diagnostics, frames, methodOf: context.GetMethod,
+                    context.ClassifyBoundary, stitchingState, diagnostics, frames, methodOf: context.GetMethod,
                     runtimeProfileResolver: address => obstruction == "profile-veto" ? veto : context.GetRuntimeProfile(address)));
                 Assert.Equal(
                     originalFrames.Select(frame => (frame.CodeAddress, frame.Method, frame.Context, frame.SegmentFrameIndex)),
@@ -4204,14 +4239,15 @@ namespace TraceEventTests
                         obstruction == "wrong-context" ? null : original.Context);
                 }
                 var veto = new RejectingCompletionChainProfile();
-                var diagnostics = new AsyncProfilerCallStackDiagnostics { SegmentsProcessed = 1, BoundariesNotFound = 1 };
+                var diagnostics = new AsyncProfilerCallStackDiagnostics();
+                var stitchingState = new AsyncProfilerCallStackStitchingState { ProcessedCallStackCount = 1 };
                 AsyncProfilerStitchedFrame[] originalFrames = frames.ToArray();
                 int[] callers = frames.Where(frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCaller)
                     .Select(frame => frame.SegmentFrameIndex).ToArray();
-                new AsyncProfilerV1PresentationTransform().Apply(new AsyncProfilerCallStackTransformState(
+                new AsyncProfilerV1PresentationTransformPass().Apply(new AsyncProfilerCallStackTransformState(
                     context.TraceLog, context.Segments,
                     context.TimestampQpc - (obstruction == "future-completions" ? 10 : 0),
-                    context.ClassifyBoundary, diagnostics, frames, methodOf: context.GetMethod,
+                    context.ClassifyBoundary, stitchingState, diagnostics, frames, methodOf: context.GetMethod,
                     runtimeProfileResolver: address => obstruction == "profile-veto" ? veto : context.GetRuntimeProfile(address)));
                 Assert.Equal(
                     originalFrames.Select(frame => (frame.CodeAddress, frame.Method, frame.Context, frame.SegmentFrameIndex)),
@@ -4379,25 +4415,25 @@ namespace TraceEventTests
                         obstruction == "disconnected-inner" ? bridgeStart - 1 : bridgeStart,
                         dispatch: obstruction == "missing-inner-dispatch" ? CodeAddressIndex.Invalid : innerDispatch),
                 };
-                var diagnostics = new AsyncProfilerCallStackDiagnostics
+                var diagnostics = new AsyncProfilerCallStackDiagnostics();
+                var stitchingState = new AsyncProfilerCallStackStitchingState
                 {
-                    SegmentsProcessed = 2,
-                    BoundariesNotFound = obstruction == "missing-boundary" ? 1 : 0,
-                    AdjacencyMismatches = obstruction == "adjacency" ? 1 : 0,
-                    V1CompletionAlignmentAmbiguous = obstruction == "ambiguous" ? 1 : 0,
+                    ProcessedCallStackCount = 2,
+                    HasConsistentPhysicalAlignment = obstruction != "missing-boundary" && obstruction != "adjacency",
+                    UnresolvedV1CompletionCount = obstruction == "ambiguous" ? 1 : 0,
                 };
                 var profile = new AsyncProfilerRejectRuntimeBridgeProfile();
                 var state = new AsyncProfilerCallStackTransformState(
                     context.TraceLog, context.Segments,
                     obstruction == "future-completion" ? context.Segments[1].StartQpc - 1 : context.TimestampQpc,
-                    context.ClassifyBoundary, diagnostics, frames,
+                    context.ClassifyBoundary, stitchingState, diagnostics, frames,
                     runtimeProfileResolver: obstruction == "profile-veto"
                         ? (Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile>)(ca => profile) : null,
                     segmentPlacements: obstruction == "missing-placement" ? null : placements);
                 CodeAddressIndex bridge = frames[bridgeStart].CodeAddress;
                 Assert.Equal(obstruction == "profile-veto",
                     state.HasVerifiedCompletedV1OuterDispatch(context.Segments[1], bridge));
-                new AsyncProfilerInfrastructureCleanupTransform().Apply(state);
+                new AsyncProfilerInfrastructureCleanupTransformPass().Apply(state);
                 Assert.Contains(frames, frame => frame.CodeAddress == bridge &&
                     frame.Presentation == AsyncProfilerStitchedFramePresentation.Native);
                 Assert.Equal(0, diagnostics.RuntimeResumptionBridgeFramesCollapsed);
@@ -4512,23 +4548,23 @@ namespace TraceEventTests
                     .Select(i => (CodeAddressIndex)i).Single(ca =>
                         context.ClassifyBoundary(ca).Kind == AsyncProfilerCallStackStitchBoundaryKind.V1Dispatcher);
                 var placements = new[] { new AsyncProfilerCallStackPlacement(activation, 0, frames.Count, dispatch: dispatch) };
-                var diagnostics = new AsyncProfilerCallStackDiagnostics
+                var diagnostics = new AsyncProfilerCallStackDiagnostics();
+                var stitchingState = new AsyncProfilerCallStackStitchingState
                 {
-                    SegmentsProcessed = 1,
-                    BoundariesNotFound = obstruction == "missing-boundary" ? 1 : 0,
-                    AdjacencyMismatches = obstruction == "adjacency" ? 1 : 0,
-                    V1CompletionAlignmentAmbiguous = obstruction == "ambiguous" ? 1 : 0,
+                    ProcessedCallStackCount = 1,
+                    HasConsistentPhysicalAlignment = obstruction != "missing-boundary" && obstruction != "adjacency",
+                    UnresolvedV1CompletionCount = obstruction == "ambiguous" ? 1 : 0,
                 };
                 var profile = new AsyncProfilerRejectRuntimeBridgeProfile();
                 var state = new AsyncProfilerCallStackTransformState(
-                    context.TraceLog, context.Segments, context.TimestampQpc, context.ClassifyBoundary, diagnostics, frames,
+                    context.TraceLog, context.Segments, context.TimestampQpc, context.ClassifyBoundary, stitchingState, diagnostics, frames,
                     runtimeProfileResolver: obstruction == "profile-veto"
                         ? (Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile>)(ca => profile) : null,
                     segmentPlacements: obstruction == "missing-placement" ? null : placements);
                 CodeAddressIndex bridge = frames.First(frame => frame.Context == null).CodeAddress;
                 Assert.Equal(obstruction == "profile-veto",
                     state.HasVerifiedV1CompletionAnchor(activation, bridge, allowCompletionUnwind: true));
-                new AsyncProfilerInfrastructureCleanupTransform().Apply(state);
+                new AsyncProfilerInfrastructureCleanupTransformPass().Apply(state);
                 Assert.Equal(context.Frames, frames);
                 Assert.Equal(0, diagnostics.RuntimeResumptionBridgeFramesCollapsed);
             };
@@ -5812,6 +5848,68 @@ namespace TraceEventTests
         }
 
         [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void StateMachineAsync_ReentrantDispatchEntry_UsesCanonicalIdentityAcrossCodeVersions(
+            bool capturedVersionIsCanonical)
+        {
+            StitchScenario scenario = CreateReentrantDispatchEntryScenario();
+            scenario.EnableNormalization = false;
+            scenario.ExpectedStitched = scenario.ExpectedWithoutNormalization;
+            scenario.ExpectedDiagnostics.V1ReentrantFramesCollapsed = 0;
+            CodeAddressIndex sampledAddress = CodeAddressIndex.Invalid;
+            scenario.ConfigureTraceLog = log =>
+            {
+                ConfigureCapturedRuntime(log, "11.0.0");
+                TraceEvent sample = log.Events.First(data => data.ProviderGuid == SampleProfilerTraceEventParser.ProviderGuid);
+                AsyncProfilerCallStack inner = new AsyncProfilerCallStackComputer(log).GetCallStacks(sample)[0];
+                TraceCodeAddresses addresses = log.CodeAddresses;
+                TraceMethod method = addresses.Methods[addresses.MethodIndex(inner.Frames.CodeAddressAt(0))];
+
+                // Add the sampled code version before stack-source frame index ranges are fixed.
+                MethodIndex sampledMethod = addresses.Methods.NewMethod(
+                    method.FullMethodName, method.MethodModuleFileIndex, method.MethodToken);
+                var sampledInfo = new TraceCodeAddresses.CodeAddressInfo(
+                    addresses[inner.Frames.CodeAddressAt(0)].Address + 0x100000, inner.ProcessIndex);
+                sampledInfo.SetMethodIndex(addresses, sampledMethod);
+                sampledAddress = (CodeAddressIndex)addresses.Count;
+                addresses.codeAddresses.Add(sampledInfo);
+            };
+            scenario.AssertTransformContext = context =>
+            {
+                var frames = context.Frames.ToList();
+                int startupIndex = frames.FindIndex(frame =>
+                    frame.Origin == AsyncProfilerStitchedFrameOrigin.Sync &&
+                    frame.SyncFrameKind == AsyncProfilerStitchSyncFrameKind.V1StateMachineBody);
+                AsyncProfilerStitchedFrame startup = frames[startupIndex];
+                TraceCodeAddresses addresses = context.TraceLog.CodeAddresses;
+                MethodIndex capturedMethod = addresses.MethodIndex(startup.CodeAddress);
+                MethodIndex sampledMethod = addresses.MethodIndex(sampledAddress);
+                Assert.NotEqual(capturedMethod, sampledMethod);
+
+                MethodIndex canonical = capturedVersionIsCanonical ? capturedMethod : sampledMethod;
+                frames[startupIndex] = AsyncProfilerStitchedFrame.CreateSync(
+                    new AsyncProfilerStitchSyncFrame(sampledAddress, canonical, startup.SyncClassification),
+                    startup.Context);
+                var diagnostics = new AsyncProfilerCallStackDiagnostics { SegmentsProcessed = context.Segments.Count };
+                new AsyncProfilerV1PresentationTransformPass().Apply(new AsyncProfilerCallStackTransformState(
+                    context.TraceLog, context.Segments, context.TimestampQpc, context.ClassifyBoundary,
+                    context.StitchingState.Copy(), diagnostics, frames, methodOf: address =>
+                        address == startup.CodeAddress || address == sampledAddress ? canonical : context.GetMethod(address)));
+
+                Assert.Equal(7, diagnostics.V1ReentrantFramesCollapsed);
+                Assert.Single(frames.Where(frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget));
+                Assert.DoesNotContain(frames, frame =>
+                    frame.Origin == AsyncProfilerStitchedFrameOrigin.Sync && frame.CodeAddress == sampledAddress);
+                Assert.DoesNotContain(frames, frame =>
+                    frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent &&
+                    ReferenceEquals(frame.Context, context.Segments[0]));
+            };
+
+            scenario.AssertProductionStitch();
+        }
+
+        [Theory]
         [InlineData("different-context")]
         [InlineData("missing-dispatcher")]
         [InlineData("recursive-outer")]
@@ -5856,7 +5954,7 @@ namespace TraceEventTests
                 var diagnostics = new AsyncProfilerCallStackDiagnostics { SegmentsProcessed = context.Segments.Count };
                 new AsyncProfilerCallStackTransformPipeline().ApplyInPlace(new AsyncProfilerCallStackTransformState(
                     context.TraceLog, context.Segments, context.TimestampQpc, context.ClassifyBoundary,
-                    diagnostics, frames));
+                    context.StitchingState.Copy(), diagnostics, frames));
 
                 Assert.Equal(0, diagnostics.V1ReentrantFramesCollapsed);
                 Assert.Single(frames.Where(frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget));
@@ -7013,11 +7111,11 @@ namespace TraceEventTests
                 AssertTransformContext = context =>
                 {
                     var frames = new List<AsyncProfilerStitchedFrame>(context.Frames);
-                    var diagnostics = new AsyncProfilerCallStackDiagnostics
+                    var diagnostics = new AsyncProfilerCallStackDiagnostics();
+                    var stitchingState = new AsyncProfilerCallStackStitchingState
                     {
-                        BoundariesNotFound = obstruction == "missing-boundary" ? 1 : 0,
-                        AdjacencyMismatches = obstruction == "adjacency-mismatch" ? 1 : 0,
-                        V1CompletionAlignmentAmbiguous = obstruction == "ambiguous-v1" ? 1 : 0,
+                        HasConsistentPhysicalAlignment = obstruction != "missing-boundary" && obstruction != "adjacency-mismatch",
+                        UnresolvedV1CompletionCount = obstruction == "ambiguous-v1" ? 1 : 0,
                     };
                     int outerIndex = frames.FindIndex(frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent);
                     if (obstruction == "outer-target")
@@ -7038,7 +7136,7 @@ namespace TraceEventTests
                     }
                     AsyncProfilerStitchedFrame[] expected = frames.ToArray();
                     var pipeline = new AsyncProfilerCallStackTransformPipeline();
-                    AsyncProfilerStitchResult result = pipeline.Transform(new AsyncProfilerStitchResult(frames, diagnostics), context.Segments,
+                    AsyncProfilerStitchResult result = pipeline.Transform(new AsyncProfilerStitchResult(frames, diagnostics, stitchingState), context.Segments,
                         context.TimestampQpc, context.ClassifyBoundary, obstruction == "no-trace" ? null : context.TraceLog);
                     Assert.Equal(expected, result.Frames);
                     Assert.Equal(0, diagnostics.AsyncReentrantHandoffFramesCollapsed);
@@ -7380,7 +7478,7 @@ namespace TraceEventTests
                     EnableInfrastructureCleanup = true,
                 }.ApplyInPlace(new AsyncProfilerCallStackTransformState(
                     context.TraceLog, context.Segments, context.TimestampQpc,
-                    context.ClassifyBoundary, diagnostics, frames));
+                    context.ClassifyBoundary, context.StitchingState.Copy(), diagnostics, frames));
                 Assert.Equal(prefix, frames.Take(7));
             };
 
@@ -7690,18 +7788,16 @@ namespace TraceEventTests
                         context: null);
                 }
                 AsyncProfilerStitchedFrame[] prefix = frames.Take(currentIndex).ToArray();
-                var diagnostics = new AsyncProfilerCallStackDiagnostics
-                {
-                    SegmentsProcessed = context.Segments.Count,
-                    BoundariesNotFound = obstruction == "missing-boundary" ? 1 : 0,
-                };
+                var diagnostics = new AsyncProfilerCallStackDiagnostics();
+                AsyncProfilerCallStackStitchingState stitchingState = context.StitchingState.Copy();
+                stitchingState.HasConsistentPhysicalAlignment = obstruction != "missing-boundary";
                 new AsyncProfilerCallStackTransformPipeline
                 {
                     EnableNormalization = false,
                     EnableInfrastructureCleanup = true,
                 }.ApplyInPlace(new AsyncProfilerCallStackTransformState(
                     context.TraceLog, context.Segments, context.TimestampQpc,
-                    context.ClassifyBoundary, diagnostics, frames));
+                    context.ClassifyBoundary, stitchingState, diagnostics, frames));
 
                 Assert.Equal(prefix, frames.Take(currentIndex));
                 Assert.Equal(0, diagnostics.ProfilerEnvelopeFramesCollapsed);
@@ -7786,6 +7882,72 @@ namespace TraceEventTests
                     }
                 }
                 Assert.Single(completing);
+            };
+            scenario.AssertProductionStitch();
+        }
+
+        [Fact]
+        public void RecursiveV1Completion_StandaloneTransformsIgnoreDiagnosticsAndKeepIndependentState()
+        {
+            StitchScenario scenario = CreateRecursiveV1CompletionScenario(3);
+            scenario.EnableNormalization = false;
+            scenario.EnableInfrastructureCleanup = false;
+            scenario.ExpectedStitched = scenario.ExpectedWithoutNormalization;
+            scenario.ExpectedWithoutNormalization = null;
+            scenario.ExpectedWithoutInfrastructureCleanup = null;
+            scenario.ExpectedDiagnostics = new CallStackDiagnosticsExpectation
+            {
+                SegmentsProcessed = 2,
+                V1InfrastructureFramesCollapsed = 6,
+            };
+            scenario.AssertTransformContext = context =>
+            {
+                Assert.Equal(1, context.StitchingState.UnresolvedV1CompletionCount);
+                var diagnostics = new AsyncProfilerCallStackDiagnostics();
+                var structural = new AsyncProfilerStitchResult(
+                    context.Frames.ToArray(), diagnostics, context.StitchingState.Copy());
+                var pipeline = new AsyncProfilerCallStackTransformPipeline();
+                AsyncProfilerStitchedFrame[] expected = null;
+
+                for (int diagnosticMode = 0; diagnosticMode < 3; diagnosticMode++)
+                {
+                    if (diagnosticMode == 0)
+                    {
+                        diagnostics.SegmentsProcessed = 1;
+                        diagnostics.V1CompletionAlignmentAmbiguous = 1;
+                    }
+                    else
+                    {
+                        diagnostics.Clear();
+                        if (diagnosticMode == 2)
+                        {
+                            diagnostics.SegmentsProcessed = 50;
+                            diagnostics.BoundariesNotFound = 50;
+                            diagnostics.AdjacencyMismatches = 50;
+                            diagnostics.V1CompletionAlignmentAmbiguous = 50;
+                            diagnostics.V2SyncLayoutUsed = 50;
+                        }
+                    }
+
+                    AsyncProfilerStitchResult result = pipeline.Transform(structural,
+                        context.Segments, context.TimestampQpc, context.ClassifyBoundary, context.TraceLog);
+
+                    Assert.Single(result.Frames.Where(frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.V1CompletedBody));
+                    Assert.Equal(0, result.StitchingState.UnresolvedV1CompletionCount);
+                    Assert.Equal(0, result.Diagnostics.V1CompletionAlignmentAmbiguous);
+                    Assert.NotSame(structural.StitchingState, result.StitchingState);
+                    Assert.Equal(1, structural.StitchingState.UnresolvedV1CompletionCount);
+                    Assert.Equal(context.Frames, structural.Frames);
+                    if (expected == null)
+                    {
+                        expected = result.Frames.ToArray();
+                        Assert.True(expected.Length < structural.Frames.Count);
+                    }
+                    else
+                    {
+                        Assert.Equal(expected, result.Frames);
+                    }
+                }
             };
             scenario.AssertProductionStitch();
         }
@@ -7876,15 +8038,19 @@ namespace TraceEventTests
                 }
                 var diagnostics = new AsyncProfilerCallStackDiagnostics
                 {
-                    SegmentsProcessed = 1,
                     V1CompletionAlignmentAmbiguous = 1,
-                    AdjacencyMismatches = obstruction == "adjacency" ? 1 : 0,
+                };
+                var stitchingState = new AsyncProfilerCallStackStitchingState
+                {
+                    ProcessedCallStackCount = 1,
+                    UnresolvedV1CompletionCount = 1,
+                    HasConsistentPhysicalAlignment = obstruction != "adjacency",
                 };
                 var veto = new RejectingCompletionChainProfile();
                 AsyncProfilerStitchedFrame[] originalFrames = frames.ToArray();
-                new AsyncProfilerV1PresentationTransform().Apply(new AsyncProfilerCallStackTransformState(
+                new AsyncProfilerV1PresentationTransformPass().Apply(new AsyncProfilerCallStackTransformState(
                     context.TraceLog, context.Segments, context.TimestampQpc, context.ClassifyBoundary,
-                    diagnostics, frames, methodOf: context.GetMethod,
+                    stitchingState, diagnostics, frames, methodOf: context.GetMethod,
                     runtimeProfileResolver: address =>
                         obstruction == "profile-veto" ? veto :
                         obstruction == "cross-profile" && address == context.Frames[builder].CodeAddress
@@ -8068,7 +8234,7 @@ namespace TraceEventTests
                 AsyncProfilerStitchedFrame leaf = frames[1];
                 AsyncProfilerStitchedFrame retained = frames[2];
                 var state = CreateOptionalInfrastructureTransformState(context, frames);
-                new AsyncProfilerInfrastructureCleanupTransform().Apply(state);
+                new AsyncProfilerInfrastructureCleanupTransformPass().Apply(state);
                 Assert.Contains(retained, frames);
                 Assert.Contains(frames, frame => frame.CodeAddress == leaf.CodeAddress);
                 Assert.Equal(AsyncProfilerStitchedFramePresentation.Native,
@@ -8117,21 +8283,21 @@ namespace TraceEventTests
                                 ? AsyncProfilerRuntimeRuleProfile.CoreClr11 : AsyncProfilerRuntimeRuleProfile.Common) : null);
                 if (obstruction == "missing-boundary")
                 {
-                    state.Diagnostics.BoundariesNotFound++;
+                    state.StitchingState.HasConsistentPhysicalAlignment = false;
                 }
                 if (obstruction == "incomplete-segments")
                 {
-                    state.Diagnostics.SegmentsProcessed--;
+                    state.StitchingState.ProcessedCallStackCount--;
                 }
                 if (obstruction == "adjacency")
                 {
-                    state.Diagnostics.AdjacencyMismatches++;
+                    state.StitchingState.HasConsistentPhysicalAlignment = false;
                 }
                 if (obstruction == "ambiguous")
                 {
-                    state.Diagnostics.V1CompletionAlignmentAmbiguous++;
+                    state.StitchingState.UnresolvedV1CompletionCount++;
                 }
-                new AsyncProfilerInfrastructureCleanupTransform().Apply(state);
+                new AsyncProfilerInfrastructureCleanupTransformPass().Apply(state);
                 Assert.Contains(interior, frames);
                 Assert.Equal(0, state.Diagnostics.ProfilerEnvelopeFramesCollapsed);
             };
@@ -8171,7 +8337,7 @@ namespace TraceEventTests
                 var profile = new RejectingOptionalInfrastructureProfile();
                 state = CreateOptionalInfrastructureTransformState(context, frames, profileResolver: ca => profile);
                 Assert.True(state.MatchRuntimeSequence(sequence, 1, end, allowRuntimeInteriors: true).IsRejected);
-                new AsyncProfilerInfrastructureCleanupTransform().Apply(state);
+                new AsyncProfilerInfrastructureCleanupTransformPass().Apply(state);
                 Assert.Equal(context.Frames, frames);
                 Assert.Equal(0, state.Diagnostics.AsyncInfrastructureFramesCollapsed);
             };
@@ -8207,7 +8373,7 @@ namespace TraceEventTests
                         context.TraceLog.CodeAddresses[root.CodeAddress].FullMethodName),
                     root.SyncClassification, out var sequence));
                 Assert.False(state.MatchRuntimeSequence(sequence, 1, end, allowRuntimeInteriors: true).IsMatch);
-                new AsyncProfilerInfrastructureCleanupTransform().Apply(state);
+                new AsyncProfilerInfrastructureCleanupTransformPass().Apply(state);
                 Assert.Equal(AsyncProfilerStitchedFramePresentation.Native,
                     frames.Single(frame => frame.CodeAddress == context.Frames[1].CodeAddress).Presentation);
             };
@@ -8230,7 +8396,7 @@ namespace TraceEventTests
                 var state = CreateOptionalInfrastructureTransformState(context, frames);
                 Assert.False(state.MatchRuntimeSequence(AsyncProfilerRuntimeSequenceKind.TaskCompletionChain,
                     1, 5, allowRuntimeInteriors: true).IsMatch);
-                new AsyncProfilerInfrastructureCleanupTransform().Apply(state);
+                new AsyncProfilerInfrastructureCleanupTransformPass().Apply(state);
                 Assert.Equal(AsyncProfilerStitchedFramePresentation.Native,
                     frames.Single(frame => context.TraceLog.CodeAddresses[frame.CodeAddress].FullMethodName ==
                         trigger.SymbolName).Presentation);
@@ -8407,14 +8573,14 @@ namespace TraceEventTests
                 var placements = new[] { new AsyncProfilerCallStackPlacement(activation, 0, frames.Count, dispatch: dispatch) };
                 var diagnostics = new AsyncProfilerCallStackDiagnostics { SegmentsProcessed = 1 };
                 var state = new AsyncProfilerCallStackTransformState(
-                    context.TraceLog, context.Segments, context.TimestampQpc, context.ClassifyBoundary, diagnostics, frames,
+                    context.TraceLog, context.Segments, context.TimestampQpc, context.ClassifyBoundary, context.StitchingState.Copy(), diagnostics, frames,
                     runtimeProfileResolver: ca => context.GetHostModuleOwner(ca) != ModuleFileIndex.Invalid
                         ? profile : AsyncProfilerRuntimeRuleProfile.Common,
                     segmentPlacements: placements);
                 CodeAddressIndex helper = frames.Single(frame =>
                     frame.SyncFrameKind == AsyncProfilerStitchSyncFrameKind.V1MethodCompletion).CodeAddress;
                 Assert.True(state.HasVerifiedV1CompletionAnchor(activation, helper));
-                new AsyncProfilerInfrastructureCleanupTransform().Apply(state);
+                new AsyncProfilerInfrastructureCleanupTransformPass().Apply(state);
                 Assert.Equal(0, diagnostics.ProfilerEnvelopeFramesCollapsed);
                 Assert.Equal(2, diagnostics.AsyncInfrastructureFramesCollapsed);
                 Assert.Equal(1, diagnostics.RuntimeResumptionBridgeFramesCollapsed);
@@ -8452,72 +8618,133 @@ namespace TraceEventTests
                 AsyncProfilerStitchedFrame original = context.Frames[index];
                 CodeAddressIndex bridge = context.Frames[index - 1].CodeAddress;
                 Assert.True(context.HasVerifiedV1CompletionAnchor(original.Context, bridge));
-                try
+                var frames = context.Frames.ToList();
+                var state = CreateOptionalInfrastructureTransformState(context, frames,
+                    includePlacement: obstruction != "missing-placement");
+                if (obstruction == "unresolved-physical" || obstruction == "wrong-method" || obstruction == "wrong-index")
                 {
-                    if (obstruction == "unresolved-physical" || obstruction == "wrong-method" || obstruction == "wrong-index")
+                    frames[index] = AsyncProfilerStitchedFrame.CreateV1CompletedBody(
+                        obstruction == "unresolved-physical" ? CodeAddressIndex.Invalid : original.CodeAddress,
+                        obstruction == "wrong-method"
+                            ? context.TraceLog.CodeAddresses.MethodIndex(original.Segment.CodeAddressAt(1)) : original.Method,
+                        original.Context, obstruction == "wrong-index" ? 1 : original.SegmentFrameIndex);
+                }
+                else if (obstruction == "dispatch-target")
+                {
+                    frames[index] = AsyncProfilerStitchedFrame.CreateAsyncDispatchTarget(
+                        original.Context, original.SegmentFrameIndex);
+                }
+                else if (obstruction == "parent-current")
+                {
+                    frames[index] = AsyncProfilerStitchedFrame.CreateAsyncContextParent(
+                        original.Context, original.SegmentFrameIndex, isCurrent: true);
+                }
+                else if (obstruction == "unwind")
+                {
+                    frames[index] = AsyncProfilerStitchedFrame.CreateV1CompletionReturn(original.Context);
+                }
+                else if (obstruction == "missing-boundary" || obstruction == "adjacency")
+                {
+                    state.StitchingState.HasConsistentPhysicalAlignment = false;
+                }
+                else if (obstruction == "ambiguous")
+                {
+                    state.StitchingState.UnresolvedV1CompletionCount++;
+                }
+                Assert.False(state.HasVerifiedV1CompletionAnchor(original.Context, bridge));
+                Assert.False(state.HasVerifiedV1CompletionAnchor(
+                    original.Context, bridge, allowCompletionUnwind: true));
+            };
+            scenario.AssertProductionStitch();
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void V1CompletionMachinery_UnverifiedStateCannotBeAuthorizedByDiagnostics(bool clearState)
+        {
+            StitchScenario scenario = CreateV1CompletionMachineryScenario();
+            scenario.AssertTransformContext = context =>
+            {
+                var frames = context.Frames.ToList();
+                AsyncProfilerCallStack activation = Assert.Single(context.Segments);
+                CodeAddressIndex dispatch = Enumerable.Range(0, context.TraceLog.CodeAddresses.Count)
+                    .Select(i => (CodeAddressIndex)i).Single(ca =>
+                        context.ClassifyBoundary(ca).Kind == AsyncProfilerCallStackStitchBoundaryKind.V1Dispatcher);
+                var stitchingState = clearState
+                    ? context.StitchingState.Copy()
+                    : new AsyncProfilerCallStackStitchingState();
+                if (clearState)
+                {
+                    stitchingState.Clear();
+                }
+                stitchingState.ProcessedCallStackCount = context.Segments.Count;
+                var diagnostics = new AsyncProfilerCallStackDiagnostics { SegmentsProcessed = context.Segments.Count };
+                var state = new AsyncProfilerCallStackTransformState(
+                    context.TraceLog, context.Segments, context.TimestampQpc, context.ClassifyBoundary,
+                    stitchingState, diagnostics, frames,
+                    segmentPlacements: new[] { new AsyncProfilerCallStackPlacement(activation, 0, frames.Count, dispatch: dispatch) });
+                CodeAddressIndex bridge = frames.First(frame => frame.Context == null).CodeAddress;
+
+                Assert.True(context.HasVerifiedV1CompletionAnchor(activation, bridge));
+                Assert.False(state.HasVerifiedV1CompletionAnchor(activation, bridge));
+            };
+            scenario.AssertProductionStitch();
+        }
+
+        [Fact]
+        public void V1CompletionMachinery_PipelineHelpersAndCleanupIgnoreDiagnosticCounters()
+        {
+            StitchScenario scenario = CreateV1CompletionMachineryScenario();
+            scenario.EnableInfrastructureCleanup = false;
+            scenario.ExpectedStitched = scenario.ExpectedWithoutInfrastructureCleanup;
+            scenario.ExpectedDiagnostics.AsyncInfrastructureFramesCollapsed = 0;
+            scenario.ExpectedDiagnostics.ProfilerEnvelopeFramesCollapsed = 0;
+            scenario.ExpectedDiagnostics.RuntimeResumptionBridgeFramesCollapsed = 0;
+            scenario.AssertTransformContext = context =>
+            {
+                AsyncProfilerCallStack activation = Assert.Single(context.Segments);
+                AsyncProfilerStitchedFrame[] expected = null;
+                for (int diagnosticMode = 0; diagnosticMode < 3; diagnosticMode++)
+                {
+                    var frames = context.Frames.ToList();
+                    var state = CreateOptionalInfrastructureTransformState(context, frames);
+                    if (diagnosticMode == 0)
                     {
-                        context.Frames[index] = AsyncProfilerStitchedFrame.CreateV1CompletedBody(
-                            obstruction == "unresolved-physical" ? CodeAddressIndex.Invalid : original.CodeAddress,
-                            obstruction == "wrong-method"
-                                ? context.TraceLog.CodeAddresses.MethodIndex(original.Segment.CodeAddressAt(1)) : original.Method,
-                            original.Context, obstruction == "wrong-index" ? 1 : original.SegmentFrameIndex);
+                        state.Diagnostics.SegmentsProcessed = context.Segments.Count;
                     }
-                    else if (obstruction == "dispatch-target")
+                    else if (diagnosticMode == 1)
                     {
-                        context.Frames[index] = AsyncProfilerStitchedFrame.CreateAsyncDispatchTarget(
-                            original.Context, original.SegmentFrameIndex);
-                    }
-                    else if (obstruction == "parent-current")
-                    {
-                        context.Frames[index] = AsyncProfilerStitchedFrame.CreateAsyncContextParent(
-                            original.Context, original.SegmentFrameIndex, isCurrent: true);
-                    }
-                    else if (obstruction == "unwind")
-                    {
-                        context.Frames[index] = AsyncProfilerStitchedFrame.CreateV1CompletionReturn(original.Context);
-                    }
-                    else if (obstruction == "missing-boundary")
-                    {
-                        context.Diagnostics.BoundariesNotFound++;
-                    }
-                    else if (obstruction == "adjacency")
-                    {
-                        context.Diagnostics.AdjacencyMismatches++;
-                    }
-                    else if (obstruction == "ambiguous")
-                    {
-                        context.Diagnostics.V1CompletionAlignmentAmbiguous++;
-                    }
-                    if (obstruction == "missing-placement")
-                    {
-                        var unplaced = new AsyncProfilerCallStackTransformState(
-                            context.TraceLog, context.Segments, context.TimestampQpc, context.ClassifyBoundary,
-                            context.Diagnostics, context.Frames);
-                        Assert.False(unplaced.HasVerifiedV1CompletionAnchor(original.Context, bridge));
-                        Assert.False(unplaced.HasVerifiedV1CompletionAnchor(
-                            original.Context, bridge, allowCompletionUnwind: true));
+                        state.Diagnostics.Clear();
                     }
                     else
                     {
-                        Assert.False(context.HasVerifiedV1CompletionAnchor(original.Context, bridge));
-                        Assert.False(context.HasVerifiedV1CompletionAnchor(
-                            original.Context, bridge, allowCompletionUnwind: true));
+                        state.Diagnostics.SegmentsProcessed = 50;
+                        state.Diagnostics.BoundariesNotFound = 50;
+                        state.Diagnostics.AdjacencyMismatches = 50;
+                        state.Diagnostics.V1CompletionAlignmentAmbiguous = 50;
+                        state.Diagnostics.V2SyncLayoutUsed = 50;
                     }
-                }
-                finally
-                {
-                    context.Frames[index] = original;
-                    if (obstruction == "missing-boundary")
+                    CodeAddressIndex bridge = frames.First(frame => frame.Context == null).CodeAddress;
+                    Assert.True(state.HasVerifiedV1CompletionAnchor(activation, bridge));
+
+                    var pipeline = new AsyncProfilerCallStackTransformPipeline
                     {
-                        context.Diagnostics.BoundariesNotFound--;
+                        EnableNormalization = false,
+                        EnableInfrastructureCleanup = true,
+                    };
+                    pipeline.ApplyInPlace(state);
+
+                    Assert.True(state.Diagnostics.ProfilerEnvelopeFramesCollapsed > 0);
+                    Assert.True(state.Diagnostics.RuntimeResumptionBridgeFramesCollapsed > 0);
+                    if (expected == null)
+                    {
+                        expected = frames.ToArray();
+                        Assert.True(expected.Length < context.Frames.Count);
                     }
-                    if (obstruction == "adjacency")
+                    else
                     {
-                        context.Diagnostics.AdjacencyMismatches--;
-                    }
-                    if (obstruction == "ambiguous")
-                    {
-                        context.Diagnostics.V1CompletionAlignmentAmbiguous--;
+                        Assert.Equal(expected, frames);
                     }
                 }
             };
@@ -8592,10 +8819,10 @@ namespace TraceEventTests
                 var placements = new[] { new AsyncProfilerCallStackPlacement(activation, 0, frames.Count, dispatch: dispatch) };
                 var diagnostics = new AsyncProfilerCallStackDiagnostics { SegmentsProcessed = 1 };
                 var raw = new AsyncProfilerCallStackTransformState(
-                    context.TraceLog, context.Segments, context.TimestampQpc, context.ClassifyBoundary, diagnostics, frames,
+                    context.TraceLog, context.Segments, context.TimestampQpc, context.ClassifyBoundary, context.StitchingState.Copy(), diagnostics, frames,
                     segmentPlacements: placements);
                 var normalized = new AsyncProfilerCallStackTransformState(
-                    context.TraceLog, context.Segments, context.TimestampQpc, context.ClassifyBoundary, diagnostics, frames,
+                    context.TraceLog, context.Segments, context.TimestampQpc, context.ClassifyBoundary, context.StitchingState.Copy(), diagnostics, frames,
                     segmentPlacements: placements,
                     methodOf: ca => ca == original.CodeAddress || ca == captured ? canonical : context.GetMethod(ca));
                 Assert.False(raw.HasVerifiedV1CompletionAnchor(activation, frames[index - 1].CodeAddress));
@@ -9351,7 +9578,8 @@ namespace TraceEventTests
             scenario.AssertTransformContext = context =>
             {
                 List<AsyncProfilerStitchedFrame> frames = context.Frames.ToList();
-                var diagnostics = new AsyncProfilerCallStackDiagnostics { SegmentsProcessed = context.Segments.Count };
+                var diagnostics = new AsyncProfilerCallStackDiagnostics();
+                AsyncProfilerCallStackStitchingState stitchingState = context.StitchingState.Copy();
                 if (missingEvidence == "resume-context" || missingEvidence == "dispatcher-context" ||
                     missingEvidence == "different-activation" ||
                     missingEvidence == "unresolved-resume" || missingEvidence == "unresolved-dispatcher")
@@ -9373,15 +9601,15 @@ namespace TraceEventTests
                 }
                 else if (missingEvidence == "missing-boundary")
                 {
-                    diagnostics.BoundariesNotFound = 1;
+                    stitchingState.HasConsistentPhysicalAlignment = false;
                 }
                 else if (missingEvidence == "adjacency-mismatch")
                 {
-                    diagnostics.AdjacencyMismatches = 1;
+                    stitchingState.HasConsistentPhysicalAlignment = false;
                 }
                 else if (missingEvidence == "incomplete-structural-processing")
                 {
-                    diagnostics.SegmentsProcessed = 0;
+                    stitchingState.ProcessedCallStackCount = 0;
                 }
                 AsyncProfilerStitchedFrame resume = frames[0];
                 AsyncProfilerStitchedFrame dispatcher = frames[1];
@@ -9392,7 +9620,7 @@ namespace TraceEventTests
                 };
                 pipeline.ApplyInPlace(new AsyncProfilerCallStackTransformState(
                     missingEvidence == "missing-trace" ? null : context.TraceLog,
-                    context.Segments, context.TimestampQpc, context.ClassifyBoundary, diagnostics, frames));
+                    context.Segments, context.TimestampQpc, context.ClassifyBoundary, stitchingState, diagnostics, frames));
 
                 Assert.Equal(resume, frames[0]);
                 if (missingEvidence != "missing-trace")
@@ -9591,7 +9819,7 @@ namespace TraceEventTests
                 };
                 pipeline.ApplyInPlace(new AsyncProfilerCallStackTransformState(
                     context.TraceLog, context.Segments, context.TimestampQpc,
-                    context.ClassifyBoundary, diagnostics, frames));
+                    context.ClassifyBoundary, context.StitchingState.Copy(), diagnostics, frames));
 
                 Assert.Equal(protectedFrame, frames[0]);
                 Assert.Equal(entry, frames[1]);
@@ -10323,7 +10551,8 @@ namespace TraceEventTests
             scenario.AssertTransformContext = context =>
             {
                 var frames = new List<AsyncProfilerStitchedFrame>(context.Frames);
-                var diagnostics = new AsyncProfilerCallStackDiagnostics { SegmentsProcessed = context.Segments.Count };
+                var diagnostics = new AsyncProfilerCallStackDiagnostics();
+                AsyncProfilerCallStackStitchingState stitchingState = context.StitchingState.Copy();
                 if (obstruction == "completing")
                 {
                     int index = frames.FindIndex(frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent);
@@ -10333,7 +10562,7 @@ namespace TraceEventTests
                 }
                 else
                 {
-                    diagnostics.V1CompletionAlignmentAmbiguous = 1;
+                    stitchingState.UnresolvedV1CompletionCount = 1;
                 }
                 AsyncProfilerStitchedFrame[] expected = frames.ToArray();
                 var pipeline = new AsyncProfilerCallStackTransformPipeline
@@ -10341,7 +10570,7 @@ namespace TraceEventTests
                     EnableNormalization = false,
                     EnableInfrastructureCleanup = true,
                 };
-                AsyncProfilerStitchResult result = pipeline.Transform(new AsyncProfilerStitchResult(frames, diagnostics), context.Segments,
+                AsyncProfilerStitchResult result = pipeline.Transform(new AsyncProfilerStitchResult(frames, diagnostics, stitchingState), context.Segments,
                     context.TimestampQpc, context.ClassifyBoundary, context.TraceLog);
                 Assert.Equal(expected, result.Frames);
                 Assert.Equal(0, diagnostics.AsyncInfrastructureFramesCollapsed);
@@ -10636,6 +10865,7 @@ namespace TraceEventTests
                 AsyncProfilerCallStackStitcher.StitchInto(
                     sync, context.Segments, context.TimestampQpc, boundaries.Classify,
                     (process, kind, timestampQpc) => false, callStack.ProcessIndex, methodOf, false, frames, diagnostics,
+                    stitchingState: new AsyncProfilerCallStackStitchingState(),
                     placements: null, runtimeProfileResolver: boundaries.GetRuntimeProfile,
                     runtimeTraceLog: log, runtimeProfiles: profiles);
                 Assert.DoesNotContain(frames, frame =>
@@ -10896,7 +11126,7 @@ namespace TraceEventTests
                     EnableInfrastructureCleanup = true,
                 };
                 AsyncProfilerStitchResult result = pipeline.Transform(
-                    new AsyncProfilerStitchResult(context.Frames.ToArray(), diagnostics),
+                    new AsyncProfilerStitchResult(context.Frames.ToArray(), diagnostics, context.StitchingState.Copy()),
                     context.Segments, context.TimestampQpc, context.ClassifyBoundary,
                     traceContext ? context.TraceLog : null);
                 Assert.Equal(context.Frames, result.Frames);
@@ -11026,7 +11256,7 @@ namespace TraceEventTests
                     EnableInfrastructureCleanup = true,
                 };
                 AsyncProfilerStitchResult result = pipeline.Transform(
-                    new AsyncProfilerStitchResult(context.Frames.ToArray(), diagnostics),
+                    new AsyncProfilerStitchResult(context.Frames.ToArray(), diagnostics, context.StitchingState.Copy()),
                     context.Segments, context.TimestampQpc, context.ClassifyBoundary);
                 Assert.Equal(context.Frames, result.Frames);
                 Assert.Equal(0, diagnostics.AsyncInfrastructureFramesCollapsed);
@@ -12109,7 +12339,7 @@ namespace TraceEventTests
                     context.ClassifyBoundary(ca).Kind == AsyncProfilerCallStackStitchBoundaryKind.V1Dispatcher);
             return new AsyncProfilerCallStackTransformState(
                 context.TraceLog, context.Segments, context.TimestampQpc, context.ClassifyBoundary,
-                new AsyncProfilerCallStackDiagnostics { SegmentsProcessed = context.Segments.Count }, frames,
+                context.StitchingState.Copy(),                 new AsyncProfilerCallStackDiagnostics(), frames,
                 runtimeProfileResolver: profileResolver,
                 segmentPlacements: includePlacement
                     ? new[] { new AsyncProfilerCallStackPlacement(activation, 0, frames.Count, dispatch: dispatch) } : null);
@@ -13735,7 +13965,7 @@ namespace TraceEventTests
                     {
                         Assert.Same(ExpectedRuntimeProfile, context.RuntimeProfile);
                         var standalone = new AsyncProfilerCallStackTransformState(context.TraceLog, context.Segments,
-                            context.TimestampQpc, context.ClassifyBoundary, new AsyncProfilerCallStackDiagnostics(),
+                            context.TimestampQpc, context.ClassifyBoundary, context.StitchingState.Copy(), new AsyncProfilerCallStackDiagnostics(),
                             new List<AsyncProfilerStitchedFrame>(context.Frames));
                         Assert.Same(ExpectedRuntimeProfile, standalone.RuntimeProfile);
                     });
@@ -13774,7 +14004,7 @@ namespace TraceEventTests
                             frame.Context);
                     }
                     presentation.ApplyInPlace(new AsyncProfilerCallStackTransformState(context.TraceLog, context.Segments,
-                        context.TimestampQpc, context.ClassifyBoundary, context.Diagnostics, context.Frames, runtimeProfileResolver));
+                        context.TimestampQpc, context.ClassifyBoundary, context.StitchingState, context.Diagnostics, context.Frames, runtimeProfileResolver));
                 });
             }
 

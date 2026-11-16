@@ -212,6 +212,7 @@ namespace TraceEventTests
             };
             var output = new List<AsyncProfilerStitchedFrame>();
             var diagnostics = new AsyncProfilerCallStackDiagnostics();
+            var stitchingState = new AsyncProfilerCallStackStitchingState();
             long completionPolicyQpc = long.MinValue;
 
             AsyncProfilerCallStackStitcher.StitchInto(
@@ -228,7 +229,8 @@ namespace TraceEventTests
                 s.MethodOf,
                 trace: false,
                 output,
-                diagnostics);
+                diagnostics,
+                stitchingState);
 
             Assert.Equal(
                 new[] { Scenario.CA(10), Scenario.CA(201), Scenario.CA(12) },
@@ -247,7 +249,8 @@ namespace TraceEventTests
                 s.MethodOf,
                 trace: false,
                 output,
-                diagnostics);
+                diagnostics,
+                stitchingState);
 
             Assert.Equal(
                 new[] { Scenario.CA(20), Scenario.CA(21) },
@@ -4152,10 +4155,11 @@ namespace TraceEventTests
                 var output = new List<AsyncProfilerStitchedFrame>();
                 var diagnostics = new AsyncProfilerCallStackDiagnostics();
                 var placements = new List<AsyncProfilerCallStackPlacement>();
+                var stitchingState = new AsyncProfilerCallStackStitchingState();
                 AsyncProfilerCallStackStitcher.StitchInto(sync, segments, Qpc, Classify,
                     (process, kind, start) => MethodCompletionObserved(kind), ProcessIndex.Invalid, MethodOf,
-                    false, output, diagnostics, placements, index: index);
-                return new AsyncProfilerStitchResult(output, diagnostics, placements);
+                    false, output, diagnostics, stitchingState, placements, index: index);
+                return new AsyncProfilerStitchResult(output, diagnostics, stitchingState, placements);
             }
 
             public AsyncProfilerStitchResult Run(IReadOnlyList<AsyncProfilerStitchSyncFrame> sync, IReadOnlyList<AsyncProfilerCallStack> segments,
@@ -4163,10 +4167,11 @@ namespace TraceEventTests
             {
                 var output = new List<AsyncProfilerStitchedFrame>();
                 var diagnostics = new AsyncProfilerCallStackDiagnostics();
+                var stitchingState = new AsyncProfilerCallStackStitchingState();
                 AsyncProfilerCallStackStitcher.StitchInto(sync, segments, Qpc, Classify,
                     (process, kind, qpc) => MethodCompletionObserved(kind), ProcessIndex.Invalid, MethodOf,
-                    false, output, diagnostics, null, runtimeProfileResolver ?? (_ => profile), profile);
-                return new AsyncProfilerStitchResult(output, diagnostics);
+                    false, output, diagnostics, stitchingState, null, runtimeProfileResolver ?? (_ => profile), profile);
+                return new AsyncProfilerStitchResult(output, diagnostics, stitchingState);
             }
 
             #region private

@@ -22,6 +22,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             IReadOnlyList<AsyncProfilerCallStack> segments,
             long timestampQpc,
             Func<CodeAddressIndex, AsyncProfilerCallStackStitchBoundaryInfo> classifyBoundary,
+            AsyncProfilerCallStackStitchingState stitchingState,
             AsyncProfilerCallStackDiagnostics diagnostics,
             List<AsyncProfilerStitchedFrame> frames,
             Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile> runtimeProfileResolver = null,
@@ -34,6 +35,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             Segments = segments;
             TimestampQpc = timestampQpc;
             m_classifyBoundary = classifyBoundary;
+            StitchingState = stitchingState ?? throw new ArgumentNullException(nameof(stitchingState));
             Diagnostics = diagnostics;
             Frames = frames;
             m_segmentPlacements = segmentPlacements;
@@ -58,6 +60,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         /// <summary>The sample timestamp in the trace QPC domain.</summary>
         public long TimestampQpc { get; }
+
+        /// <summary>Matching results shared by structural stitching, pipeline helpers, and all passes.</summary>
+        public AsyncProfilerCallStackStitchingState StitchingState { get; }
 
         /// <summary>Diagnostics for this sample. Built-in and custom transforms may add presentation counters.</summary>
         public AsyncProfilerCallStackDiagnostics Diagnostics { get; }
@@ -168,9 +173,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             AsyncProfilerCallStack activation, CodeAddressIndex bridge, bool allowCompletionUnwind = false)
         {
             if (activation.Frames.Kind != AsyncCallstackKind.StateMachineAsync ||
-                Diagnostics.SegmentsProcessed != Segments.Count ||
-                Diagnostics.BoundariesNotFound != 0 || Diagnostics.AdjacencyMismatches != 0 ||
-                Diagnostics.V1CompletionAlignmentAmbiguous != 0 ||
+                StitchingState.ProcessedCallStackCount != Segments.Count ||
+                !StitchingState.HasConsistentPhysicalAlignment ||
+                StitchingState.UnresolvedV1CompletionCount != 0 ||
                 !HasVerifiedDispatchEntry(activation, bridge, requireAsyncAnchor: false))
             {
                 return false;
@@ -222,9 +227,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             if (TraceLog == null || m_segmentPlacements == null || Segments.Count < 2 ||
                 !ReferenceEquals(activation, Segments[Segments.Count - 1]) ||
                 activation.Frames.Kind != AsyncCallstackKind.StateMachineAsync || activation.Frames.FrameCount == 0 ||
-                Diagnostics.SegmentsProcessed != Segments.Count ||
-                Diagnostics.BoundariesNotFound != 0 || Diagnostics.AdjacencyMismatches != 0 ||
-                Diagnostics.V1CompletionAlignmentAmbiguous != 0 ||
+                StitchingState.ProcessedCallStackCount != Segments.Count ||
+                !StitchingState.HasConsistentPhysicalAlignment ||
+                StitchingState.UnresolvedV1CompletionCount != 0 ||
                 TraceLog.AsyncProfilerCallStacks?.MethodCompletionObserved(activation) != true ||
                 activation.GetMethodCompletedFrameCount(TimestampQpc) != activation.Frames.FrameCount ||
                 activation.GetExceptionCompletedFrameCount(TimestampQpc) != 0 ||
@@ -550,16 +555,18 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             var frames = new List<AsyncProfilerStitchedFrame>(structuralResult.Frames);
+            AsyncProfilerCallStackStitchingState stitchingState = structuralResult.StitchingState.Copy();
             var context = new AsyncProfilerCallStackTransformState(
                 traceLog,
                 segments,
                 timestampQpc,
                 classifyBoundary,
+                stitchingState,
                 structuralResult.Diagnostics,
                 frames,
                 segmentPlacements: structuralResult.SegmentPlacements);
             ApplyInPlace(context);
-            return new AsyncProfilerStitchResult(frames, structuralResult.Diagnostics);
+            return new AsyncProfilerStitchResult(frames, structuralResult.Diagnostics, stitchingState);
         }
 
         internal void ApplyInPlace(AsyncProfilerCallStackTransformState context)

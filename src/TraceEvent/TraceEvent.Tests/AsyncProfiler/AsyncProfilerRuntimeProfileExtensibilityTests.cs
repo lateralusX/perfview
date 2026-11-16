@@ -73,7 +73,7 @@ namespace TraceEventTests
             var second = new StageProfile("Second", calls);
             var frames = new List<AsyncProfilerStitchedFrame> { Sync(1), Sync(2) };
             var context = new AsyncProfilerCallStackTransformState(null, new List<AsyncProfilerCallStack>(), 1,
-                _ => AsyncProfilerCallStackStitchBoundaryInfo.None, new AsyncProfilerCallStackDiagnostics(), frames,
+                _ => AsyncProfilerCallStackStitchBoundaryInfo.None, new AsyncProfilerCallStackStitchingState(), new AsyncProfilerCallStackDiagnostics(), frames,
                 ca => (int)ca == 1 ? first : second);
             Assert.Same(AsyncProfilerRuntimeRuleProfile.Common, context.RuntimeProfile);
             new AsyncProfilerCallStackTransformPipeline().ApplyInPlace(context);
@@ -114,7 +114,7 @@ namespace TraceEventTests
                 Sync(4),
             };
             var context = new AsyncProfilerCallStackTransformState(null, new List<AsyncProfilerCallStack>(), 1,
-                _ => AsyncProfilerCallStackStitchBoundaryInfo.None, new AsyncProfilerCallStackDiagnostics(), frames,
+                _ => AsyncProfilerCallStackStitchBoundaryInfo.None, new AsyncProfilerCallStackStitchingState(), new AsyncProfilerCallStackDiagnostics(), frames,
                 ca => (int)ca == 1 || (int)ca == 4 || (foreignHelper && (int)ca == 2)
                     ? AsyncProfilerRuntimeRuleProfile.Common : profile,
                 profile);
@@ -232,7 +232,7 @@ namespace TraceEventTests
             var context = new AsyncProfilerCallStackTransformState(null, new List<AsyncProfilerCallStack>(), 1,
                 _ => new AsyncProfilerCallStackStitchBoundaryInfo(
                     AsyncProfilerCallStackStitchBoundaryKind.V1DispatcherInfrastructure, -1),
-                new AsyncProfilerCallStackDiagnostics(), frames,
+                new AsyncProfilerCallStackStitchingState(), new AsyncProfilerCallStackDiagnostics(), frames,
                 ca => (int)ca == 1 ? first : second);
             new AsyncProfilerCallStackTransformPipeline
             {
@@ -254,7 +254,7 @@ namespace TraceEventTests
                 AsyncProfilerStitchedFrame.CreateAsyncCurrent((CodeAddressIndex)1, (MethodIndex)1, Segment(), 0),
             };
             var context = new AsyncProfilerCallStackTransformState(null, new List<AsyncProfilerCallStack>(), 1,
-                _ => AsyncProfilerCallStackStitchBoundaryInfo.None, new AsyncProfilerCallStackDiagnostics(), frames,
+                _ => AsyncProfilerCallStackStitchBoundaryInfo.None, new AsyncProfilerCallStackStitchingState(), new AsyncProfilerCallStackDiagnostics(), frames,
                 _ => throw new InvalidOperationException("Logical frames cannot start synchronous cleanup layouts."),
                 AsyncProfilerRuntimeRuleProfile.Common);
 
@@ -290,7 +290,8 @@ namespace TraceEventTests
             var context = new AsyncProfilerCallStackTransformState(null, new List<AsyncProfilerCallStack>(), 1,
                 ca => (int)ca == 1 ? new AsyncProfilerCallStackStitchBoundaryInfo(AsyncProfilerCallStackStitchBoundaryKind.V2Dispatcher, 0) :
                     AsyncProfilerCallStackStitchBoundaryInfo.None,
-                new AsyncProfilerCallStackDiagnostics { V2SyncLayoutUsed = 1 }, frames, _ => profile);
+                new AsyncProfilerCallStackStitchingState { UsesV2SynchronousLayout = true },
+                new AsyncProfilerCallStackDiagnostics(), frames, _ => profile);
             new AsyncProfilerCallStackTransformPipeline().ApplyInPlace(context);
             Assert.Equal(1, calls);
             Assert.Equal(new[] { 2, 3, 4 }, frames.Select(frame => (int)frame.CodeAddress));
@@ -314,7 +315,7 @@ namespace TraceEventTests
         private static AsyncProfilerCallStackTransformState Context(
             List<AsyncProfilerStitchedFrame> frames, AsyncProfilerRuntimeRuleProfile profile) =>
             new AsyncProfilerCallStackTransformState(null, new List<AsyncProfilerCallStack>(), 1,
-                _ => AsyncProfilerCallStackStitchBoundaryInfo.None, new AsyncProfilerCallStackDiagnostics(), frames, _ => profile);
+                _ => AsyncProfilerCallStackStitchBoundaryInfo.None, new AsyncProfilerCallStackStitchingState(), new AsyncProfilerCallStackDiagnostics(), frames, _ => profile);
 
         private static AsyncProfilerStitchedFrame Sync(int ca, FrameClassification kind = default) =>
             AsyncProfilerStitchedFrame.CreateSync(new AsyncProfilerStitchSyncFrame((CodeAddressIndex)ca, (MethodIndex)ca, kind), null);

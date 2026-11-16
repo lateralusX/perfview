@@ -29,6 +29,7 @@ namespace TraceEventBenchmarks
             _methods = new Dictionary<CodeAddressIndex, MethodIndex>();
             _output = new List<AsyncProfilerStitchedFrame>(32);
             _diagnostics = new AsyncProfilerCallStackDiagnostics();
+            _stitchingState = new AsyncProfilerCallStackStitchingState();
             _classify = Classify;
             _methodCompletionObservedByProcess = MethodCompletionObservedByProcess;
             _methodOf = MethodOf;
@@ -83,7 +84,7 @@ namespace TraceEventBenchmarks
         {
             AsyncProfilerCallStackStitcher.StitchInto(
                 _sync, _segments, Qpc, _classify, _methodCompletionObservedByProcess,
-                s_processIndex, _methodOf, trace: false, _output, _diagnostics);
+                s_processIndex, _methodOf, trace: false, _output, _diagnostics, _stitchingState);
             return _output.Count;
         }
 
@@ -187,6 +188,7 @@ namespace TraceEventBenchmarks
         private Dictionary<CodeAddressIndex, MethodIndex> _methods;
         private List<AsyncProfilerStitchedFrame> _output;
         private AsyncProfilerCallStackDiagnostics _diagnostics;
+        private AsyncProfilerCallStackStitchingState _stitchingState;
         private Func<CodeAddressIndex, AsyncProfilerCallStackStitchBoundaryInfo> _classify;
         private Func<ProcessIndex, AsyncCallstackKind, long, bool> _methodCompletionObservedByProcess;
         private Func<CodeAddressIndex, MethodIndex> _methodOf;

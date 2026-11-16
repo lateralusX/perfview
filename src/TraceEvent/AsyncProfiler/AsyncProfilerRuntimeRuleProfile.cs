@@ -1137,10 +1137,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         private static readonly char[] s_versionSuffixes = { '-', '+', ' ' };
         private static readonly AsyncProfilerRuntimeRuleProfile s_common = new AsyncProfilerRuntimeRuleProfile("Common");
         private static readonly AsyncProfilerRuntimeRuleProfile s_coreClr11 = new AsyncProfilerRuntimeRuleProfile("CoreCLR 11.0");
-        private static readonly AsyncProfilerCallStackTransform s_sampledV2Wrapper = new AsyncProfilerSampledV2WrapperTransform().Apply;
-        private static readonly AsyncProfilerCallStackTransform s_reentrantHandoff = new AsyncProfilerReentrantHandoffTransform().Apply;
-        private static readonly AsyncProfilerCallStackTransform s_v1Presentation = new AsyncProfilerV1PresentationTransform().Apply;
-        private static readonly AsyncProfilerCallStackTransform s_infrastructureCleanup = new AsyncProfilerInfrastructureCleanupTransform().Apply;
+        private static readonly AsyncProfilerCallStackTransform s_sampledV2Wrapper = new AsyncProfilerSampledV2WrapperTransformPass().Apply;
+        private static readonly AsyncProfilerCallStackTransform s_reentrantHandoff = new AsyncProfilerReentrantHandoffTransformPass().Apply;
+        private static readonly AsyncProfilerCallStackTransform s_v1Presentation = new AsyncProfilerV1PresentationTransformPass().Apply;
+        private static readonly AsyncProfilerCallStackTransform s_infrastructureCleanup = new AsyncProfilerInfrastructureCleanupTransformPass().Apply;
 
         #endregion
     }

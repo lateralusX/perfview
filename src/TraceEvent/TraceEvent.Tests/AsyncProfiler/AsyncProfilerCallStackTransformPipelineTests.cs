@@ -98,10 +98,7 @@ namespace TraceEventTests
         [Fact]
         public void ConservativeTransforms_DropV2SampledLeafWrapper()
         {
-            var diagnostics = new AsyncProfilerCallStackDiagnostics
-            {
-                V2SyncLayoutUsed = 1,
-            };
+            var diagnostics = new AsyncProfilerCallStackDiagnostics();
             var frames = new List<AsyncProfilerStitchedFrame>
             {
                 Sync(20),
@@ -113,10 +110,32 @@ namespace TraceEventTests
             pipeline.ApplyInPlace(Context(
                 frames,
                 diagnostics,
-                wrapperCodeAddress: CA(20)));
+                wrapperCodeAddress: CA(20), usesV2SynchronousLayout: true));
 
             Assert.Equal(new[] { CA(21), CA(22) }, frames.Select(frame => frame.CodeAddress));
             Assert.Equal(1, diagnostics.V2LeafWrapperDropped);
+        }
+
+        [Theory]
+        [InlineData(false, 0)]
+        [InlineData(false, 1)]
+        [InlineData(true, 0)]
+        [InlineData(true, 1)]
+        public void SampledV2Wrapper_UsesReconstructionStateRatherThanDiagnostics(
+            bool usesSynchronousLayout, int reportedSynchronousLayouts)
+        {
+            var diagnostics = new AsyncProfilerCallStackDiagnostics
+            {
+                V2SyncLayoutUsed = reportedSynchronousLayouts,
+            };
+            var frames = new List<AsyncProfilerStitchedFrame> { Sync(20), Sync(21) };
+            var pipeline = new AsyncProfilerCallStackTransformPipeline();
+
+            pipeline.ApplyInPlace(Context(frames, diagnostics,
+                wrapperCodeAddress: CA(20), usesV2SynchronousLayout: usesSynchronousLayout));
+
+            Assert.Equal(usesSynchronousLayout ? new[] { Sync(21) } : new[] { Sync(20), Sync(21) }, frames);
+            Assert.Equal(usesSynchronousLayout ? 1 : 0, diagnostics.V2LeafWrapperDropped);
         }
 
         [Fact]
@@ -627,10 +646,10 @@ namespace TraceEventTests
                 for (int sample = 0; sample < 2; sample++)
                 {
                     observed.Clear();
-                    var diagnostics = new AsyncProfilerCallStackDiagnostics { V2SyncLayoutUsed = 1 };
+                    var diagnostics = new AsyncProfilerCallStackDiagnostics();
                     List<AsyncProfilerStitchedFrame> frames = CompositionFrames();
 
-                    pipeline.ApplyInPlace(Context(frames, diagnostics, wrapperCodeAddress: CA(20)));
+                    pipeline.ApplyInPlace(Context(frames, diagnostics, wrapperCodeAddress: CA(20), usesV2SynchronousLayout: true));
 
                     Assert.Equal(expected.Select(CA), frames.Select(frame => frame.CodeAddress));
                     Assert.Equal(new[] { expected.Length }, observed);
@@ -680,9 +699,9 @@ namespace TraceEventTests
             Assert.Empty(frames);
 
             pipeline.ClearCustomTransforms();
-            var diagnostics = new AsyncProfilerCallStackDiagnostics { V2SyncLayoutUsed = 1 };
+            var diagnostics = new AsyncProfilerCallStackDiagnostics();
             frames = CompositionFrames();
-            pipeline.ApplyInPlace(Context(frames, diagnostics, wrapperCodeAddress: CA(20)));
+            pipeline.ApplyInPlace(Context(frames, diagnostics, wrapperCodeAddress: CA(20), usesV2SynchronousLayout: true));
 
             int[] expected = { 10, 11, 14, 15, 16, 17 };
             Assert.Equal(expected.Select(CA), frames.Select(frame => frame.CodeAddress));
@@ -698,17 +717,17 @@ namespace TraceEventTests
         public void BuiltInComponents_CanBeRegisteredThroughExistingDelegateAPI()
         {
             var pipeline = new AsyncProfilerCallStackTransformPipeline { EnableNormalization = false };
-            pipeline.Add(new AsyncProfilerSampledV2WrapperTransform().Apply);
-            pipeline.Add(new AsyncProfilerReentrantHandoffTransform().Apply);
-            pipeline.Add(new AsyncProfilerV1PresentationTransform().Apply);
-            pipeline.Add(new AsyncProfilerInfrastructureCleanupTransform().Apply);
+            pipeline.Add(new AsyncProfilerSampledV2WrapperTransformPass().Apply);
+            pipeline.Add(new AsyncProfilerReentrantHandoffTransformPass().Apply);
+            pipeline.Add(new AsyncProfilerV1PresentationTransformPass().Apply);
+            pipeline.Add(new AsyncProfilerInfrastructureCleanupTransformPass().Apply);
 
             for (int sample = 0; sample < 2; sample++)
             {
-                var diagnostics = new AsyncProfilerCallStackDiagnostics { V2SyncLayoutUsed = 1 };
+                var diagnostics = new AsyncProfilerCallStackDiagnostics();
                 List<AsyncProfilerStitchedFrame> frames = CompositionFrames();
 
-                pipeline.ApplyInPlace(Context(frames, diagnostics, wrapperCodeAddress: CA(20)));
+                pipeline.ApplyInPlace(Context(frames, diagnostics, wrapperCodeAddress: CA(20), usesV2SynchronousLayout: true));
 
                 Assert.Equal(new[] { CA(10), CA(11), CA(14), CA(15), CA(16), CA(17) },
                     frames.Select(frame => frame.CodeAddress));
@@ -748,7 +767,8 @@ namespace TraceEventTests
         {
             var diagnostics = new AsyncProfilerCallStackDiagnostics();
             List<AsyncProfilerStitchedFrame> structuralFrames = StartupFrames();
-            var structuralResult = new AsyncProfilerStitchResult(structuralFrames, diagnostics);
+            var structuralResult = new AsyncProfilerStitchResult(
+                structuralFrames, diagnostics, new AsyncProfilerCallStackStitchingState());
             var pipeline = new AsyncProfilerCallStackTransformPipeline();
 
             AsyncProfilerStitchResult transformed = pipeline.Transform(
@@ -806,7 +826,7 @@ namespace TraceEventTests
             CodeAddressIndex wrapperCodeAddress = CodeAddressIndex.Invalid,
             CodeAddressIndex infrastructureCodeAddress = CodeAddressIndex.Invalid,
             Func<CodeAddressIndex, AsyncProfilerCallStackStitchBoundaryInfo> classifyBoundary = null,
-            long timestampQpc = 1) =>
+            long timestampQpc = 1, bool usesV2SynchronousLayout = false) =>
             new AsyncProfilerCallStackTransformState(
                 traceLog: null, segments: new List<AsyncProfilerCallStack>(), timestampQpc,
                 classifyBoundary: classifyBoundary ?? (codeAddress =>
@@ -823,6 +843,7 @@ namespace TraceEventTests
                     }
                     return AsyncProfilerCallStackStitchBoundaryInfo.None;
                 }),
+                new AsyncProfilerCallStackStitchingState { UsesV2SynchronousLayout = usesV2SynchronousLayout },
                 diagnostics, frames);
 
         private static CodeAddressIndex CA(int value) => (CodeAddressIndex)value;

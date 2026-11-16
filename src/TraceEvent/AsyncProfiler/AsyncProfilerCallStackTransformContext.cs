@@ -9,32 +9,53 @@ using Microsoft.Diagnostics.Tracing.Etlx;
 namespace Microsoft.Diagnostics.Tracing.Computers
 {
     /// <summary>
-    /// A custom presentation callback's view after structural reconstruction and enabled built-in transforms.
+    /// Lets a custom transform inspect and edit a reconstructed call stack.
     /// </summary>
     /// <remarks>
-    /// The context, frame collection, segment collection, and activation objects are temporary callback views.
-    /// Do not retain them or access them after the callback returns. Copy needed scalar identities instead.
-    /// The context and its frame-collection adapter are reused across invocations.
-    /// Edits change presentation, not the persisted index or recorded execution evidence.
-    /// Copying a frame struct or segment list does not detach reused activation references.
+    /// <para>
+    /// Use this context, its collections, and the call stacks they reference only during the callback.
+    /// The context and frame-list objects are reused each time the callback runs.
+    /// </para>
+    /// <para>
+    /// Copy scalar values if you need to keep information after the callback returns.
+    /// Copying frames or collections does not extend the lifetime of the referenced call stacks.
+    /// </para>
+    /// <para>
+    /// Editing <see cref="Frames"/> changes presentation only, not the recorded async data.
+    /// </para>
     /// </remarks>
     public sealed class AsyncProfilerCallStackTransformContext
     {
-        /// <summary>The TraceLog owning the frame identities.</summary>
+        /// <summary>The trace containing the frame identities.</summary>
         public TraceLog TraceLog => m_state.TraceLog;
 
-        /// <summary>The exact reconstruction timestamp in the trace's QPC domain.</summary>
+        /// <summary>The reconstruction timestamp in the trace's QPC domain.</summary>
         public long TimestampQpc => m_state.TimestampQpc;
 
-        /// <summary>The active captured segments on the physical stack's thread, leaf-to-root.
-        /// Historical parents inserted into Frames are not added to this list; use each frame's Context.</summary>
+        /// <summary>
+        /// The active async call stacks on the sampled thread, ordered leaf-to-root.
+        /// </summary>
+        /// <remarks>
+        /// Historical parent expansion adds frames to <see cref="Frames"/>, not entries to this list.
+        /// Each frame's <see cref="AsyncProfilerCallStackFrame.CallStack"/> identifies its associated call stack.
+        /// </remarks>
         public IReadOnlyList<AsyncProfilerCallStack> Segments => m_state.Segments;
 
-        /// <summary>The mutable stitched frame sequence, leaf-to-root, after enabled parent-context expansion
-        /// and built-in transforms, but before frame-name annotations, generated context-transition markers,
-        /// and grouping roots. Frames may be removed, reordered, or replaced; additional labels can be created
-        /// with new AsyncProfilerCallStackFrame("label"). Reused identities must belong to this TraceLog.
-        /// Inserting or replacing with a default frame throws ArgumentException.</summary>
+        /// <summary>
+        /// The mutable reconstructed frame list, ordered leaf-to-root.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Any enabled parent-context expansion and built-in transforms run before the callback.
+        /// Frame-name annotations, generated context-transition markers, and grouping roots are applied later.
+        /// </para>
+        /// <para>
+        /// Frames can be removed, reordered, or replaced. Add display labels with
+        /// <c>new AsyncProfilerCallStackFrame("label")</c>.
+        /// Reused frame identities must belong to <see cref="TraceLog"/>.
+        /// Inserting or replacing a default frame throws <see cref="ArgumentException"/>.
+        /// </para>
+        /// </remarks>
         public IList<AsyncProfilerCallStackFrame> Frames { get; }
 
         #region private
@@ -66,7 +87,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             public int Count => CurrentFrames.Count;
+
             public bool IsReadOnly => false;
+
             public AsyncProfilerCallStackFrame this[int index]
             {
                 get => new AsyncProfilerCallStackFrame(CurrentFrames[index]);
@@ -74,11 +97,18 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             public void Add(AsyncProfilerCallStackFrame item) => CurrentFrames.Add(item.GetFrame());
+
             public void Clear() => CurrentFrames.Clear();
-            public void Insert(int index, AsyncProfilerCallStackFrame item) => CurrentFrames.Insert(index, item.GetFrame());
+
+            public void Insert(int index, AsyncProfilerCallStackFrame item) =>
+                CurrentFrames.Insert(index, item.GetFrame());
+
             public void RemoveAt(int index) => CurrentFrames.RemoveAt(index);
+
             public bool Contains(AsyncProfilerCallStackFrame item) => IndexOf(item) >= 0;
+
             public int IndexOf(AsyncProfilerCallStackFrame item) => CurrentFrames.IndexOf(item.GetFrame());
+
             public bool Remove(AsyncProfilerCallStackFrame item) => CurrentFrames.Remove(item.GetFrame());
 
             public void CopyTo(AsyncProfilerCallStackFrame[] array, int arrayIndex)
@@ -87,14 +117,17 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 {
                     throw new ArgumentNullException(nameof(array));
                 }
+
                 if (arrayIndex < 0 || arrayIndex > array.Length)
                 {
                     throw new ArgumentOutOfRangeException(nameof(arrayIndex));
                 }
+
                 if (array.Length - arrayIndex < Count)
                 {
                     throw new ArgumentException("The destination array is too small.", nameof(array));
                 }
+
                 for (int i = 0; i < Count; i++)
                 {
                     array[arrayIndex + i] = this[i];
