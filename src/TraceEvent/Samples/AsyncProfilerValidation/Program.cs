@@ -397,7 +397,7 @@ namespace AsyncProfilerValidation
                 computer.TargetPid = kernelCpu ? pid : 0;
                 computer.TraceAsyncProfilerCallStackSteps = true;
                 int callbackCount = 0;
-                computer.AsyncProfilerCallStackTransformPipeline.Add(context =>
+                computer.AsyncProfilerCallStackTransformPipeline.AddCustomTransform(context =>
                 {
                     if (context.Segments.Count == 0)
                     {

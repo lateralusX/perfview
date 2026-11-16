@@ -1338,7 +1338,7 @@ dispatcher ID alone is not an activation identity.
 
 ### Inspect structural and presentation evidence
 
-Add a read-only callback using `computer.AsyncProfilerCallStackTransformPipeline.Add(context => ...)`
+Add a read-only callback using `computer.AsyncProfilerCallStackTransformPipeline.AddCustomTransform(context => ...)`
 before generation. Filter to the target QPC **and** owning process/thread.
 Snapshot `context.Frames`, `Segments`, `TimestampQpc`, and diagnostic values.
 For each `AsyncProfilerStitchedFrame`, include `Origin`, `ContextKind`, owning activation,

@@ -114,12 +114,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             bool parentContextsAvailable = false;
             if (m_transforms.EnableParentContexts && m_index.HasDispatcherRecords)
             {
-                if (m_parentContextAugmenter == null)
+                if (m_parentContextBuilder == null)
                 {
-                    m_parentContextAugmenter = new AsyncProfilerParentContextAugmenter();
+                    m_parentContextBuilder = new AsyncProfilerParentContextBuilder();
                 }
 
-                parentContextsAvailable = m_parentContextAugmenter.Prepare(m_index, m_segments);
+                parentContextsAvailable = m_parentContextBuilder.HasParentContextsToAdd(m_index, m_segments);
             }
 
             bool collectPlacements = parentContextsAvailable || m_transforms.EnableNormalization || m_transforms.EnableInfrastructureCleanup;
@@ -156,7 +156,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
             if (parentContextsAvailable)
             {
-                m_parentContextAugmenter.Augment(m_index, m_segments, segmentPlacements, m_stitchedFrames, m_transforms.MaximumParentContextDepth);
+                m_parentContextBuilder.AddParentContexts(m_index, m_segments, segmentPlacements, m_stitchedFrames, m_transforms.MaximumParentContextDepth);
             }
 
             var transformContext = new AsyncProfilerCallStackTransformState(
@@ -206,8 +206,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             m_syncFrames = null;
             m_stitchedFrames = null;
             m_segmentPlacements = null;
-            m_parentContextAugmenter?.Clear();
-            m_parentContextAugmenter = null;
+            m_parentContextBuilder?.Clear();
+            m_parentContextBuilder = null;
 
             m_syncFrameMetadata = null;
             m_boxedStateMachineMethods = null;
@@ -780,7 +780,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         private List<AsyncProfilerStitchSyncFrame> m_syncFrames;
         private List<AsyncProfilerStitchedFrame> m_stitchedFrames;
         private List<AsyncProfilerCallStackPlacement> m_segmentPlacements;
-        private AsyncProfilerParentContextAugmenter m_parentContextAugmenter;
+        private AsyncProfilerParentContextBuilder m_parentContextBuilder;
 
         private Dictionary<CodeAddressIndex, (FrameClassification Classification, AsyncProfilerRuntimeRuleProfile Profile)> m_syncFrameMetadata;
         private Dictionary<CodeAddressIndex, MethodIndex> m_boxedStateMachineMethods;

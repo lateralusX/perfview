@@ -8,29 +8,30 @@ using System.Runtime.CompilerServices;
 namespace Microsoft.Diagnostics.Tracing.Computers
 {
     /// <summary>
-    /// Adds recorded dispatcher creation-parent contexts to an already stitched execution stack. Historical frames
-    /// retain captured states and activation identity. When both completion record types were observed for a parent,
-    /// its frames are advanced to child creation time. The instance owns reusable CPU-sample hot-path scratch buffers.
+    /// Adds recorded parent call stacks to a stitched stack using the child's dispatcher-creation time.
+    /// Parents need not be active at sample time. Captured frame states are unchanged.
     /// </summary>
-    internal sealed class AsyncProfilerParentContextAugmenter
+    internal sealed class AsyncProfilerParentContextBuilder
     {
         internal const int DefaultMaximumDepth = 1;
-        private const int ParentCacheSize = 256;
 
-        internal bool Prepare(
+        /// <summary>
+        /// Returns true if an active call stack has a recorded parent outside the active call-stack list.
+        /// </summary>
+        internal bool HasParentContextsToAdd(
             AsyncProfilerCallStacksIndex index,
-            IReadOnlyList<AsyncProfilerCallStack> activeSegments)
+            IReadOnlyList<AsyncProfilerCallStack> activeCallStacks)
         {
-            for (int i = 0; i < activeSegments.Count; i++)
+            for (int i = 0; i < activeCallStacks.Count; i++)
             {
-                AsyncProfilerCallStack child = activeSegments[i];
+                AsyncProfilerCallStack child = activeCallStacks[i];
                 if (!TryGetParent(index, child, out AsyncProfilerCallStack parent, out _))
                 {
                     continue;
                 }
 
-                var parentIdentity = new ActivationIdentity(parent);
-                if (Contains(activeSegments, parentIdentity))
+                var parentIdentity = new CallStackIdentity(parent);
+                if (Contains(activeCallStacks, parentIdentity))
                 {
                     continue;
                 }
@@ -41,27 +42,30 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             return false;
         }
 
-        internal void Augment(
+        /// <summary>
+        /// Adds missing parent contexts at each placed call stack's root in <paramref name="frames"/>.
+        /// Follows at most <paramref name="maximumDepth"/> parent links for each placed call stack.
+        /// </summary>
+        internal void AddParentContexts(
             AsyncProfilerCallStacksIndex index,
-            IReadOnlyList<AsyncProfilerCallStack> activeSegments,
+            IReadOnlyList<AsyncProfilerCallStack> activeCallStacks,
             IReadOnlyList<AsyncProfilerCallStackPlacement> placements,
             List<AsyncProfilerStitchedFrame> frames,
             int maximumDepth)
         {
             if (index == null) throw new ArgumentNullException(nameof(index));
-            if (activeSegments == null) throw new ArgumentNullException(nameof(activeSegments));
+            if (activeCallStacks == null) throw new ArgumentNullException(nameof(activeCallStacks));
             if (placements == null) throw new ArgumentNullException(nameof(placements));
             if (frames == null) throw new ArgumentNullException(nameof(frames));
             if (maximumDepth <= 0) throw new ArgumentOutOfRangeException(nameof(maximumDepth));
 
             m_active.Clear();
-            for (int i = 0; i < activeSegments.Count; i++)
+            for (int i = 0; i < activeCallStacks.Count; i++)
             {
-                m_active.Add(new ActivationIdentity(activeSegments[i]));
+                m_active.Add(new CallStackIdentity(activeCallStacks[i]));
             }
 
-            // Placements are recorded leaf-to-root. Process them in reverse so root-ward insertions do not
-            // invalidate the still-pending lower insertion indices.
+            // Placements are recorded leaf-to-root. Insert root-to-leaf so the remaining frame indices stay valid.
             for (int placementIndex = placements.Count - 1; placementIndex >= 0; placementIndex--)
             {
                 AsyncProfilerCallStackPlacement placement = placements[placementIndex];
@@ -85,6 +89,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
         }
 
+        /// <summary>Clears reusable buffers and cached parent lookups.</summary>
         internal void Clear()
         {
             m_active.Clear();
@@ -96,16 +101,19 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             m_parentCache = null;
         }
 
+        #region private
+
+        /// <summary>Collects parents until the depth limit, an active call stack, or a repeated call stack.</summary>
         private void CollectMissingParents(
             AsyncProfilerCallStacksIndex index,
-            AsyncProfilerCallStack activation,
+            AsyncProfilerCallStack callStack,
             int maximumDepth)
         {
             m_chain.Clear();
             m_visited.Clear();
-            m_visited.Add(new ActivationIdentity(activation));
+            m_visited.Add(new CallStackIdentity(callStack));
 
-            AsyncProfilerCallStack child = activation;
+            AsyncProfilerCallStack child = callStack;
             for (int depth = 0; depth < maximumDepth; depth++)
             {
                 if (!TryGetParent(index, child, out AsyncProfilerCallStack parent, out long creationQpc))
@@ -113,7 +121,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     break;
                 }
 
-                var identity = new ActivationIdentity(parent);
+                var identity = new CallStackIdentity(parent);
                 if (Contains(m_active, identity) || Contains(m_visited, identity))
                 {
                     break;
@@ -125,13 +133,14 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
         }
 
+        /// <summary>Finds the parent at child-dispatcher creation, caching successful lookups.</summary>
         private bool TryGetParent(
             AsyncProfilerCallStacksIndex index,
             AsyncProfilerCallStack child,
             out AsyncProfilerCallStack parent,
-            out long parentQpc)
+            out long creationQpc)
         {
-            var identity = new ActivationIdentity(child);
+            var identity = new CallStackIdentity(child);
             int cacheIndex = GetParentCacheIndex(index, identity);
             if (m_parentCache != null)
             {
@@ -139,53 +148,55 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 if (cached.Matches(index, identity))
                 {
                     parent = cached.Parent;
-                    parentQpc = cached.ParentQpc;
+                    creationQpc = cached.CreationQpc;
                     return true;
                 }
             }
 
-            bool found = index.TryGetParentCallStack(
-                child, m_parentCandidates, out parent, out parentQpc);
+            bool found = index.TryGetParentCallStack(child, m_parentCandidates, out parent, out creationQpc);
             if (found)
             {
                 if (m_parentCache == null)
                 {
                     m_parentCache = new ParentCacheEntry[ParentCacheSize];
                 }
-                m_parentCache[cacheIndex] =
-                    new ParentCacheEntry(index, identity, parent, parentQpc);
+                m_parentCache[cacheIndex] = new ParentCacheEntry(index, identity, parent, creationQpc);
             }
             return found;
         }
 
         private static int GetParentCacheIndex(
             AsyncProfilerCallStacksIndex index,
-            ActivationIdentity identity) =>
+            CallStackIdentity identity) =>
             (identity.GetHashCode() ^ RuntimeHelpers.GetHashCode(index)) &
             (ParentCacheSize - 1);
 
+        /// <summary>
+        /// Copies the parent's frames, omitting completed frames at child creation only when both
+        /// method-completion and exception-unwind observations are available.
+        /// </summary>
         private void CollectParentFrames(
             AsyncProfilerCallStacksIndex index,
             ParentAtCreation parentAtCreation)
         {
             m_parentFrames.Clear();
             AsyncProfilerCallStack parent = parentAtCreation.Parent;
-            bool adjust = index.MethodCompletionObserved(parent) && index.ExceptionCompletionObserved(parent);
+            bool canTrimCompletedFrames = index.MethodCompletionObserved(parent) && index.ExceptionCompletionObserved(parent);
             int frameCount = parent.Frames.FrameCount;
-            int completed = adjust
+            int completedFrameCount = canTrimCompletedFrames
                 ? Math.Min(frameCount, Math.Max(0, parent.GetCompletedFrameCount(parentAtCreation.CreationQpc)))
                 : 0;
-            for (int frameIndex = completed; frameIndex < frameCount; frameIndex++)
+
+            for (int frameIndex = completedFrameCount; frameIndex < frameCount; frameIndex++)
             {
-                m_parentFrames.Add(
-                    AsyncProfilerStitchedFrame.CreateAsyncContextParent(
-                        parent, frameIndex, isCurrent: adjust && frameIndex == completed));
+                // "Current" refers to child creation, not the sample time.
+                m_parentFrames.Add(AsyncProfilerStitchedFrame.CreateAsyncContextParent(parent, frameIndex, isCurrent: canTrimCompletedFrames && frameIndex == completedFrameCount));
             }
         }
 
         private static bool Contains(
-            List<ActivationIdentity> identities,
-            ActivationIdentity candidate)
+            List<CallStackIdentity> identities,
+            CallStackIdentity candidate)
         {
             for (int i = 0; i < identities.Count; i++)
             {
@@ -194,30 +205,24 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     return true;
                 }
             }
+
             return false;
         }
 
         private static bool Contains(
-            IReadOnlyList<AsyncProfilerCallStack> activations,
-            ActivationIdentity candidate)
+            IReadOnlyList<AsyncProfilerCallStack> callStacks,
+            CallStackIdentity candidate)
         {
-            for (int i = 0; i < activations.Count; i++)
+            for (int i = 0; i < callStacks.Count; i++)
             {
-                if (new ActivationIdentity(activations[i]).Equals(candidate))
+                if (new CallStackIdentity(callStacks[i]).Equals(candidate))
                 {
                     return true;
                 }
             }
+
             return false;
         }
-
-        private readonly List<ActivationIdentity> m_active = new List<ActivationIdentity>();
-        private readonly List<ActivationIdentity> m_visited = new List<ActivationIdentity>();
-        private readonly List<ParentAtCreation> m_chain = new List<ParentAtCreation>();
-        private readonly List<AsyncProfilerCallStack> m_parentCandidates = new List<AsyncProfilerCallStack>();
-        private readonly List<AsyncProfilerStitchedFrame> m_insertion = new List<AsyncProfilerStitchedFrame>();
-        private readonly List<AsyncProfilerStitchedFrame> m_parentFrames = new List<AsyncProfilerStitchedFrame>();
-        private ParentCacheEntry[] m_parentCache;
 
         private readonly struct ParentAtCreation
         {
@@ -231,22 +236,22 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             internal long CreationQpc { get; }
         }
 
-        private readonly struct ActivationIdentity : IEquatable<ActivationIdentity>
+        private readonly struct CallStackIdentity : IEquatable<CallStackIdentity>
         {
-            internal ActivationIdentity(AsyncProfilerCallStack activation)
+            internal CallStackIdentity(AsyncProfilerCallStack callStack)
             {
-                Thread = activation.Thread;
-                DispatcherId = activation.DispatcherId;
-                StartQpc = activation.StartQpc;
+                Thread = callStack.Thread;
+                DispatcherId = callStack.DispatcherId;
+                StartQpc = callStack.StartQpc;
             }
 
-            public bool Equals(ActivationIdentity other) =>
+            public bool Equals(CallStackIdentity other) =>
                 Thread.Equals(other.Thread) &&
                 DispatcherId == other.DispatcherId &&
                 StartQpc == other.StartQpc;
 
             public override bool Equals(object obj) =>
-                obj is ActivationIdentity other && Equals(other);
+                obj is CallStackIdentity other && Equals(other);
 
             public override int GetHashCode()
             {
@@ -267,26 +272,39 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         {
             internal ParentCacheEntry(
                 AsyncProfilerCallStacksIndex index,
-                ActivationIdentity identity,
+                CallStackIdentity identity,
                 AsyncProfilerCallStack parent,
-                long parentQpc)
+                long creationQpc)
             {
                 Index = index;
                 Identity = identity;
                 Parent = parent;
-                ParentQpc = parentQpc;
+                CreationQpc = creationQpc;
             }
 
             internal bool Matches(
                 AsyncProfilerCallStacksIndex index,
-                ActivationIdentity identity) =>
+                CallStackIdentity identity) =>
                 ReferenceEquals(Index, index) && Identity.Equals(identity);
 
             internal AsyncProfilerCallStack Parent { get; }
-            internal long ParentQpc { get; }
+            internal long CreationQpc { get; }
 
             private AsyncProfilerCallStacksIndex Index { get; }
-            private ActivationIdentity Identity { get; }
+            private CallStackIdentity Identity { get; }
         }
+
+        // Must be a power of two for masked cache indexing.
+        private const int ParentCacheSize = 256;
+
+        private readonly List<CallStackIdentity> m_active = new List<CallStackIdentity>();
+        private readonly List<CallStackIdentity> m_visited = new List<CallStackIdentity>();
+        private readonly List<ParentAtCreation> m_chain = new List<ParentAtCreation>();
+        private readonly List<AsyncProfilerCallStack> m_parentCandidates = new List<AsyncProfilerCallStack>();
+        private readonly List<AsyncProfilerStitchedFrame> m_insertion = new List<AsyncProfilerStitchedFrame>();
+        private readonly List<AsyncProfilerStitchedFrame> m_parentFrames = new List<AsyncProfilerStitchedFrame>();
+        private ParentCacheEntry[] m_parentCache;
+
+        #endregion
     }
 }

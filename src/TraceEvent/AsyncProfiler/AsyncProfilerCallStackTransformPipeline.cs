@@ -12,11 +12,12 @@ using static Microsoft.Diagnostics.Tracing.Computers.AsyncProfilerCallStackTrans
 namespace Microsoft.Diagnostics.Tracing.Computers
 {
     /// <summary>
-    /// Per-sample context supplied to an async stack presentation transform. Structural stitching has already
-    /// completed, and <see cref="Frames"/> contains the complete stitched stack leaf-to-root.
+    /// State shared by presentation transforms for one sample, after structural stitching.
+    /// <see cref="Frames"/> contains the complete stitched stack in leaf-to-root order.
     /// </summary>
     internal readonly struct AsyncProfilerCallStackTransformState
     {
+        /// <summary>Creates the sample's shared state and selects its runtime profile.</summary>
         internal AsyncProfilerCallStackTransformState(
             TraceLog traceLog,
             IReadOnlyList<AsyncProfilerCallStack> segments,
@@ -42,272 +43,393 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             m_methodOf = methodOf;
             m_runtimeProfiles = runtimeProfiles ??
                 (traceLog == null ? null : new AsyncProfilerRuntimeRuleProfileCache(traceLog.ModuleFiles));
-            m_runtimeProfileResolver = runtimeProfileResolver ?? CreateRuntimeProfileResolver(traceLog, m_runtimeProfiles);
+            m_runtimeProfileResolver = runtimeProfileResolver ??
+                CreateRuntimeProfileResolver(traceLog, m_runtimeProfiles);
             RuntimeProfile = runtimeProfile ?? ResolveRuntimeProfile(
-                traceLog, segments, frames, m_runtimeProfileResolver, m_runtimeProfiles, runtimeProfileResolver == null);
+                traceLog, segments, frames, m_runtimeProfileResolver, m_runtimeProfiles,
+                useProcessProfile: runtimeProfileResolver == null);
         }
 
         /// <summary>
-        /// The trace whose code addresses are referenced by <see cref="Frames"/>, or null if a standalone
-        /// <see cref="AsyncProfilerCallStackTransformPipeline.Transform"/> call supplies no trace context. Built-in transforms
-        /// requiring module or symbol metadata fail open when this is null.
+        /// The trace referenced by <see cref="Frames"/>, or null for a standalone transform without a trace.
+        /// Rules needing module or symbol metadata leave unverified frames unchanged when this is null.
         /// </summary>
         public TraceLog TraceLog { get; }
 
-        /// <summary>The active async segments used by structural stitching, ordered leaf-to-root.
-        /// During computer callbacks, the list and its activation objects are reused and must not be retained.</summary>
+        /// <summary>
+        /// Active async call stacks used by structural stitching, in leaf-to-root order.
+        /// During computer callbacks, the list and its call-stack objects are reused and must not be retained.
+        /// </summary>
         public IReadOnlyList<AsyncProfilerCallStack> Segments { get; }
 
         /// <summary>The sample timestamp in the trace QPC domain.</summary>
         public long TimestampQpc { get; }
 
-        /// <summary>Matching results shared by structural stitching, pipeline helpers, and all passes.</summary>
+        /// <summary>Matching state shared by structural stitching, pipeline helpers, and all passes.</summary>
         public AsyncProfilerCallStackStitchingState StitchingState { get; }
 
-        /// <summary>Diagnostics for this sample. Built-in and custom transforms may add presentation counters.</summary>
+        /// <summary>
+        /// Diagnostics for this sample.
+        /// </summary>
         public AsyncProfilerCallStackDiagnostics Diagnostics { get; }
 
         /// <summary>The complete mutable stitched stack, leaf-to-root.</summary>
         public List<AsyncProfilerStitchedFrame> Frames { get; }
 
+        /// <summary>
+        /// Runtime profile selected for this sample before presentation transforms modify its frames.
+        /// </summary>
+        internal AsyncProfilerRuntimeRuleProfile RuntimeProfile { get; }
+
         /// <summary>Classifies a frame using the runtime boundary-name contract for this trace.</summary>
         public AsyncProfilerCallStackStitchBoundaryInfo ClassifyBoundary(CodeAddressIndex codeAddress) =>
             m_classifyBoundary(codeAddress);
 
-        /// <summary>
-        /// Unambiguous captured runtime for whole-stage replacement and application-led layouts. Fixed before
-        /// any pass removes runtime evidence; mixed profiles use Common, never another sample's selection.
-        /// </summary>
-        internal AsyncProfilerRuntimeRuleProfile RuntimeProfile { get; }
-
+        /// <summary>Gets the runtime profile for a captured code address.</summary>
         internal AsyncProfilerRuntimeRuleProfile GetRuntimeProfile(CodeAddressIndex codeAddress) =>
             m_runtimeProfileResolver(codeAddress) ??
             throw new InvalidOperationException("The runtime profile resolver returned null.");
 
+        /// <summary>Gets the captured CoreLib owner, or Invalid when it cannot be identified.</summary>
         internal ModuleFileIndex GetHostModuleOwner(CodeAddressIndex codeAddress) =>
             TraceLog == null || codeAddress == CodeAddressIndex.Invalid
                 ? ModuleFileIndex.Invalid
                 : m_runtimeProfiles.GetHostModuleOwner(TraceLog.CodeAddresses.ModuleFileIndex(codeAddress));
 
-        /// <summary>Uses the stitcher's canonical identity across captured and sampled code versions.</summary>
+        /// <summary>
+        /// Uses the supplied method resolver, or the trace's method index when no resolver was supplied.
+        /// </summary>
         internal MethodIndex GetMethod(CodeAddressIndex codeAddress)
         {
             if (codeAddress == CodeAddressIndex.Invalid)
             {
                 return MethodIndex.Invalid;
             }
+
             if (m_methodOf != null)
             {
                 return m_methodOf(codeAddress);
             }
+
             return TraceLog == null ? MethodIndex.Invalid : TraceLog.CodeAddresses.MethodIndex(codeAddress);
         }
 
+        /// <summary>Checks that two physical addresses form a V2 dispatch pair from the same runtime.</summary>
         internal bool IsV2DispatchPair(CodeAddressIndex instrumented, CodeAddressIndex dispatch) =>
             TraceLog != null &&
             AsyncProfilerCallStackStitcher.IsV2DispatchPair(TraceLog, m_runtimeProfiles, instrumented, dispatch);
 
-        internal bool HasVerifiedV2DispatchPair(AsyncProfilerCallStack activation, CodeAddressIndex bridge)
+        /// <summary>Checks the bridge's runtime against a captured V2 dispatch pair for this call stack.</summary>
+        internal bool HasVerifiedV2DispatchPair(AsyncProfilerCallStack callStack, CodeAddressIndex bridge)
         {
             if (TraceLog == null || m_segmentPlacements == null)
             {
                 return false;
             }
+
             ModuleFileIndex owner = GetHostModuleOwner(bridge);
             foreach (AsyncProfilerCallStackPlacement placement in m_segmentPlacements)
             {
-                if (ReferenceEquals(placement.CallStack, activation) &&
+                bool hasMatchingPlacementOwner =
+                    ReferenceEquals(placement.CallStack, callStack) &&
                     owner != ModuleFileIndex.Invalid &&
-                    owner == GetHostModuleOwner(placement.InstrumentedDispatch) &&
-                    ReferenceEquals(GetRuntimeProfile(bridge), GetRuntimeProfile(placement.InstrumentedDispatch)) &&
+                    owner == GetHostModuleOwner(placement.InstrumentedDispatch);
+                bool hasMatchingRuntimeProfile =
+                    hasMatchingPlacementOwner &&
+                    ReferenceEquals(GetRuntimeProfile(bridge), GetRuntimeProfile(placement.InstrumentedDispatch));
+                bool hasVerifiedPair =
+                    hasMatchingRuntimeProfile &&
                     AsyncProfilerCallStackStitcher.IsV2DispatchPair(
-                        TraceLog, m_runtimeProfiles, placement.InstrumentedDispatch, placement.Dispatch))
+                        TraceLog, m_runtimeProfiles, placement.InstrumentedDispatch, placement.Dispatch);
+                if (hasVerifiedPair)
                 {
                     return true;
                 }
             }
+
             return false;
         }
 
+        /// <summary>Verifies a captured V1 dispatcher or V2 dispatch pair for the bridge's runtime.</summary>
+        /// <remarks>
+        /// V1 also needs a verified current method or dispatch target when
+        /// <paramref name="requireAsyncAnchor"/> is true.
+        /// </remarks>
         internal bool HasVerifiedDispatchEntry(
-            AsyncProfilerCallStack activation, CodeAddressIndex bridge, bool requireAsyncAnchor = true)
+            AsyncProfilerCallStack callStack, CodeAddressIndex bridge, bool requireAsyncAnchor = true)
         {
-            if (activation.Frames.Kind == AsyncCallstackKind.RuntimeAsync)
+            if (callStack.Frames.Kind == AsyncCallstackKind.RuntimeAsync)
             {
-                return HasVerifiedV2DispatchPair(activation, bridge);
+                return HasVerifiedV2DispatchPair(callStack, bridge);
             }
+
             if (TraceLog == null || m_segmentPlacements == null)
             {
                 return false;
             }
+
             ModuleFileIndex owner = GetHostModuleOwner(bridge);
             foreach (AsyncProfilerCallStackPlacement placement in m_segmentPlacements)
             {
-                if (!ReferenceEquals(placement.CallStack, activation) ||
-                    owner == ModuleFileIndex.Invalid || owner != GetHostModuleOwner(placement.Dispatch) ||
-                    !ReferenceEquals(GetRuntimeProfile(bridge), GetRuntimeProfile(placement.Dispatch)) ||
-                    ClassifyBoundary(placement.Dispatch).Kind != AsyncProfilerCallStackStitchBoundaryKind.V1Dispatcher ||
-                    TraceLog.CodeAddresses.MethodIndex(placement.Dispatch) == MethodIndex.Invalid)
+                bool hasMatchingPlacementOwner =
+                    ReferenceEquals(placement.CallStack, callStack) &&
+                    owner != ModuleFileIndex.Invalid && owner == GetHostModuleOwner(placement.Dispatch);
+                bool hasMatchingRuntimeProfile =
+                    hasMatchingPlacementOwner &&
+                    ReferenceEquals(GetRuntimeProfile(bridge), GetRuntimeProfile(placement.Dispatch));
+                bool hasResolvedV1Dispatcher =
+                    hasMatchingRuntimeProfile &&
+                    ClassifyBoundary(placement.Dispatch).Kind ==
+                        AsyncProfilerCallStackStitchBoundaryKind.V1Dispatcher &&
+                    TraceLog.CodeAddresses.MethodIndex(placement.Dispatch) != MethodIndex.Invalid;
+                if (!hasResolvedV1Dispatcher)
                 {
                     continue;
                 }
+
                 // Grouping dispatch machinery does not require the pending application target to have started.
                 if (!requireAsyncAnchor)
                 {
                     return true;
                 }
+
+                // Verify the first matching span; do not combine anchors from separate spans.
                 for (int i = Frames.Count - 1; i >= 0; i--)
                 {
-                    if (ReferenceEquals(Frames[i].Context, activation))
+                    if (ReferenceEquals(Frames[i].Context, callStack))
                     {
-                        return HasVerifiedAsyncAnchor(this, i, activation);
+                        return HasVerifiedAsyncAnchor(this, i, callStack);
                     }
                 }
             }
+
             return false;
         }
 
-        /// <summary>Verifies a V1 completion owner for machinery cleanup, not an executing target.
-        /// Bounded resumption bridges can also accept a normalized, fully completed return unwind.</summary>
+        /// <summary>
+        /// Verifies V1 completion ownership for helper cleanup, without claiming the method is running.
+        /// </summary>
+        /// <remarks>
+        /// If <paramref name="allowCompletionUnwind"/> is true, also accepts a normalized return unwind
+        /// after the entire call stack has completed.
+        /// </remarks>
         internal bool HasVerifiedV1CompletionAnchor(
-            AsyncProfilerCallStack activation, CodeAddressIndex bridge, bool allowCompletionUnwind = false)
+            AsyncProfilerCallStack callStack, CodeAddressIndex bridge, bool allowCompletionUnwind = false)
         {
-            if (activation.Frames.Kind != AsyncCallstackKind.StateMachineAsync ||
-                StitchingState.ProcessedCallStackCount != Segments.Count ||
-                !StitchingState.HasConsistentPhysicalAlignment ||
-                StitchingState.UnresolvedV1CompletionCount != 0 ||
-                !HasVerifiedDispatchEntry(activation, bridge, requireAsyncAnchor: false))
+            bool hasUnambiguousV1CallStack =
+                callStack.Frames.Kind == AsyncCallstackKind.StateMachineAsync &&
+                StitchingState.ProcessedCallStackCount == Segments.Count &&
+                StitchingState.HasConsistentPhysicalAlignment &&
+                StitchingState.UnresolvedV1CompletionCount == 0;
+            bool hasVerifiedDispatcher =
+                hasUnambiguousV1CallStack &&
+                HasVerifiedDispatchEntry(callStack, bridge, requireAsyncAnchor: false);
+            if (!hasVerifiedDispatcher)
             {
                 return false;
             }
 
-            int completed = activation.GetCompletedFrameCount(TimestampQpc);
-            if (completed <= 0 || completed > activation.Frames.FrameCount)
+            int completed = callStack.GetCompletedFrameCount(TimestampQpc);
+            bool hasCapturedCompletion = completed > 0 && completed <= callStack.Frames.FrameCount;
+            if (!hasCapturedCompletion)
             {
                 return false;
             }
-            CodeAddressIndex captured = activation.Frames.CodeAddressAt(completed - 1);
-            if (captured == CodeAddressIndex.Invalid)
+
+            CodeAddressIndex capturedAddress = callStack.Frames.CodeAddressAt(completed - 1);
+            if (capturedAddress == CodeAddressIndex.Invalid)
             {
                 return false;
             }
+
             foreach (AsyncProfilerStitchedFrame frame in Frames)
             {
-                if (allowCompletionUnwind &&
+                // A normalized return can prove ownership after full completion; it is not a running body.
+                bool isCompletionReturn =
+                    allowCompletionUnwind &&
                     frame.Origin == AsyncProfilerStitchedFrameOrigin.V1CompletionReturn &&
-                    !frame.IsDispatcherTailUnwind &&
+                    !frame.IsDispatcherTailUnwind;
+                bool hasCompletedReturnRoot =
+                    isCompletionReturn &&
                     frame.ContextKind == AsyncProfilerStitchedFrameContextKind.Active &&
-                    ReferenceEquals(frame.Context, activation) &&
-                    completed == activation.Frames.FrameCount &&
+                    ReferenceEquals(frame.Context, callStack) &&
+                    completed == callStack.Frames.FrameCount;
+                bool hasMatchingReturnIdentity =
+                    hasCompletedReturnRoot &&
                     frame.SegmentFrameIndex == completed - 1 &&
-                    frame.CodeAddress == captured && frame.Method == MethodIndex.Invalid &&
-                    GetMethod(captured) != MethodIndex.Invalid &&
-                    TraceLog.AsyncProfilerCallStacks?.MethodCompletionObserved(activation) == true &&
-                    activation.GetMethodCompletedFrameCount(TimestampQpc) > 0)
+                    frame.CodeAddress == capturedAddress && frame.Method == MethodIndex.Invalid;
+                bool hasVerifiedReturnCompletion =
+                    hasMatchingReturnIdentity &&
+                    GetMethod(capturedAddress) != MethodIndex.Invalid &&
+                    TraceLog.AsyncProfilerCallStacks?.MethodCompletionObserved(callStack) == true &&
+                    callStack.GetMethodCompletedFrameCount(TimestampQpc) > 0;
+                if (hasVerifiedReturnCompletion)
                 {
                     return true;
                 }
-                if (frame.Origin == AsyncProfilerStitchedFrameOrigin.V1CompletedBody &&
+
+                // A retained completed body must match the captured method through the same resolver.
+                bool hasOwnedCompletedBody =
+                    frame.Origin == AsyncProfilerStitchedFrameOrigin.V1CompletedBody &&
                     frame.ContextKind == AsyncProfilerStitchedFrameContextKind.Active &&
-                    ReferenceEquals(frame.Context, activation) &&
-                    frame.SegmentFrameIndex == completed - 1 &&
-                    frame.CodeAddress != CodeAddressIndex.Invalid && frame.Method != MethodIndex.Invalid &&
+                    ReferenceEquals(frame.Context, callStack) &&
+                    frame.SegmentFrameIndex == completed - 1;
+                bool hasResolvedCompletedBody =
+                    hasOwnedCompletedBody &&
+                    frame.CodeAddress != CodeAddressIndex.Invalid && frame.Method != MethodIndex.Invalid;
+                bool hasMatchingCompletedMethod =
+                    hasResolvedCompletedBody &&
                     GetMethod(frame.CodeAddress) == frame.Method &&
-                    GetMethod(captured) == frame.Method)
+                    GetMethod(capturedAddress) == frame.Method;
+                if (hasMatchingCompletedMethod)
                 {
                     return true;
                 }
             }
+
             return false;
         }
 
-        /// <summary>Retains machinery ownership when a fully completed outer V1 activation emitted no frames.</summary>
-        internal bool HasVerifiedCompletedV1OuterDispatch(AsyncProfilerCallStack activation, CodeAddressIndex bridge)
+        /// <summary>
+        /// Verifies ownership of runtime helpers after a V1 root call stack has fully completed
+        /// and has no frames left in the stitched result. Uses saved dispatcher evidence for
+        /// the root and its immediate nested call stack instead of an active method frame.
+        /// </summary>
+        internal bool HasVerifiedCompletedV1OuterDispatch(AsyncProfilerCallStack callStack, CodeAddressIndex bridge)
         {
-            if (TraceLog == null || m_segmentPlacements == null || Segments.Count < 2 ||
-                !ReferenceEquals(activation, Segments[Segments.Count - 1]) ||
-                activation.Frames.Kind != AsyncCallstackKind.StateMachineAsync || activation.Frames.FrameCount == 0 ||
-                StitchingState.ProcessedCallStackCount != Segments.Count ||
-                !StitchingState.HasConsistentPhysicalAlignment ||
-                StitchingState.UnresolvedV1CompletionCount != 0 ||
-                TraceLog.AsyncProfilerCallStacks?.MethodCompletionObserved(activation) != true ||
-                activation.GetMethodCompletedFrameCount(TimestampQpc) != activation.Frames.FrameCount ||
-                activation.GetExceptionCompletedFrameCount(TimestampQpc) != 0 ||
-                Segments[Segments.Count - 2].Depth != activation.Depth + 1 ||
-                !HasVerifiedDispatchEntry(activation, bridge, requireAsyncAnchor: false) ||
-                !HasVerifiedDispatchEntry(Segments[Segments.Count - 2], bridge, requireAsyncAnchor: false))
+            bool hasRootCallStack =
+                TraceLog != null && m_segmentPlacements != null && Segments.Count >= 2 &&
+                ReferenceEquals(callStack, Segments[Segments.Count - 1]);
+            bool hasNonemptyV1Root =
+                hasRootCallStack &&
+                callStack.Frames.Kind == AsyncCallstackKind.StateMachineAsync && callStack.Frames.FrameCount != 0;
+            bool hasUnambiguousStitching =
+                hasNonemptyV1Root &&
+                StitchingState.ProcessedCallStackCount == Segments.Count &&
+                StitchingState.HasConsistentPhysicalAlignment &&
+                StitchingState.UnresolvedV1CompletionCount == 0;
+            bool hasFullNormalCompletion =
+                hasUnambiguousStitching &&
+                TraceLog.AsyncProfilerCallStacks?.MethodCompletionObserved(callStack) == true &&
+                callStack.GetMethodCompletedFrameCount(TimestampQpc) == callStack.Frames.FrameCount &&
+                callStack.GetExceptionCompletedFrameCount(TimestampQpc) == 0;
+            if (!hasFullNormalCompletion)
             {
                 return false;
             }
+
+            AsyncProfilerCallStack nestedCallStack = Segments[Segments.Count - 2];
+            bool hasImmediateNestedCallStack = nestedCallStack.Depth == callStack.Depth + 1;
+            bool hasSharedVerifiedDispatch =
+                hasImmediateNestedCallStack &&
+                HasVerifiedDispatchEntry(callStack, bridge, requireAsyncAnchor: false) &&
+                HasVerifiedDispatchEntry(nestedCallStack, bridge, requireAsyncAnchor: false);
+            if (!hasSharedVerifiedDispatch)
+            {
+                return false;
+            }
+
+            // The completed root must no longer own any output frames.
             foreach (AsyncProfilerStitchedFrame frame in Frames)
             {
-                if (ReferenceEquals(frame.Context, activation))
+                if (ReferenceEquals(frame.Context, callStack))
                 {
                     return false;
                 }
             }
-            foreach (AsyncProfilerCallStackPlacement outer in m_segmentPlacements)
+
+            // Require an empty root span immediately after the nested dispatch's physical span.
+            foreach (AsyncProfilerCallStackPlacement rootPlacement in m_segmentPlacements)
             {
-                if (!ReferenceEquals(outer.CallStack, activation) ||
-                    outer.LeafIndex != outer.RootIndexExclusive)
+                bool hasEmptyRootSpan =
+                    ReferenceEquals(rootPlacement.CallStack, callStack) &&
+                    rootPlacement.LeafIndex == rootPlacement.RootIndexExclusive;
+                if (!hasEmptyRootSpan)
                 {
                     continue;
                 }
-                foreach (AsyncProfilerCallStackPlacement inner in m_segmentPlacements)
+
+                foreach (AsyncProfilerCallStackPlacement nestedPlacement in m_segmentPlacements)
                 {
-                    if (ReferenceEquals(inner.CallStack, Segments[Segments.Count - 2]) &&
-                        inner.LeafIndex < inner.RootIndexExclusive &&
-                        inner.RootIndexExclusive == outer.LeafIndex)
+                    bool hasAdjacentNestedSpan =
+                        ReferenceEquals(nestedPlacement.CallStack, nestedCallStack) &&
+                        nestedPlacement.LeafIndex < nestedPlacement.RootIndexExclusive &&
+                        nestedPlacement.RootIndexExclusive == rootPlacement.LeafIndex;
+                    if (hasAdjacentNestedSpan)
                     {
                         return true;
                     }
                 }
             }
+
             return false;
         }
 
         /// <summary>
-        /// Matches using captured candidate ownership. Application-led startup layouts use the owning sample's
-        /// runtime rather than treating the application's module version as a CoreLib version.
+        /// Matches a runtime sequence and verifies its physical frames belong to the same runtime.
+        /// V1 startup begins in application code, so it uses the sample's profile and checks only its helpers.
         /// </summary>
         internal AsyncProfilerRuntimeSequenceMatch MatchRuntimeSequence(
             AsyncProfilerRuntimeSequenceKind kind, int start, int end, bool allowRuntimeInteriors = false)
         {
-            if (start < 0 || end < start || end > Frames.Count)
+            bool hasValidRange = start >= 0 && end >= start && end <= Frames.Count;
+            if (!hasValidRange)
             {
                 throw new ArgumentOutOfRangeException(nameof(start));
             }
+
             if (start == end)
             {
                 return default;
             }
-            bool startup = kind == AsyncProfilerRuntimeSequenceKind.V1Startup;
-            AsyncProfilerRuntimeRuleProfile profile = startup ? RuntimeProfile : GetRuntimeProfile(Frames[start].CodeAddress);
+
+            bool isV1Startup = kind == AsyncProfilerRuntimeSequenceKind.V1Startup;
+            AsyncProfilerRuntimeRuleProfile profile = isV1Startup ? RuntimeProfile : GetRuntimeProfile(Frames[start].CodeAddress);
             AsyncProfilerRuntimeSequenceMatch match = profile.MatchSequence(kind, this, start, end, allowRuntimeInteriors);
             if (match.Length > end - start)
             {
-                throw new InvalidOperationException("A runtime sequence matcher returned a span outside its candidate range.");
+                throw new InvalidOperationException(
+                    "A runtime sequence matcher returned a span outside its candidate range.");
             }
-            if (match.IsMatch &&
-                (startup
-                    ? !IsSyncFrameKind(Frames[start], AsyncProfilerStitchSyncFrameKind.V1StateMachineBody) ||
-                      !IsSameRuntimeSpan(profile, start + 1, match.Length - 1)
-                    : !IsSameRuntimeSpan(profile, start, match.Length)))
+
+            // Preserve rejected candidates so later cleanup can protect the whole sequence.
+            if (!match.IsMatch)
+            {
+                return match;
+            }
+
+            bool hasOwnedRuntimeSpan;
+            if (isV1Startup)
+            {
+                bool hasStateMachineBody = IsSyncFrameKind(Frames[start], AsyncProfilerStitchSyncFrameKind.V1StateMachineBody);
+                hasOwnedRuntimeSpan = hasStateMachineBody && IsSameRuntimeSpan(profile, start + 1, match.Length - 1);
+            }
+            else
+            {
+                hasOwnedRuntimeSpan = IsSameRuntimeSpan(profile, start, match.Length);
+            }
+
+            if (!hasOwnedRuntimeSpan)
             {
                 return AsyncProfilerRuntimeSequenceMatch.Reject(match.Length);
             }
+
             return match;
         }
 
         #region private
 
+        /// <summary>Selects one profile for the sample.</summary>
         private static AsyncProfilerRuntimeRuleProfile ResolveRuntimeProfile(
             TraceLog traceLog, IReadOnlyList<AsyncProfilerCallStack> segments, List<AsyncProfilerStitchedFrame> frames,
             Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile> runtimeProfileResolver,
             AsyncProfilerRuntimeRuleProfileCache profiles, bool useProcessProfile)
         {
-            if (useProcessProfile && profiles != null && segments.Count != 0 &&
-                segments[0].Thread.ProcessIndex != ProcessIndex.Invalid)
+            // A custom address resolver must not be bypassed by the process-level cache.
+            bool hasCapturedProcess =
+                useProcessProfile && profiles != null && segments.Count != 0 &&
+                segments[0].Thread.ProcessIndex != ProcessIndex.Invalid;
+            if (hasCapturedProcess)
             {
                 ProcessIndex process = segments[0].Thread.ProcessIndex;
                 for (int i = 1; i < segments.Count; i++)
@@ -317,60 +439,84 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                         return AsyncProfilerRuntimeRuleProfile.Common;
                     }
                 }
+
                 return profiles.GetProcessProfile(process);
             }
-            AsyncProfilerRuntimeRuleProfile result = null;
+
+            // Without a process-level choice, compare the profiles of the retained runtime frames.
+            AsyncProfilerRuntimeRuleProfile selectedProfile = null;
             foreach (AsyncProfilerStitchedFrame frame in frames)
             {
-                if (traceLog != null &&
-                    (frame.CodeAddress == CodeAddressIndex.Invalid ||
-                     !profiles.IsHostModule(traceLog.CodeAddresses.ModuleFileIndex(frame.CodeAddress))))
+                if (traceLog != null)
                 {
-                    continue;
+                    bool isRuntimeFrame =
+                        frame.CodeAddress != CodeAddressIndex.Invalid &&
+                        profiles.IsHostModule(traceLog.CodeAddresses.ModuleFileIndex(frame.CodeAddress));
+                    if (!isRuntimeFrame)
+                    {
+                        continue;
+                    }
                 }
-                AsyncProfilerRuntimeRuleProfile profile = runtimeProfileResolver(frame.CodeAddress) ??
+
+                AsyncProfilerRuntimeRuleProfile frameProfile = runtimeProfileResolver(frame.CodeAddress) ??
                     throw new InvalidOperationException("The runtime profile resolver returned null.");
-                if (result != null && !ReferenceEquals(result, profile))
+                if (selectedProfile != null && !ReferenceEquals(selectedProfile, frameProfile))
                 {
                     return AsyncProfilerRuntimeRuleProfile.Common;
                 }
-                result = profile;
+
+                selectedProfile = frameProfile;
             }
-            return result ?? AsyncProfilerRuntimeRuleProfile.Common;
+
+            return selectedProfile ?? AsyncProfilerRuntimeRuleProfile.Common;
         }
 
+        /// <summary>
+        /// Checks that a physical span uses one runtime profile.
+        /// With trace metadata, also requires resolved methods and a shared runtime owner.
+        /// </summary>
         private bool IsSameRuntimeSpan(AsyncProfilerRuntimeRuleProfile profile, int start, int length)
         {
-            ModuleFileIndex moduleIndex = ModuleFileIndex.Invalid;
+            ModuleFileIndex runtimeOwner = ModuleFileIndex.Invalid;
             for (int i = start; i < start + length; i++)
             {
                 AsyncProfilerStitchedFrame frame = Frames[i];
-                if (frame.Origin != AsyncProfilerStitchedFrameOrigin.Sync ||
-                    !ReferenceEquals(profile, GetRuntimeProfile(frame.CodeAddress)))
+                bool hasMatchingPhysicalProfile =
+                    frame.Origin == AsyncProfilerStitchedFrameOrigin.Sync &&
+                    ReferenceEquals(profile, GetRuntimeProfile(frame.CodeAddress));
+                if (!hasMatchingPhysicalProfile)
                 {
                     return false;
                 }
+
                 if (TraceLog != null)
                 {
-                    if (frame.CodeAddress == CodeAddressIndex.Invalid || frame.Method == MethodIndex.Invalid)
+                    bool hasResolvedFrame = frame.CodeAddress != CodeAddressIndex.Invalid && frame.Method != MethodIndex.Invalid;
+                    if (!hasResolvedFrame)
                     {
                         return false;
                     }
-                    ModuleFileIndex current = GetHostModuleOwner(frame.CodeAddress);
-                    if (current == ModuleFileIndex.Invalid)
+
+                    ModuleFileIndex frameOwner = GetHostModuleOwner(frame.CodeAddress);
+                    if (frameOwner == ModuleFileIndex.Invalid)
                     {
                         return false;
                     }
-                    if (i != start && current != moduleIndex)
+
+                    bool hasConflictingOwner = i != start && frameOwner != runtimeOwner;
+                    if (hasConflictingOwner)
                     {
                         return false;
                     }
-                    moduleIndex = current;
+
+                    runtimeOwner = frameOwner;
                 }
             }
+
             return true;
         }
 
+        /// <summary>Creates an address resolver.</summary>
         private static Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile> CreateRuntimeProfileResolver(
             TraceLog traceLog, AsyncProfilerRuntimeRuleProfileCache profiles)
         {
@@ -378,6 +524,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             {
                 return _ => AsyncProfilerRuntimeRuleProfile.Common;
             }
+
             return codeAddress => codeAddress == CodeAddressIndex.Invalid
                 ? AsyncProfilerRuntimeRuleProfile.Common
                 : profiles.GetProfile(traceLog.CodeAddresses.ModuleFileIndex(codeAddress));
@@ -394,21 +541,21 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
     /// <summary>A presentation transform applied to a structurally stitched async call stack.</summary>
     /// <remarks>
-    /// The context, its segment list, and the mutable frame list are owned and reused by the computer and must not
-    /// be retained after the callback returns. Copy any identity values needed later; copying a frame alone does
-    /// not detach its <see cref="AsyncProfilerStitchedFrame.Context"/> from the computer's reusable activation object.
+    /// Do not retain the context, its lists, or its call-stack objects after the callback; the host reuses them.
+    /// Copy identity values instead. A copied frame still refers to the same reusable
+    /// <see cref="AsyncProfilerStitchedFrame.Context"/> object.
     /// </remarks>
     internal delegate void AsyncProfilerCallStackTransform(AsyncProfilerCallStackTransformState context);
 
     /// <summary>
-    /// Ordered presentation pipeline for structurally stitched async call stacks. The mandatory structural
-    /// stitcher always runs before this pipeline. Conservative normalization is enabled by default;
-    /// runtime-specific async-infrastructure cleanup is opt-in; custom transforms run last in registration order.
+    /// Runs presentation passes after structural async stack stitching.
+    /// Normalization is enabled by default; runtime-helper cleanup is opt-in.
+    /// Custom transforms run last, in registration order.
     /// </summary>
     /// <remarks>
-    /// Configure before stack generation. Runtime profiles select built-in implementations without changing
-    /// enablement or order. Parent contexts and frame annotations are applied by the host builder and emitter,
-    /// not by standalone <see cref="Transform"/> calls.
+    /// Configure before stack generation. Runtime profiles choose built-in implementations without changing
+    /// pass order or enablement. Parent contexts and frame names are handled by the host, not by
+    /// standalone <see cref="Transform"/> calls.
     /// </remarks>
     internal sealed class AsyncProfilerCallStackTransformPipeline
     {
@@ -419,9 +566,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         /// <summary>
-        /// Enables conservative startup, reentrant, completion-return, handoff, and sampled-wrapper normalization.
-        /// Unverified work is retained. Disabling this does not disable structural boundary replacement or
-        /// verified incomplete-root normalization to <c>BROKEN</c>.
+        /// Enables verified startup, completion-return, handoff, reentrant, and sampled-wrapper cleanup.
+        /// Enabled by default. Frames without sufficient evidence are kept.
+        /// Disabling this does not change structural stitching or verified incomplete-root <c>BROKEN</c> markers.
         /// </summary>
         public bool EnableNormalization
         {
@@ -437,30 +584,30 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         /// <summary>
-        /// Enables the host computer's insertion of missing historical creation-parent contexts before presentation.
-        /// Requires captured creation relationships and parent resume intervals; unavailable parents are not inferred.
-        /// Replays recorded resume/append frames, trimming completed frames at child creation only when both normal
-        /// and exceptional completion records were observed for the parent's process, kind, and configuration epoch.
-        /// The first surviving V1 frame then displays inferred running state -1; captured states and IPs are retained.
-        /// Disabled by default. This option is not applied by standalone <see cref="Transform"/> calls.
+        /// Includes missing historical creation-parent call stacks before presentation. Disabled by default.
+        /// Requires recorded creation relationships and parent resume intervals; missing parents are not inferred.
+        /// Trims completed frames at child creation only when both method and exception completion observations
+        /// exist for the parent's process, kind, and configuration epoch. Otherwise, replays the captured frames.
+        /// When trimming is available, the first remaining V1 parent frame displays inferred state <c>-1</c>.
+        /// Captured states and IPs are unchanged. Applied by the host, not by standalone <see cref="Transform"/> calls.
         /// </summary>
         public bool EnableParentContexts { get; set; }
 
         /// <summary>
-        /// Prefixes active async-profiler frames with <c>[Async V1]</c> or <c>[Async V2]</c> when they are
-        /// interned. Retained synchronous frames keep their ordinary names, and this option does not add sync/async
-        /// transition frames. Dispatch targets use the same names and annotations as ordinary active async frames;
-        /// their dispatch role is retained in frame metadata rather than the name. Disabled by default.
-        /// Matched current V1 frames display inferred running state <c>-1</c>, and record-verified physical
-        /// completing frames display <c>-2</c>; other V1 frames display
-        /// their captured compiler state. Raw captured states remain available in frame metadata.
-        /// The host emitter applies this option; standalone
-        /// <see cref="Transform"/> calls do not produce frame names.
+        /// Adds <c>[Async V1]</c> or <c>[Async V2]</c> prefixes and V1 state labels to active async frames.
+        /// Disabled by default. Synchronous frames keep their normal names; no transition frames are added.
+        /// Current V1 frames display inferred state <c>-1</c>. Verified completing bodies and return unwinds
+        /// display <c>-2</c>; other V1 frames display captured state.
+        /// Dispatch targets use ordinary active-async labels; their dispatch role remains in metadata.
+        /// Captured states are unchanged. The host applies these names; standalone
+        /// <see cref="Transform"/> calls do not produce names.
         /// </summary>
         public bool EnableFrameAnnotations { get; set; }
 
-        /// <summary>The maximum number of missing parent contexts inserted for one active segment when
-        /// <see cref="EnableParentContexts"/> is enabled. Defaults to one historical parent context.</summary>
+        /// <summary>
+        /// Maximum parent contexts inserted per active call stack when <see cref="EnableParentContexts"/>
+        /// is enabled. Defaults to one; does not limit frames within a call stack or active nesting depth.
+        /// </summary>
         /// <exception cref="ArgumentOutOfRangeException">The value is not positive.</exception>
         public int MaximumParentContextDepth
         {
@@ -471,14 +618,15 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 {
                     throw new ArgumentOutOfRangeException(nameof(MaximumParentContextDepth));
                 }
+
                 m_maximumParentContextDepth = value;
             }
         }
 
         /// <summary>
-        /// Enables profile-based grouping and overhead attribution for verified V1/V2 CoreLib machinery.
-        /// Disabled by default because helper layouts are implementation details, not profiler contracts.
-        /// Rejected spans and unverified callees remain protected; this is not general framework filtering.
+        /// Groups verified V1/V2 runtime helpers under a dispatcher marker or removes them.
+        /// Disabled as default because helper layouts vary by runtime. Unverified frames and rejected spans are kept.
+        /// This is not general framework filtering, it targets async infrastructure machinery.
         /// Independent of structural stitching and <see cref="EnableNormalization"/>.
         /// </summary>
         public bool EnableInfrastructureCleanup
@@ -495,23 +643,32 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         /// <summary>Adds a custom transform that runs after all enabled built-in transforms.</summary>
-        public void Add(AsyncProfilerCallStackTransform transform, bool requiresCompletionObservations = false)
+        /// <remarks>
+        /// When <paramref name="requiresCompletionObservations"/> is true, completion metadata is prepared
+        /// once per sample before the first custom transform that requests it.
+        /// </remarks>
+        public void AddCustomTransform(
+            AsyncProfilerCallStackTransform transform, bool requiresCompletionObservations = false)
         {
             if (transform is null)
             {
                 throw new ArgumentNullException(nameof(transform));
             }
 
+            // Insert preparation only before the first transform that needs completion metadata.
             if (requiresCompletionObservations && !m_hasCompletionObservationTransform)
             {
                 m_customTransforms.Add(PrepareCompletionObservations);
                 m_hasCompletionObservationTransform = true;
             }
+
             m_customTransforms.Add(transform);
             m_transforms = null;
         }
 
-        /// <summary>Removes all custom transforms. Built-in enablement is unchanged.</summary>
+        /// <summary>
+        /// Removes custom transforms and their metadata-preparation step. Built-in settings are unchanged.
+        /// </summary>
         public void ClearCustomTransforms()
         {
             m_customTransforms.Clear();
@@ -520,19 +677,20 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         /// <summary>
-        /// Applies this pipeline to a structural stitch result without requiring a
-        /// <see cref="SampleProfilerThreadTimeComputer"/>. The input frame list is not modified; its frames are
-        /// copied into a mutable output list. Presentation diagnostics are added to the result's existing
-        /// <see cref="AsyncProfilerStitchResult.Diagnostics"/> instance, which is shared by both results. This method does not
-        /// insert historical parent contexts or intern/annotate output frames.
+        /// Applies the configured presentation transforms to a structural stitching result.
         /// </summary>
+        /// <remarks>
+        /// Copies the frame list and stitching state before applying transforms.
+        /// Diagnostics and captured call-stack objects are shared with the input result.
+        /// Does not add parent contexts or generate frame names.
+        /// </remarks>
         /// <param name="structuralResult">The result produced by <see cref="AsyncProfilerCallStackStitcher"/>.</param>
         /// <param name="segments">The active async segments used to produce the structural result.</param>
         /// <param name="timestampQpc">The sample timestamp in the trace QPC domain.</param>
         /// <param name="classifyBoundary">Classifies runtime boundary methods for the trace.</param>
         /// <param name="traceLog">
-        /// Optional trace context exposed to custom transforms and used by built-in rules that require module or
-        /// symbol metadata. Those built-in rules fail open when it is null.
+        /// Optional trace metadata for custom transforms and built-in rules.
+        /// Rules needing module or symbol metadata leave unverified frames unchanged when it is null.
         /// </param>
         public AsyncProfilerStitchResult Transform(
             AsyncProfilerStitchResult structuralResult,
@@ -545,10 +703,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             {
                 throw new ArgumentNullException(nameof(structuralResult));
             }
+
             if (segments is null)
             {
                 throw new ArgumentNullException(nameof(segments));
             }
+
             if (classifyBoundary is null)
             {
                 throw new ArgumentNullException(nameof(classifyBoundary));
@@ -569,6 +729,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             return new AsyncProfilerStitchResult(frames, structuralResult.Diagnostics, stitchingState);
         }
 
+        /// <summary>Applies the cached pass order to the sample's mutable frames.</summary>
         internal void ApplyInPlace(AsyncProfilerCallStackTransformState context)
         {
             AsyncProfilerCallStackTransform[] transforms = m_transforms ?? (m_transforms = CreateTransforms());
@@ -580,6 +741,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         #region private
 
+        /// <summary>Builds the enabled pass order, followed by custom transforms in registration order.</summary>
         private AsyncProfilerCallStackTransform[] CreateTransforms()
         {
             var transforms = new List<AsyncProfilerCallStackTransform>(4 + m_customTransforms.Count);
@@ -589,39 +751,48 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 transforms.Add(context => ApplyRuntimeTransform(context, AsyncProfilerRuntimeTransformKind.ReentrantHandoff));
                 transforms.Add(context => ApplyRuntimeTransform(context, AsyncProfilerRuntimeTransformKind.V1Presentation));
             }
+
             if (EnableInfrastructureCleanup)
             {
                 transforms.Add(context => ApplyRuntimeTransform(context, AsyncProfilerRuntimeTransformKind.InfrastructureCleanup));
             }
+
             transforms.AddRange(m_customTransforms);
             return transforms.ToArray();
         }
 
+        /// <summary>Loads per-call-stack completion observations before completion-aware custom transforms.</summary>
         private static void PrepareCompletionObservations(AsyncProfilerCallStackTransformState context)
         {
             AsyncProfilerCallStacksIndex index = context.TraceLog?.AsyncProfilerCallStacks;
-            if (index != null)
+            if (index == null)
             {
-                for (int i = 0; i < context.Segments.Count; i++)
-                {
-                    index.PopulateCompletionObservations(context.Segments[i]);
-                }
+                return;
+            }
+
+            for (int i = 0; i < context.Segments.Count; i++)
+            {
+                index.PopulateCompletionObservations(context.Segments[i]);
             }
         }
 
-        private static void ApplyRuntimeTransform(AsyncProfilerCallStackTransformState context, AsyncProfilerRuntimeTransformKind kind)
+        /// <summary>
+        /// Runs the built-in transform identified by <paramref name="kind"/>.
+        /// The sample's runtime profile supplies the implementation.
+        /// </summary>
+        private static void ApplyRuntimeTransform(
+            AsyncProfilerCallStackTransformState context, AsyncProfilerRuntimeTransformKind kind)
         {
             AsyncProfilerCallStackTransform transform = context.RuntimeProfile.GetTransform(kind) ??
                 throw new InvalidOperationException("A runtime profile returned a null presentation transform.");
             transform(context);
         }
 
-        private int m_maximumParentContextDepth = AsyncProfilerParentContextAugmenter.DefaultMaximumDepth;
+        private int m_maximumParentContextDepth = AsyncProfilerParentContextBuilder.DefaultMaximumDepth;
         private bool m_enableNormalization = true;
         private bool m_enableInfrastructureCleanup;
         private bool m_hasCompletionObservationTransform;
         private readonly List<AsyncProfilerCallStackTransform> m_customTransforms;
-        // Null until first use or after pass configuration changes; otherwise reused across samples.
         private AsyncProfilerCallStackTransform[] m_transforms;
 
         #endregion

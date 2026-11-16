@@ -13047,7 +13047,8 @@ namespace TraceEventTests
                             enableNormalization: EnableNormalization, enableInfrastructureCleanup: EnableInfrastructureCleanup);
                         if (AssertTransformContext != null)
                         {
-                            stitchedComputer.AsyncProfilerCallStackTransformPipeline.Add(context => AssertTransformContext(context));
+                            stitchedComputer.AsyncProfilerCallStackTransformPipeline.AddCustomTransform(
+                                context => AssertTransformContext(context));
                         }
                         stitchedComputer.GenerateThreadTimeStacks(stitchedStackSource);
                         if (VerifySampleWeights)
@@ -13961,7 +13962,7 @@ namespace TraceEventTests
             {
                 if (ExpectedRuntimeProfile != null)
                 {
-                    pipeline.Add(context =>
+                    pipeline.AddCustomTransform(context =>
                     {
                         Assert.Same(ExpectedRuntimeProfile, context.RuntimeProfile);
                         var standalone = new AsyncProfilerCallStackTransformState(context.TraceLog, context.Segments,
@@ -13983,7 +13984,7 @@ namespace TraceEventTests
                     EnableNormalization = enableNormalization,
                     EnableInfrastructureCleanup = enableInfrastructureCleanup,
                 };
-                pipeline.Add(context =>
+                pipeline.AddCustomTransform(context =>
                 {
                     Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile> runtimeProfileResolver = ca =>
                         RuntimeProfileForModule(ca == CodeAddressIndex.Invalid

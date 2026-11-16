@@ -1936,7 +1936,7 @@ members are internal diagnostic hooks, not public configuration.
 | Structural reconstruction and boundary contracts | `AsyncProfiler\AsyncProfilerCallStackStitcher.cs`, `AsyncProfiler\AsyncProfilerCallStackStitchBoundary.cs` | `AsyncProfilerCallStackStitcherTests.cs`, `AsyncProfilerCallStackStitchBoundaryTests.cs` |
 | Shared symbol and generated-name parsing | `AsyncProfiler\AsyncProfilerMethodNames.cs` | `AsyncProfilerMethodNamesTests.cs` |
 | Runtime ownership and implementation layouts | `AsyncProfiler\AsyncProfilerRuntimeRuleProfile.cs`, `AsyncProfiler\AsyncProfilerRuntimeRuleProfileCache.cs`, `AsyncProfiler\AsyncProfilerRuntimeSequenceMatch.cs` | `AsyncProfilerRuntimeRuleProfileTests.cs`, `AsyncProfilerRuntimeSequenceTests.cs`, `AsyncProfilerRuntimeProfileExtensibilityTests.cs` |
-| Historical parent contexts | `AsyncProfiler\AsyncProfilerParentContextAugmenter.cs` | `AsyncProfilerCallStackStitcherTests.cs`, `AsyncProfilerStitchIntegrationTests.cs` |
+| Historical parent contexts | `AsyncProfiler\AsyncProfilerParentContextBuilder.cs` | `AsyncProfilerCallStackStitcherTests.cs`, `AsyncProfilerStitchIntegrationTests.cs` |
 | Public presentation settings | `AsyncProfiler\AsyncCallStackTransforms.cs` | `AsyncProfilerStitchIntegrationTests.cs` |
 | Internal presentation and callbacks | `AsyncProfiler\AsyncProfilerCallStackTransformPipeline.cs`, `AsyncProfiler\AsyncProfilerCallStackTransformPasses.cs` | `AsyncProfilerCallStackTransformPipelineTests.cs` |
 | Projection and emitted roles | `AsyncProfiler\AsyncProfilerCallStackSourceBuilderCore.cs`, `TraceEventStacks.cs`, `Computers\SampleProfilerThreadTimeComputer.cs`, `Computers\ThreadTimeComputer.cs` | `AsyncProfilerStitchIntegrationTests.cs` |

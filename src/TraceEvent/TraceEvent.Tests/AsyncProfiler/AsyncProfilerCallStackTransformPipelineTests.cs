@@ -470,12 +470,12 @@ namespace TraceEventTests
             List<AsyncProfilerStitchedFrame> frames = StartupFrames();
             var observed = new List<int>();
             var pipeline = new AsyncProfilerCallStackTransformPipeline();
-            pipeline.Add(context =>
+            pipeline.AddCustomTransform(context =>
             {
                 observed.Add(context.Frames.Count);
                 context.Frames.RemoveAt(0);
             });
-            pipeline.Add(context => observed.Add(context.Frames.Count));
+            pipeline.AddCustomTransform(context => observed.Add(context.Frames.Count));
 
             pipeline.ApplyInPlace(Context(frames, diagnostics));
 
@@ -619,7 +619,7 @@ namespace TraceEventTests
         {
             var pipeline = new AsyncProfilerCallStackTransformPipeline();
             var observed = new List<int>();
-            pipeline.Add(context => observed.Add(context.Frames.Count));
+            pipeline.AddCustomTransform(context => observed.Add(context.Frames.Count));
             bool[,] configurations =
             {
                 { true, false },
@@ -673,7 +673,7 @@ namespace TraceEventTests
             var observed = new List<int>();
             pipeline.ApplyInPlace(Context(StartupFrames(), new AsyncProfilerCallStackDiagnostics()));
 
-            pipeline.Add(context =>
+            pipeline.AddCustomTransform(context =>
             {
                 observed.Add(context.Frames.Count);
                 context.Frames.RemoveAt(0);
@@ -681,7 +681,7 @@ namespace TraceEventTests
             pipeline.ApplyInPlace(Context(StartupFrames(), new AsyncProfilerCallStackDiagnostics()));
             Assert.Equal(new[] { 5 }, observed);
 
-            pipeline.Add(context => observed.Add(context.Frames.Count));
+            pipeline.AddCustomTransform(context => observed.Add(context.Frames.Count));
             observed.Clear();
             pipeline.ApplyInPlace(Context(StartupFrames(), new AsyncProfilerCallStackDiagnostics()));
             Assert.Equal(new[] { 5, 4 }, observed);
@@ -693,7 +693,7 @@ namespace TraceEventTests
         public void ClearCustomTransforms_PreservesEnabledBuiltIns(bool enableInfrastructureCleanup)
         {
             var pipeline = new AsyncProfilerCallStackTransformPipeline { EnableInfrastructureCleanup = enableInfrastructureCleanup };
-            pipeline.Add(context => context.Frames.Clear());
+            pipeline.AddCustomTransform(context => context.Frames.Clear());
             List<AsyncProfilerStitchedFrame> frames = CompositionFrames();
             pipeline.ApplyInPlace(Context(frames, new AsyncProfilerCallStackDiagnostics(), wrapperCodeAddress: CA(20)));
             Assert.Empty(frames);
@@ -717,10 +717,10 @@ namespace TraceEventTests
         public void BuiltInComponents_CanBeRegisteredThroughExistingDelegateAPI()
         {
             var pipeline = new AsyncProfilerCallStackTransformPipeline { EnableNormalization = false };
-            pipeline.Add(new AsyncProfilerSampledV2WrapperTransformPass().Apply);
-            pipeline.Add(new AsyncProfilerReentrantHandoffTransformPass().Apply);
-            pipeline.Add(new AsyncProfilerV1PresentationTransformPass().Apply);
-            pipeline.Add(new AsyncProfilerInfrastructureCleanupTransformPass().Apply);
+            pipeline.AddCustomTransform(new AsyncProfilerSampledV2WrapperTransformPass().Apply);
+            pipeline.AddCustomTransform(new AsyncProfilerReentrantHandoffTransformPass().Apply);
+            pipeline.AddCustomTransform(new AsyncProfilerV1PresentationTransformPass().Apply);
+            pipeline.AddCustomTransform(new AsyncProfilerInfrastructureCleanupTransformPass().Apply);
 
             for (int sample = 0; sample < 2; sample++)
             {
@@ -739,11 +739,11 @@ namespace TraceEventTests
         }
 
         [Fact]
-        public void Add_RejectsNullTransform()
+        public void AddCustomTransform_RejectsNullTransform()
         {
             var pipeline = new AsyncProfilerCallStackTransformPipeline();
 
-            Assert.Throws<ArgumentNullException>(() => pipeline.Add(null));
+            Assert.Throws<ArgumentNullException>(() => pipeline.AddCustomTransform(null));
         }
 
         [Fact]
@@ -752,8 +752,8 @@ namespace TraceEventTests
             var pipeline = new AsyncProfilerCallStackTransformPipeline();
             var failure = new InvalidOperationException("Custom transform failed.");
             bool laterTransformRan = false;
-            pipeline.Add(_ => throw failure);
-            pipeline.Add(_ => laterTransformRan = true);
+            pipeline.AddCustomTransform(_ => throw failure);
+            pipeline.AddCustomTransform(_ => laterTransformRan = true);
 
             InvalidOperationException actual = Assert.Throws<InvalidOperationException>(
                 () => pipeline.ApplyInPlace(Context(StartupFrames(), new AsyncProfilerCallStackDiagnostics())));

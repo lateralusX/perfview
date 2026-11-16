@@ -22,7 +22,7 @@ namespace TraceEventBenchmarks
             _placements = new List<AsyncProfilerCallStackPlacement>(1);
             _diagnostics = new AsyncProfilerCallStackDiagnostics();
             _stitchingState = new AsyncProfilerCallStackStitchingState();
-            _augmenter = new AsyncProfilerParentContextAugmenter();
+            _parentContextBuilder = new AsyncProfilerParentContextBuilder();
             _classify = Classify;
             _methodCompletionObserved = MethodCompletionObserved;
             _methodOf = MethodOf;
@@ -120,16 +120,16 @@ namespace TraceEventBenchmarks
         private int StitchWithOptionalParentContexts(
             AsyncProfilerCallStacksIndex index,
             IReadOnlyList<AsyncProfilerCallStack> segments,
-            int maximumDepth = AsyncProfilerParentContextAugmenter.DefaultMaximumDepth)
+            int maximumDepth = AsyncProfilerParentContextBuilder.DefaultMaximumDepth)
         {
-            bool parentContextsAvailable = index.HasDispatcherRecords && _augmenter.Prepare(index, segments);
+            bool parentContextsAvailable = index.HasDispatcherRecords && _parentContextBuilder.HasParentContextsToAdd(index, segments);
             Stitch(segments, parentContextsAvailable ? _placements : null);
             if (!parentContextsAvailable)
             {
                 return _output.Count;
             }
 
-            _augmenter.Augment(index, segments, _placements, _output, maximumDepth);
+            _parentContextBuilder.AddParentContexts(index, segments, _placements, _output, maximumDepth);
             return _output.Count;
         }
 
@@ -279,7 +279,7 @@ namespace TraceEventBenchmarks
         private List<AsyncProfilerCallStackPlacement> _placements;
         private AsyncProfilerCallStackDiagnostics _diagnostics;
         private AsyncProfilerCallStackStitchingState _stitchingState;
-        private AsyncProfilerParentContextAugmenter _augmenter;
+        private AsyncProfilerParentContextBuilder _parentContextBuilder;
         private Func<CodeAddressIndex, AsyncProfilerCallStackStitchBoundaryInfo> _classify;
         private Func<ProcessIndex, AsyncCallstackKind, long, bool> _methodCompletionObserved;
         private Func<CodeAddressIndex, MethodIndex> _methodOf;

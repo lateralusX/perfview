@@ -11,19 +11,10 @@ using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
 namespace Microsoft.Diagnostics.Tracing.Computers
 {
     /// <summary>
-    /// Builds the per-thread active-async-callstack index from the async-profiler sub-event stream
-    /// (<see cref="AsyncProfilerTraceEventParser"/>), for both the V2 (RuntimeAsync) and V1
-    /// (StateMachineAsync) instrumentation. The recorded, queryable, serializable result is an
-    /// <see cref="AsyncProfilerCallStacksIndex"/> (see <see cref="Index"/>).
-    /// <para>
-    /// Each process instance owns its manifest and clock state. A thread is ignored until usable metadata and a
-    /// <c>ResetAsyncThreadContext</c> at or after that metadata's first QPC have been received. An armed reset
-    /// commits open activations at the reset timestamp before clearing that thread's nesting stack.
-    /// Async call stacks nest on a thread: a resume callstack pushes an activation, an append callstack
-    /// extends the top one, and a suspend/complete context pops it. In V1 the frames are assembled
-    /// incrementally (resume + appends) and are only final at close, so frames are <b>finalized and
-    /// interned at pop</b>.
-    /// </para>
+    /// Builds an index of the async call stacks active on each thread from V1 and V2 profiler events.
+    /// Tracks nested call stacks and assembles V1 frames across resume and append events.
+    /// Records each call stack's active interval and finalized frames in <see cref="Index"/>.
+    /// Call <see cref="Finish"/> after processing to include call stacks still open at trace end.
     /// </summary>
     internal sealed class AsyncProfilerIndexBuilder : ISubEventSink, ICallstackPayloadSink
     {
@@ -35,30 +26,45 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         /// <summary>
-        /// Reports each accepted nonzero frame IP during processing so the host can register it before rundown,
-        /// even if the activation is not interned until <see cref="Finish"/>.
-        /// Arguments: process instance, native code IP (both V1 and V2), instrumentation kind.
+        /// Subscribes to the parser, using <paramref name="processIndexOf"/> to identify each event's process.
+        /// </summary>
+        internal AsyncProfilerIndexBuilder(
+            AsyncProfilerTraceEventParser parser, Func<AsyncProfilerTraceEvent, ProcessIndex> processIndexOf)
+        {
+            _parser = parser ?? throw new ArgumentNullException(nameof(parser));
+            _processIndexOf = processIndexOf ?? throw new ArgumentNullException(nameof(processIndexOf));
+            _parser.AsyncEvents += OnRawTraceEvent;
+        }
+
+        /// <summary>
+        /// Reports nonzero native code IPs from accepted resume and append events.
+        /// This lets the caller register addresses before method rundown, even when frames are recorded at trace end.
+        /// Arguments: process instance, instruction pointer, instrumentation kind.
         /// </summary>
         public Action<ProcessIndex, ulong, AsyncCallstackKind> OnFrameObserved;
 
         /// <summary>
-        /// Reports each decode failure and its process instance after invalidating uncertain activation state.
+        /// Reports a decode error after closing or discarding the affected open call stacks.
+        /// Arguments: process instance, error details.
         /// </summary>
         public event Action<ProcessIndex, ParseError> ParseError;
 
         /// <summary>
-        /// The queryable, serializable index of finalized activations and interned frames. Call <see cref="Finish"/>
-        /// after processing the stream to include activations that have not yet suspended or completed.
+        /// The recorded call-stack intervals and shared frame lists.
+        /// Call <see cref="Finish"/> after processing to include call stacks still open at trace end.
         /// </summary>
         public AsyncProfilerCallStacksIndex Index => _index;
 
-        /// <summary>True while usable metadata provides the QPC frequency for the default process instance (index 0).</summary>
+        /// <summary>True when the default process instance (index 0) has a nonzero QPC frequency.</summary>
         public bool ClockKnown => ClockKnownForProcess(0);
 
-        /// <summary>The wrapper pool size for the default process instance (index 0), or 0 without usable metadata.</summary>
+        /// <summary>Wrapper pool size for the default process instance (index 0), or 0 if unknown.</summary>
         public byte WrapperCount => GetWrapperCount(0);
 
-        /// <summary>The number of distinct interned frame lists.</summary>
+        /// <summary>
+        /// Number of unique call-stack frame lists stored in the index, not individual frames.
+        /// Several call-stack intervals can share one frame list and contribute only one to this count.
+        /// </summary>
         public int DistinctFramesCount => _index.DistinctFramesCount;
 
         /// <summary>The number of decode failures reported by this index builder.</summary>
@@ -66,7 +72,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         /// <summary>
         /// Decodes an async-profiler buffer for the default process instance (index 0). For multiple processes,
-        /// use <see cref="Process(byte[], ProcessIndex)"/> so their manifests and activation state remain separate.
+        /// use <see cref="Process(byte[], ProcessIndex)"/> to keep their manifests and open call stacks separate.
         /// </summary>
         public void Process(byte[] buffer)
         {
@@ -77,53 +83,55 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <param name="buffer">The raw buffer from an <c>AsyncEvents</c> event.</param>
         /// <param name="processIndex">The unique process instance in the trace, not its reusable OS process id.</param>
         /// <remarks>
-        /// Processing is synchronous; reuse the same computer and process index for that process's buffers.
-        /// On a decode failure, open activations on the affected thread are closed at the failing event's QPC,
-        /// or the last decoded QPC if its timestamp is unavailable, and the thread remains unarmed until a valid
-        /// reset. An unreadable header discards open activations throughout the process; malformed metadata
-        /// closes all of that process's open prefixes where the error QPC is known.
-        /// Unreadable headers and malformed metadata require fresh metadata before
-        /// resets can re-arm that process. Previously finalized intervals and other processes are retained.
-        /// Failures are exposed by <see cref="ParseError"/> and <see cref="ParseErrorCount"/>.
+        /// Processing is synchronous. Use the same builder and process index for every buffer from that process.
+        /// On a decode error, open call stacks are closed at the last known QPC, or discarded if no usable end
+        /// timestamp is available. The affected thread ignores events until a valid reset.
+        /// Unreadable headers and malformed metadata affect every thread in the process and require fresh metadata
+        /// followed by per-thread resets. Previously recorded intervals and other processes are preserved.
+        /// Errors are reported through <see cref="ParseError"/> and <see cref="ParseErrorCount"/>.
         /// </remarks>
         public void Process(byte[] buffer, ProcessIndex processIndex)
         {
-            ProcessState process = GetOrCreateProcess(processIndex);
+            ProcessBuildState processState = GetOrCreateProcessState(processIndex);
             _currentProcessIndex = processIndex;
-            AsyncProfilerTraceEventParser.ParseBuffer(buffer, process.Manifest, this);
+            AsyncProfilerTraceEventParser.ParseBuffer(buffer, processState.Manifest, this);
         }
 
         /// <summary>
-        /// Commits open activations with <c>EndQpc = long.MaxValue</c> so they remain queryable through trace end.
+        /// Records open call stacks with <c>EndQpc = long.MaxValue</c> so they remain queryable through trace end.
         /// Call once after processing all events.
         /// </summary>
         public void Finish()
         {
-            foreach (KeyValuePair<AsyncProfilerThreadKey, CallStacks> kv in _threads)
+            foreach (KeyValuePair<AsyncProfilerThreadKey, CallStacks> thread in _threads)
             {
-                CommitOpenActivations(kv.Key, kv.Value, long.MaxValue);
+                CommitOpenCallStacks(thread.Key, thread.Value, long.MaxValue);
             }
         }
 
-        /// <summary>Resolves an interned frames handle in this computer's index; null when out of range.</summary>
-        public AsyncProfilerCallStackFrames GetFrames(AsyncProfilerCallStackFramesIndex index) => _index.GetFrames(index);
+        /// <summary>Gets a shared frame list from the index, or null when the handle is out of range.</summary>
+        public AsyncProfilerCallStackFrames GetFrames(AsyncProfilerCallStackFramesIndex index) =>
+            _index.GetFrames(index);
 
         /// <summary>
         /// Returns the nested async call stacks active on <paramref name="thread"/> at <paramref name="timestampQpc"/>,
         /// ordered leaf-to-root. Empty if the thread was unarmed or idle at that instant.
         /// </summary>
-        /// <remarks>Returns finalized intervals only, with stable activation objects that later queries do not overwrite.</remarks>
-        public IReadOnlyList<AsyncProfilerCallStack> GetCallStacks(AsyncProfilerThreadKey thread, long timestampQpc) => _index.GetCallStacks(thread, timestampQpc);
+        /// <remarks>
+        /// Returns recorded intervals only. Later queries do not overwrite the returned call-stack objects.
+        /// </remarks>
+        public IReadOnlyList<AsyncProfilerCallStack> GetCallStacks(AsyncProfilerThreadKey thread, long timestampQpc) =>
+            _index.GetCallStacks(thread, timestampQpc);
 
-        /// <summary>True while usable metadata provides the QPC frequency for <paramref name="processIndex"/>.</summary>
+        /// <summary>True when <paramref name="processIndex"/> has a nonzero QPC frequency.</summary>
         public bool ClockKnownForProcess(ProcessIndex processIndex) =>
-            _processes.TryGetValue(processIndex, out ProcessState process) && process.QpcFrequency != 0;
+            _processStates.TryGetValue(processIndex, out ProcessBuildState processState) && processState.QpcFrequency != 0;
 
-        /// <summary>The wrapper pool size for <paramref name="processIndex"/>, or 0 without usable metadata.</summary>
+        /// <summary>The latest wrapper pool size for <paramref name="processIndex"/>, or 0 if unavailable.</summary>
         public byte GetWrapperCount(ProcessIndex processIndex) =>
-            _processes.TryGetValue(processIndex, out ProcessState process) ? process.WrapperCount : (byte)0;
+            _processStates.TryGetValue(processIndex, out ProcessBuildState processState) ? processState.WrapperCount : (byte)0;
 
-        /// <summary>Converts QPC to UTC for the default process instance (index 0); null without usable metadata.</summary>
+        /// <summary>Converts QPC to UTC for process instance 0, or returns null if the clock is unknown.</summary>
         public DateTime? QpcToDateTime(long timestampQpc)
         {
             return QpcToDateTime(0, timestampQpc);
@@ -135,37 +143,29 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// </summary>
         public DateTime? QpcToDateTime(ProcessIndex processIndex, long timestampQpc)
         {
-            if (!_processes.TryGetValue(processIndex, out ProcessState process) || process.QpcFrequency == 0)
+            if (!_processStates.TryGetValue(processIndex, out ProcessBuildState processState) || processState.QpcFrequency == 0)
             {
                 return null;
             }
 
-            long frequency = checked((long)process.QpcFrequency);
-            long qpcDelta = timestampQpc - checked((long)process.QpcSync);
+            long frequency = checked((long)processState.QpcFrequency);
+            long qpcDelta = timestampQpc - checked((long)processState.QpcSync);
+            // Split the delta before converting to UTC ticks so a large QPC value is not multiplied directly.
             long wholeSeconds = qpcDelta / frequency;
             long remainingQpc = qpcDelta % frequency;
-            long utcTicks = checked(
-                checked((long)process.UtcSync) +
+            long utcTicks =
+                checked(checked((long)processState.UtcSync) +
                 checked(wholeSeconds * TimeSpan.TicksPerSecond) +
                 checked(remainingQpc * TimeSpan.TicksPerSecond) / frequency);
+
             return DateTime.FromFileTimeUtc(utcTicks);
         }
 
         #region private
 
-        /// <summary>
-        /// Binds the computer to a live parser: it resolves each carrying event to a process instance, decodes the
-        /// raw <c>AsyncEvents</c> buffer using that process's manifest, and feeds the sub-events into the index.
-        /// </summary>
-        internal AsyncProfilerIndexBuilder(AsyncProfilerTraceEventParser parser, Func<AsyncProfilerTraceEvent, ProcessIndex> processIndexOf)
-        {
-            _parser = parser ?? throw new ArgumentNullException(nameof(parser));
-            _processIndexOf = processIndexOf ?? throw new ArgumentNullException(nameof(processIndexOf));
-            _parser.AsyncEvents += OnRawTraceEvent;
-        }
-
         #region sink
 
+        /// <summary>Records a dispatcher creation after the thread has been armed by a reset.</summary>
         void ISubEventSink.OnContextCreate(in AsyncContextEvent e)
         {
             AsyncProfilerThreadKey creationThread = ThreadKeyOf(e.OsThreadId);
@@ -179,15 +179,18 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         void ISubEventSink.OnContextResume(in AsyncContextEvent e)
         {
-            // The resume-callstack event supplies the frames and pushes the activation.
+            // The resume-callstack event supplies the frames and opens the call stack.
         }
 
-        void ISubEventSink.OnContextSuspend(in AsyncContextEvent e) => CloseTop(ThreadKeyOf(e.OsThreadId), e.TimestampQpc);
+        void ISubEventSink.OnContextSuspend(in AsyncContextEvent e) =>
+            CloseTop(ThreadKeyOf(e.OsThreadId), e.TimestampQpc);
 
-        void ISubEventSink.OnContextComplete(in AsyncContextEvent e) => CloseTop(ThreadKeyOf(e.OsThreadId), e.TimestampQpc);
+        void ISubEventSink.OnContextComplete(in AsyncContextEvent e) =>
+            CloseTop(ThreadKeyOf(e.OsThreadId), e.TimestampQpc);
 
         void ISubEventSink.OnCallstack(in AsyncCallstackEvent e) => ProcessCallstack(e, reusablePayload: false);
 
+        /// <summary>Decodes a call stack into reusable buffers, then processes the decoded event.</summary>
         bool ICallstackPayloadSink.TryOnCallstack(AsyncEventID eventId, long timestampQpc,
             in BufferHeader header, byte[] buffer, ref int index, int payloadEnd)
         {
@@ -201,6 +204,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             return true;
         }
 
+        /// <summary>Records creation information, opens a call stack, or appends to the current call stack.</summary>
         private void ProcessCallstack(in AsyncCallstackEvent e, bool reusablePayload)
         {
             AsyncProfilerThreadKey thread = ThreadKeyOf(e.OsThreadId);
@@ -212,45 +216,45 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
             if (e.EventId == AsyncEventID.CreateRuntimeAsyncCallstack)
             {
-                state.RecordDispatcherCreation(
-                    _index, thread, e.DispatcherId, e.ParentDispatcherId, e.TimestampQpc);
+                state.RecordDispatcherCreation(_index, thread, e.DispatcherId, e.ParentDispatcherId, e.TimestampQpc);
                 return;
             }
 
-            bool accepted;
             if (IsResumeCallstack(e.EventId))
             {
-                state.Push(RentBuilder(e, CurrentProcess.WrapperCount, reusablePayload));
-                accepted = true;
+                state.Push(RentBuilder(e, CurrentProcessState.WrapperCount, reusablePayload));
             }
             else if (IsAppendCallstack(e.EventId))
             {
-                CallStackBuilder top = state.Top;
-                accepted = top != null && top.Kind == e.Kind && top.DispatcherId == e.DispatcherId;
-                if (accepted)
+                CallStackBuilder currentCallStack = state.Top;
+                bool hasMatchingAppendTarget =
+                    currentCallStack != null &&
+                    currentCallStack.Kind == e.Kind &&
+                    currentCallStack.DispatcherId == e.DispatcherId;
+                if (!hasMatchingAppendTarget)
                 {
-                    top.AddFrames(e);
+                    return;
                 }
+
+                currentCallStack.AddFrames(e);
             }
             else
-            {
-                accepted = false;
-            }
-
-            if (!accepted)
             {
                 return;
             }
 
-            // Register before rundown, even when the activation will not be interned until trace end.
-            if (OnFrameObserved != null && e.MethodIds != null)
+            // Report addresses now; waiting for a later commit could miss method rundown.
+            if (OnFrameObserved == null || e.MethodIds == null)
             {
-                for (int i = 0; i < e.FrameCount; i++)
+                return;
+            }
+
+            for (int i = 0; i < e.FrameCount; i++)
+            {
+                ulong instructionPointer = e.MethodIds[i];
+                if (instructionPointer != 0)
                 {
-                    if (e.MethodIds[i] != 0)
-                    {
-                        OnFrameObserved(_currentProcessIndex, e.MethodIds[i], e.Kind);
-                    }
+                    OnFrameObserved(_currentProcessIndex, instructionPointer, e.Kind);
                 }
             }
         }
@@ -260,6 +264,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             // Method resumption does not change the captured frame list.
         }
 
+        /// <summary>Records method-completion availability and advances the current call stack, if any.</summary>
         void ISubEventSink.OnMethodComplete(in AsyncMethodEvent e)
         {
             AsyncProfilerThreadKey key = ThreadKeyOf(e.OsThreadId);
@@ -274,6 +279,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             state.Top?.MethodCompletions.Add(new AsyncProfilerCallStack.CompletionDelta(e.TimestampQpc, 1));
         }
 
+        /// <summary>Records unwind availability and completion counts for the current call stack.</summary>
         void ISubEventSink.OnException(in AsyncUnwindEvent e)
         {
             AsyncProfilerThreadKey key = ThreadKeyOf(e.OsThreadId);
@@ -291,12 +297,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
         }
 
+        /// <summary>Closes open call stacks at a valid reset and arms the thread for subsequent events.</summary>
         void ISubEventSink.OnResetThreadContext(in AsyncNeutralEvent e)
         {
-            // Prior-session buffers can arrive after this session's metadata. Gate resets by QPC, not delivery
-            // order; valid resets follow metadata, possibly at the same tick on coarse clocks.
-            ProcessState process = CurrentProcess;
-            if (e.TimestampQpc < process.FirstMetadataQpc)
+            // Delivery order can differ from timestamp order. Ignore resets from before the first metadata QPC.
+            // A reset at the same QPC is valid on a coarse-resolution clock.
+            ProcessBuildState processState = CurrentProcessState;
+            if (e.TimestampQpc < processState.FirstMetadataQpc)
             {
                 return;
             }
@@ -306,15 +313,16 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             CallStacks state = GetOrCreate(key);
             if (state.Armed)
             {
-                CommitOpenActivations(key, state, e.TimestampQpc);
+                CommitOpenCallStacks(key, state, e.TimestampQpc);
             }
+
             state.Armed = true;
             state.ClearNesting();
         }
 
+        /// <summary>Records a wrapper-index reset on the current call stack, if any.</summary>
         void ISubEventSink.OnResetContinuationWrapperIndex(in AsyncNeutralEvent e)
         {
-            // Wrapper-index resets are scoped to the active (top) async call stack, like Complete/Unwind.
             CallStacks state = GetOrCreate(ThreadKeyOf(e.OsThreadId));
             if (state.Armed)
             {
@@ -322,34 +330,41 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
         }
 
+        /// <summary>Starts a completion-observation epoch and saves clock and wrapper settings.</summary>
         void ISubEventSink.OnMetadata(in AsyncMetadataEvent e)
         {
-            ProcessState process = CurrentProcess;
+            ProcessBuildState processState = CurrentProcessState;
             _index.StartCompletionAvailabilityEpoch(_currentProcessIndex, e.TimestampQpc);
-            if (e.TimestampQpc < process.FirstMetadataQpc)
+            // Buffers can arrive out of timestamp order, so keep the earliest metadata QPC.
+            if (e.TimestampQpc < processState.FirstMetadataQpc)
             {
-                process.FirstMetadataQpc = e.TimestampQpc;
+                processState.FirstMetadataQpc = e.TimestampQpc;
             }
-            process.QpcFrequency = e.QpcFrequency;
-            process.QpcSync = e.QpcSync;
-            process.UtcSync = e.UtcSync;
-            process.WrapperCount = e.WrapperCount;
+
+            processState.QpcFrequency = e.QpcFrequency;
+            processState.QpcSync = e.QpcSync;
+            processState.UtcSync = e.UtcSync;
+            processState.WrapperCount = e.WrapperCount;
         }
 
+        /// <summary>Updates the process's QPC/UTC synchronization point without changing its frequency.</summary>
         void ISubEventSink.OnSyncClock(in AsyncSyncClockEvent e)
         {
-            ProcessState process = CurrentProcess;
-            process.QpcSync = e.QpcSync;
-            process.UtcSync = e.UtcSync;
+            ProcessBuildState processState = CurrentProcessState;
+            processState.QpcSync = e.QpcSync;
+            processState.UtcSync = e.UtcSync;
         }
 
         void ISubEventSink.OnUnknown(in AsyncUnknownEvent e) { }
 
+        /// <summary>Invalidates affected open call stacks before notifying subscribers of a decode error.</summary>
         void ISubEventSink.OnParseError(in ParseError e)
         {
             ParseErrorCount++;
-            bool processWide = !e.BufferHeader.HasValue || e.EventId == AsyncEventID.AsyncProfilerMetadata;
-            if (processWide)
+
+            // A bad header cannot identify a thread; bad metadata affects every thread's decoding.
+            bool affectsEntireProcess = !e.BufferHeader.HasValue || e.EventId == AsyncEventID.AsyncProfilerMetadata;
+            if (affectsEntireProcess)
             {
                 foreach (KeyValuePair<AsyncProfilerThreadKey, CallStacks> thread in _threads)
                 {
@@ -358,12 +373,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                         InvalidateThread(thread.Key, thread.Value, e.TimestampQpc);
                     }
                 }
-                ProcessState process = CurrentProcess;
-                process.FirstMetadataQpc = long.MaxValue;
-                process.QpcFrequency = 0;
-                process.QpcSync = 0;
-                process.UtcSync = 0;
-                process.WrapperCount = 0;
+
+                ProcessBuildState processState = CurrentProcessState;
+                processState.FirstMetadataQpc = long.MaxValue;
+                processState.QpcFrequency = 0;
+                processState.QpcSync = 0;
+                processState.UtcSync = 0;
+                processState.WrapperCount = 0;
             }
             else
             {
@@ -373,19 +389,21 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     InvalidateThread(key, state, e.TimestampQpc);
                 }
             }
+
             ParseError?.Invoke(_currentProcessIndex, e);
         }
 
         #endregion
 
-        // Resume callstacks push a new async call stack onto the thread's nesting stack.
+        /// <summary>Identifies the V1 and V2 call-stack events that open a nested call stack.</summary>
         private static bool IsResumeCallstack(AsyncEventID id) =>
             id == AsyncEventID.ResumeRuntimeAsyncCallstack || id == AsyncEventID.ResumeStateMachineAsyncCallstack;
 
-        // Append callstacks extend the current (top) async call stack's in-progress frames.
+        /// <summary>Identifies the V1 event that extends the current call stack's frames.</summary>
         private static bool IsAppendCallstack(AsyncEventID id) =>
             id == AsyncEventID.AppendStateMachineAsyncCallstack;
 
+        /// <summary>Identifies the event's process and decodes its buffer, or reports an invalid envelope.</summary>
         private void OnRawTraceEvent(AsyncProfilerTraceEvent data)
         {
             _currentProcessIndex = _processIndexOf(data);
@@ -399,21 +417,26 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
         }
 
+        /// <summary>Combines the current process instance with an OS thread id.</summary>
         private AsyncProfilerThreadKey ThreadKeyOf(ulong osThreadId) =>
             new AsyncProfilerThreadKey(_currentProcessIndex, osThreadId);
 
-        private ProcessState CurrentProcess => GetOrCreateProcess(_currentProcessIndex);
+        /// <summary>The manifest and clock state for the buffer currently being decoded.</summary>
+        private ProcessBuildState CurrentProcessState => GetOrCreateProcessState(_currentProcessIndex);
 
-        private ProcessState GetOrCreateProcess(ProcessIndex processIndex)
+        /// <summary>Gets or creates the process's manifest and clock state.</summary>
+        private ProcessBuildState GetOrCreateProcessState(ProcessIndex processIndex)
         {
-            if (!_processes.TryGetValue(processIndex, out ProcessState process))
+            if (!_processStates.TryGetValue(processIndex, out ProcessBuildState processState))
             {
-                process = new ProcessState();
-                _processes[processIndex] = process;
+                processState = new ProcessBuildState();
+                _processStates[processIndex] = processState;
             }
-            return process;
+
+            return processState;
         }
 
+        /// <summary>Gets or creates the thread's nesting state.</summary>
         private CallStacks GetOrCreate(AsyncProfilerThreadKey key)
         {
             if (!_threads.TryGetValue(key, out CallStacks state))
@@ -421,16 +444,19 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 state = new CallStacks();
                 _threads[key] = state;
             }
+
             return state;
         }
 
+        /// <summary>Disarms a thread, recording only open call-stack prefixes with a usable end timestamp.</summary>
         private void InvalidateThread(AsyncProfilerThreadKey key, CallStacks state, long? endQpc)
         {
             state.Armed = false;
             while (state.Top != null)
             {
                 CallStackBuilder builder = state.Pop();
-                if (endQpc.HasValue && endQpc.Value > builder.StartQpc)
+                bool hasValidPrefix = endQpc.HasValue && endQpc.Value > builder.StartQpc;
+                if (hasValidPrefix)
                 {
                     Commit(key, builder, endQpc.Value);
                 }
@@ -442,6 +468,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
         }
 
+        /// <summary>Closes and records the current call stack when an armed thread suspends or completes it.</summary>
         private void CloseTop(AsyncProfilerThreadKey key, long timestampQpc)
         {
             CallStacks state = GetOrCreate(key);
@@ -455,11 +482,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         /// <summary>
-        /// Pops and records every in-progress async call stack still open on <paramref name="state"/>, closing each
-        /// at <paramref name="endQpc"/>. Used both at end of stream (<see cref="Finish"/>, endQpc = long.MaxValue)
-        /// and on an armed mid-session reset (endQpc = the reset timestamp).
+        /// Closes and records every open call stack at the supplied timestamp.
+        /// Used for thread resets and the end-of-stream flush.
         /// </summary>
-        private void CommitOpenActivations(AsyncProfilerThreadKey key, CallStacks state, long endQpc)
+        private void CommitOpenCallStacks(AsyncProfilerThreadKey key, CallStacks state, long endQpc)
         {
             while (state.Top != null)
             {
@@ -468,6 +494,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
         }
 
+        /// <summary>Records the call-stack interval and returns its builder to the pool.</summary>
         private void Commit(AsyncProfilerThreadKey key, CallStackBuilder builder, long endQpc)
         {
             AsyncProfilerCallStack.CompletionDelta[] methodCompletions = builder.GetMethodCompletions();
@@ -498,14 +525,14 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
         }
 
+        /// <summary>Initializes a pooled or new builder, sharing indexed frames when possible.</summary>
         private CallStackBuilder RentBuilder(in AsyncCallstackEvent e, byte wrapperCount, bool reusablePayload)
         {
             CallStackBuilder builder = _builderPool.Count != 0
                 ? _builderPool.Pop()
                 : new CallStackBuilder();
 
-            if (reusablePayload && _index.TryGetInternedFrames(
-                _currentProcessIndex, e.Kind, e.MethodIds, e.FrameStates, e.FrameCount,
+            if (reusablePayload && _index.TryGetInternedFrames(_currentProcessIndex, e.Kind, e.MethodIds, e.FrameStates, e.FrameCount,
                 out AsyncProfilerCallStackFramesIndex framesIndex, out AsyncProfilerCallStackFrames frames))
             {
                 builder.Initialize(e, wrapperCount, framesIndex, frames);
@@ -514,22 +541,27 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             {
                 builder.Initialize(e, wrapperCount, copyFrames: reusablePayload);
             }
+
             return builder;
         }
 
-        /// <summary>Per-thread build state: the nesting stack of in-progress async call stacks.</summary>
+        /// <summary>Tracks the open call stacks on one thread.</summary>
         private sealed class CallStacks
         {
+            /// <summary>True after a valid reset, until a decode error invalidates the thread.</summary>
             public bool Armed;
 
+            /// <summary>The current call stack, or null when the thread has none.</summary>
             public CallStackBuilder Top => _nesting.Count > 0 ? _nesting[_nesting.Count - 1] : null;
 
+            /// <summary>Makes a call stack current and sets its nesting depth.</summary>
             public void Push(CallStackBuilder builder)
             {
                 builder.Depth = _nesting.Count;
                 _nesting.Add(builder);
             }
 
+            /// <summary>Removes and returns the current call stack.</summary>
             public CallStackBuilder Pop()
             {
                 CallStackBuilder top = _nesting[_nesting.Count - 1];
@@ -537,6 +569,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 return top;
             }
 
+            /// <summary>Records a dispatcher creation unless it repeats the previous creation record.</summary>
             public void RecordDispatcherCreation(
                 AsyncProfilerCallStacksIndex index,
                 AsyncProfilerThreadKey thread,
@@ -544,10 +577,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 ulong parentDispatcherId,
                 long creationQpc)
             {
-                // Both V2 creation forms describe the same creation at the same QPC, possibly in separate buffers.
-                if (_lastCreatedDispatcherId == dispatcherId &&
+                // V2 can report one creation in both a context event and a call-stack event.
+                bool isRepeatedCreation =
+                    _lastCreatedDispatcherId == dispatcherId &&
                     _lastCreatedParentDispatcherId == parentDispatcherId &&
-                    _lastCreationQpc == creationQpc)
+                    _lastCreationQpc == creationQpc;
+                if (isRepeatedCreation)
                 {
                     return;
                 }
@@ -558,11 +593,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 _lastCreationQpc = creationQpc;
             }
 
+            /// <summary>Clears the nesting list after its open call stacks have been handled.</summary>
             public void ClearNesting() => _nesting.Clear();
 
             #region private
 
-            private readonly List<CallStackBuilder> _nesting = new List<CallStackBuilder>(); // top = last
+            // Open call stacks in root-to-leaf order; the last entry is current.
+            private readonly List<CallStackBuilder> _nesting = new List<CallStackBuilder>();
             private ulong _lastCreatedDispatcherId;
             private ulong _lastCreatedParentDispatcherId;
             private long _lastCreationQpc;
@@ -570,9 +607,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             #endregion
         }
 
-        private sealed class ProcessState
+        /// <summary>Holds the manifest, clock, and wrapper settings for one process instance.</summary>
+        private sealed class ProcessBuildState
         {
             public readonly Manifest Manifest = new Manifest();
+            // Ignore earlier resets. MaxValue means fresh metadata is still required.
             public long FirstMetadataQpc = long.MaxValue;
             public ulong QpcFrequency;
             public ulong QpcSync;
@@ -580,7 +619,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             public byte WrapperCount;
         }
 
-        /// <summary>An in-progress async call stack being assembled on a thread's nesting stack.</summary>
+        /// <summary>Assembles a call stack's frames and completion history until its interval is recorded.</summary>
         private sealed class CallStackBuilder
         {
             public ulong DispatcherId;
@@ -592,6 +631,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             public AsyncProfilerCallStackFramesIndex FramesIndex;
             public AsyncProfilerCallStackFrames Frames;
 
+            /// <summary>True while the builder shares an existing frame list from the index.</summary>
             public bool HasInternedFrames => Frames != null;
 
             public List<AsyncProfilerCallStack.CompletionDelta> MethodCompletions =>
@@ -603,6 +643,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             public List<long> WrapperResets =>
                 _wrapperResets ?? (_wrapperResets = new List<long>());
 
+            /// <summary>Starts a call stack, copying borrowed decoder buffers when needed.</summary>
             public void Initialize(in AsyncCallstackEvent e, byte wrapperCount, bool copyFrames)
             {
                 InitializeHeader(e, wrapperCount);
@@ -622,6 +663,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 }
             }
 
+            /// <summary>Starts a call stack with an existing shared frame list.</summary>
             public void Initialize(in AsyncCallstackEvent e, byte wrapperCount,
                 AsyncProfilerCallStackFramesIndex framesIndex, AsyncProfilerCallStackFrames frames)
             {
@@ -630,6 +672,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 Frames = frames;
             }
 
+            /// <summary>Appends frames without changing any frame list already stored in the index.</summary>
             public void AddFrames(in AsyncCallstackEvent e)
             {
                 if (e.MethodIds == null || e.FrameCount == 0)
@@ -637,9 +680,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     return;
                 }
 
-                bool hasState = e.FrameStates != null;
+                bool hasFrameStates = e.FrameStates != null;
                 if (_methodIdsBuilder == null)
                 {
+                    // Copy the initial frames into append lists; indexed frame lists must stay unchanged.
                     int existingCount = HasInternedFrames ? Frames.FrameCount : _methodIds.Length;
                     _methodIdsBuilder = new List<ulong>(existingCount + e.FrameCount);
                     for (int i = 0; i < existingCount; i++)
@@ -649,7 +693,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
                     if (Kind == AsyncCallstackKind.StateMachineAsync)
                     {
-                        // Back-fill zero states for frames previously added without state so arrays stay aligned.
+                        // Keep the existing V1 states aligned with their instruction pointers.
                         _frameStatesBuilder = new List<int>(existingCount + e.FrameCount);
                         for (int i = 0; i < existingCount; i++)
                         {
@@ -660,8 +704,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     FramesIndex = AsyncProfilerCallStackFramesIndex.Invalid;
                     Frames = null;
                 }
-                else if (hasState && _frameStatesBuilder == null)
+                else if (hasFrameStates && _frameStatesBuilder == null)
                 {
+                    // Fill state slots for earlier frames before appending frames that have states.
                     _frameStatesBuilder = new List<int>(_methodIdsBuilder.Count + e.MethodIds.Length);
                     for (int i = 0; i < _methodIdsBuilder.Count; i++)
                     {
@@ -674,23 +719,29 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     _methodIdsBuilder.Add(e.MethodIds[i]);
                     if (_frameStatesBuilder != null)
                     {
-                        _frameStatesBuilder.Add(hasState ? e.FrameStates[i] : 0);
+                        _frameStatesBuilder.Add(hasFrameStates ? e.FrameStates[i] : 0);
                     }
                 }
             }
 
+            /// <summary>Returns the complete instruction-pointer array, including appended frames.</summary>
             public ulong[] GetMethodIds() => _methodIdsBuilder?.ToArray() ?? _methodIds;
 
+            /// <summary>Returns the V1 states aligned with the instruction pointers, or null for V2.</summary>
             public int[] GetFrameStates() => _frameStatesBuilder?.ToArray() ?? _frameStates;
 
+            /// <summary>Returns the recorded method completions, or an empty array.</summary>
             public AsyncProfilerCallStack.CompletionDelta[] GetMethodCompletions() =>
                 _methodCompletions?.ToArray() ?? Array.Empty<AsyncProfilerCallStack.CompletionDelta>();
 
+            /// <summary>Returns the recorded exception unwinds, or an empty array.</summary>
             public AsyncProfilerCallStack.CompletionDelta[] GetExceptionCompletions() =>
                 _exceptionCompletions?.ToArray() ?? Array.Empty<AsyncProfilerCallStack.CompletionDelta>();
 
+            /// <summary>Returns the wrapper-reset timestamps, or an empty array.</summary>
             public long[] GetWrapperResets() => _wrapperResets?.ToArray() ?? Array.Empty<long>();
 
+            /// <summary>Drops frame references and empties the history lists before the builder is reused.</summary>
             public void Clear()
             {
                 DispatcherId = 0;
@@ -712,6 +763,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
             #region private
 
+            /// <summary>Copies call-stack identity and timing; the caller supplies the frame storage.</summary>
             private void InitializeHeader(in AsyncCallstackEvent e, byte wrapperCount)
             {
                 DispatcherId = e.DispatcherId;
@@ -737,8 +789,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         private readonly AsyncProfilerTraceEventParser _parser;
         private readonly Func<AsyncProfilerTraceEvent, ProcessIndex> _processIndexOf;
         private readonly AsyncProfilerCallStacksIndex _index = new AsyncProfilerCallStacksIndex();
-        private readonly Dictionary<AsyncProfilerThreadKey, CallStacks> _threads = new Dictionary<AsyncProfilerThreadKey, CallStacks>();
-        private readonly Dictionary<ProcessIndex, ProcessState> _processes = new Dictionary<ProcessIndex, ProcessState>();
+        private readonly Dictionary<AsyncProfilerThreadKey, CallStacks> _threads =
+            new Dictionary<AsyncProfilerThreadKey, CallStacks>();
+        private readonly Dictionary<ProcessIndex, ProcessBuildState> _processStates =
+            new Dictionary<ProcessIndex, ProcessBuildState>();
         private readonly Stack<CallStackBuilder> _builderPool = new Stack<CallStackBuilder>();
         private readonly ulong[] _callstackMethodIds = new ulong[byte.MaxValue];
         private readonly int[] _callstackFrameStates = new int[byte.MaxValue];

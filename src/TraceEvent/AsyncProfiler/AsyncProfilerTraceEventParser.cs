@@ -13,22 +13,18 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
     /// <summary>
     /// Parser for the runtime's <c>System.Runtime.CompilerServices.AsyncProfilerEventSource</c>.
     /// <para>
-    /// The EventSource emits a single <c>AsyncEvents</c> event (id = 1) whose payload is an opaque,
-    /// densely packed binary buffer that batches many logical async-profiler sub-events. Each sub-event
-    /// carries a delta-encoded timestamp and (for callstacks) delta-encoded method ids. This parser
-    /// registers the raw <c>AsyncEvents</c> event and additionally exposes
-    /// <see cref="ParseBuffer(byte[], ISubEventSink)"/> which decodes the
-    /// buffer into strongly typed sub-events for both the V2 (RuntimeAsync) and V1 (StateMachineAsync)
-    /// instrumentation. Decoded sub-events are delivered to a sink, not materialized as individual TraceEvents.
-    /// TraceLog builds a persisted async index and omits the raw batches by default; set
+    /// The provider emits one <c>AsyncEvents</c> event (id 1) containing a batch of encoded sub-events.
+    /// Subscribe to <see cref="AsyncEvents"/> for the raw buffer, or use
+    /// <see cref="ParseBuffer(byte[], ISubEventSink)"/> to decode V1 (StateMachineAsync) and V2 (RuntimeAsync)
+    /// sub-events. Decoded sub-events are delivered to a sink, not exposed as separate TraceEvents.
+    /// TraceLog saves an async call-stack index and omits the raw batches by default. Set
     /// <see cref="Etlx.TraceLogOptions.KeepAsyncProfilerEvents"/> or
     /// <see cref="Etlx.TraceLogOptions.KeepAllEvents"/> to retain them in ETLX for raw-event inspection.
     /// </para>
     /// <para>
-    /// The buffer/wire format is defined by <c>AsyncProfiler.cs</c> and
-    /// <c>AsyncProfilerEventSource.cs</c> in dotnet/runtime. The framing is version tolerant: every
-    /// sub-event is preceded by a payload-length prefix (0, 1, or 2 bytes, per the event manifest) so a
-    /// decoder can skip sub-events (or trailing bytes of a sub-event) it does not understand.
+    /// The wire format is defined by <c>AsyncProfiler.cs</c> and <c>AsyncProfilerEventSource.cs</c>
+    /// in dotnet/runtime. Each manifest entry specifies whether an event's payload-length prefix is absent,
+    /// one byte, or two bytes. Declared payload lengths let the decoder skip unknown events and appended fields.
     /// </para>
     /// </summary>
     internal sealed class AsyncProfilerTraceEventParser : TraceEventParser
@@ -37,28 +33,23 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
         public const string ProviderName = "System.Runtime.CompilerServices.AsyncProfilerEventSource";
 
         /// <summary>
-        /// The provider GUID, derived from <see cref="ProviderName"/> using the standard EventSource
-        /// name-to-GUID hashing algorithm (see TraceEventProviders.GetEventSourceGuidFromName).
+        /// Provider GUID derived from <see cref="ProviderName"/> using the EventSource name-to-GUID algorithm.
         /// </summary>
         public static readonly Guid ProviderGuid = new Guid("7892f2f8-f81d-50d6-aea7-594d846c2274");
 
         /// <summary>The event id of the single raw <c>AsyncEvents</c> event.</summary>
         public const int AsyncEventsEventId = 1;
 
-        /// <summary>The only buffer/header layout version this parser understands.</summary>
+        /// <summary>The supported async-profiler buffer-header version.</summary>
         public const byte SupportedBufferVersion = 1;
-
-        private static volatile TraceEvent[] s_templates;
 
         /// <summary>Creates the raw-event parser for the specified trace source.</summary>
         public AsyncProfilerTraceEventParser(TraceEventSource source) : base(source)
         {
         }
 
-        protected override string GetProviderName() => ProviderName;
-
         /// <summary>
-        /// Subscribe to the raw <c>AsyncEvents</c> event (the undecoded buffer).
+        /// Receives raw <c>AsyncEvents</c> events containing encoded buffers.
         /// </summary>
         public event Action<AsyncProfilerTraceEvent> AsyncEvents
         {
@@ -73,17 +64,15 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
         }
 
         /// <summary>
-        /// Decodes an <c>AsyncEvents</c> buffer, dispatching each contained sub-event to <paramref name="sink"/>.
-        /// No live <see cref="TraceEventSource"/> is required.
+        /// Decodes an <c>AsyncEvents</c> buffer and sends its sub-events to <paramref name="sink"/>.
+        /// Does not require a <see cref="TraceEventSource"/>.
         /// </summary>
-        /// <param name="buffer">The raw async-profiler buffer (the <c>Buffer</c> payload of <see cref="AsyncProfilerTraceEvent"/>).</param>
+        /// <param name="buffer">The encoded buffer from <see cref="AsyncProfilerTraceEvent.Buffer"/>.</param>
         /// <param name="sink">Receives the decoded sub-events and any parse errors.</param>
         /// <remarks>
-        /// This overload frames sub-events using a fresh manifest seeded with the built-in v1 defaults (and
-        /// any <c>AsyncProfilerMetadata</c> found within <paramref name="buffer"/> itself). To honor a
-        /// manifest that was advertised in an earlier buffer, use the
-        /// <see cref="ParseBuffer(byte[], Manifest, ISubEventSink)"/> overload with
-        /// a persistent <see cref="Manifest"/>.
+        /// Starts with the built-in version-1 event layouts and applies metadata from this buffer.
+        /// To retain metadata from earlier buffers, use
+        /// <see cref="ParseBuffer(byte[], Manifest, ISubEventSink)"/> with the same manifest across calls.
         /// </remarks>
         public static void ParseBuffer(byte[] buffer, ISubEventSink sink)
         {
@@ -91,23 +80,20 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
         }
 
         /// <summary>
-        /// Decodes an <c>AsyncEvents</c> buffer, dispatching each contained sub-event to <paramref name="sink"/>,
-        /// using <paramref name="manifest"/> to frame sub-events. The manifest supplies the payload-length
-        /// prefix width for each event id (so events whose id or width this parser does not statically know can
-        /// still be skipped) and is refreshed in place whenever an <c>AsyncProfilerMetadata</c> sub-event is
-        /// decoded. Reuse a single <paramref name="manifest"/> instance across buffers from the same process
-        /// instance, because the runtime advertises the manifest only once per configuration revision.
+        /// Decodes an <c>AsyncEvents</c> buffer using <paramref name="manifest"/> to read payload lengths.
+        /// Sends decoded sub-events to <paramref name="sink"/> and updates the manifest when metadata is decoded.
+        /// Reuse the same manifest across buffers from one process instance so earlier metadata remains available.
         /// </summary>
-        /// <param name="buffer">The raw async-profiler buffer (the <c>Buffer</c> payload of <see cref="AsyncProfilerTraceEvent"/>).</param>
-        /// <param name="manifest">The live per-event manifest used to frame sub-events; updated in place from metadata.</param>
+        /// <param name="buffer">The encoded buffer from <see cref="AsyncProfilerTraceEvent.Buffer"/>.</param>
+        /// <param name="manifest">Per-event payload-length widths and versions, updated in place from metadata.</param>
         /// <param name="sink">Receives the decoded sub-events and any parse errors.</param>
         /// <remarks>
-        /// Decoding is synchronous. Known payloads are read using their supported fields; appended fields and
-        /// advertised unknown events are skipped using the declared payload length. New schemas must preserve the
-        /// known layout and append fields rather than change it. Malformed typed payloads are reported to
-        /// <see cref="ISubEventSink.OnParseError"/> and decoding continues at their declared end;
-        /// header or framing failures stop this buffer. The decoder itself does not recover activation state.
-        /// <see cref="Computers.AsyncProfilerIndexBuilder"/> provides that recovery and per-process manifest ownership.
+        /// Decoding is synchronous. Reads known fields and skips appended fields and advertised unknown events
+        /// using their declared payload lengths. New schemas must preserve the known layout and only append fields.
+        /// Malformed payloads are reported to <see cref="ISubEventSink.OnParseError"/>; decoding then continues
+        /// at the declared payload end. Invalid headers or event framing stop decoding this buffer.
+        /// This decoder does not track open call stacks. <see cref="Computers.AsyncProfilerIndexBuilder"/>
+        /// maintains that state, handles error recovery, and keeps each process's manifest separate.
         /// </remarks>
         public static void ParseBuffer(byte[] buffer, Manifest manifest, ISubEventSink sink)
         {
@@ -115,10 +101,12 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
             {
                 throw new ArgumentNullException(nameof(buffer));
             }
+
             if (manifest == null)
             {
                 throw new ArgumentNullException(nameof(manifest));
             }
+
             if (sink == null)
             {
                 throw new ArgumentNullException(nameof(sink));
@@ -132,14 +120,13 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
 
             if (header.TotalSize < BufferHeader.Size)
             {
-                sink.OnParseError(new ParseError("Async-profiler buffer total size is smaller than its header", 1,
-                    header, header.StartTimestampQpc));
+                sink.OnParseError(new ParseError("Async-profiler buffer total size is smaller than its header", 1, header, header.StartTimestampQpc));
                 return;
             }
+
             if (header.TotalSize > buffer.Length)
             {
-                sink.OnParseError(new ParseError("Async-profiler buffer is truncated before its declared total size", buffer.Length,
-                    header, header.StartTimestampQpc));
+                sink.OnParseError(new ParseError("Async-profiler buffer is truncated before its declared total size", buffer.Length, header, header.StartTimestampQpc));
                 return;
             }
 
@@ -152,56 +139,58 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
             {
                 if (index >= limit)
                 {
-                    sink.OnParseError(new ParseError(
-                        "Async-profiler buffer ended before its declared event count was reached", index, header, timestampQpc));
+                    sink.OnParseError(new ParseError("Async-profiler buffer ended before its declared event count was reached", index, header, timestampQpc));
                     return;
                 }
 
                 var eventId = (AsyncEventID)buffer[index++];
 
-                if (!BufferReader.TryReadCompressedUInt64(buffer, ref index, limit, out ulong deltaTicks) ||
+                bool hasTimestampDelta =
+                    BufferReader.TryReadCompressedUInt64(buffer, ref index, limit, out ulong deltaTicks);
+                bool timestampWouldOverflow =
                     deltaTicks > long.MaxValue ||
-                    timestampQpc > long.MaxValue - (long)deltaTicks)
+                    timestampQpc > long.MaxValue - (long)deltaTicks;
+                if (!hasTimestampDelta || timestampWouldOverflow)
                 {
-                    sink.OnParseError(new ParseError("Invalid or truncated sub-event timestamp delta", index,
-                        header, timestampQpc, eventId));
+                    sink.OnParseError(new ParseError("Invalid or truncated sub-event timestamp delta", index, header, timestampQpc, eventId));
                     return;
                 }
+
                 timestampQpc += (long)deltaTicks;
 
                 if (!TryReadPayloadLengthPrefix(buffer, eventId, manifest, ref index, limit, out int payloadLength))
                 {
-                    sink.OnParseError(new ParseError("Invalid or truncated sub-event payload-length prefix", index,
-                        header, timestampQpc, eventId));
+                    sink.OnParseError(new ParseError("Invalid or truncated sub-event payload-length prefix", index, header, timestampQpc, eventId));
                     return;
                 }
 
                 int payloadStart = index;
                 if (payloadLength > limit - payloadStart)
                 {
-                    sink.OnParseError(new ParseError("Sub-event payload extends beyond the async-profiler buffer", payloadStart,
-                        header, timestampQpc, eventId));
+                    sink.OnParseError(new ParseError("Sub-event payload extends beyond the async-profiler buffer", payloadStart, header, timestampQpc, eventId));
                     return;
                 }
 
                 int payloadEnd = payloadStart + payloadLength;
                 DispatchSubEvent(eventId, timestampQpc, header, buffer, payloadStart, payloadEnd, manifest, sink);
 
-                // The declared end is authoritative, including unknown events and appended fields.
+                // Skip any bytes not read by the decoder, including unknown events and appended fields.
                 index = payloadEnd;
                 eventIndex++;
             }
 
             if (index != limit)
             {
-                sink.OnParseError(new ParseError(
-                    "Async-profiler buffer contains logical bytes beyond its declared event count", index, header, timestampQpc));
+                sink.OnParseError(new ParseError("Async-profiler buffer contains logical bytes beyond its declared event count", index, header, timestampQpc));
             }
         }
 
         #region private
 
-        protected internal override void EnumerateTemplates(Func<string, string, EventFilterResponse> eventsToObserve, Action<TraceEvent> callback)
+        protected override string GetProviderName() => ProviderName;
+
+        protected internal override void EnumerateTemplates(
+            Func<string, string, EventFilterResponse> eventsToObserve, Action<TraceEvent> callback)
         {
             if (s_templates == null)
             {
@@ -212,7 +201,10 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
 
             foreach (var template in s_templates)
             {
-                if (eventsToObserve == null || eventsToObserve(template.ProviderName, template.EventName) == EventFilterResponse.AcceptEvent)
+                bool shouldObserve =
+                    eventsToObserve == null ||
+                    eventsToObserve(template.ProviderName, template.EventName) == EventFilterResponse.AcceptEvent;
+                if (shouldObserve)
                 {
                     callback(template);
                 }
@@ -221,13 +213,16 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
 
         private static AsyncProfilerTraceEvent AsyncEventsTemplate(Action<AsyncProfilerTraceEvent> action)
         {
-            // eventID=1, task=1, opcode=Info (0); the single EventSource "AsyncEvents" event.
+            // AsyncEvents uses task 1 and the Info opcode (0).
             return new AsyncProfilerTraceEvent(action, AsyncEventsEventId, 1, "AsyncEvents", Guid.Empty, 0, "Info", ProviderGuid, ProviderName);
         }
 
-        // Reads the per-sub-event payload-length prefix (0, 1, or 2 little-endian bytes, per the live
-        // manifest) without advancing beyond the outer buffer limit.
-        private static bool TryReadPayloadLengthPrefix(byte[] buffer, AsyncEventID eventId, Manifest manifest,
+        /// <summary>
+        /// Reads the manifest-defined payload length without passing the buffer limit.
+        /// An absent prefix means the event has no payload; two-byte lengths are little-endian.
+        /// </summary>
+        private static bool TryReadPayloadLengthPrefix(
+            byte[] buffer, AsyncEventID eventId, Manifest manifest,
             ref int index, int limit, out int payloadLength)
         {
             switch (manifest.GetPayloadLengthFieldSize(eventId))
@@ -241,6 +236,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
                         payloadLength = 0;
                         return false;
                     }
+
                     payloadLength = buffer[index++];
                     return true;
                 case PayloadLengthFieldSize.UShort:
@@ -249,6 +245,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
                         payloadLength = 0;
                         return false;
                     }
+
                     payloadLength = buffer[index] | (buffer[index + 1] << 8);
                     index += 2;
                     return true;
@@ -258,7 +255,9 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
             }
         }
 
-        private static void DispatchSubEvent(AsyncEventID eventId, long timestampQpc, in BufferHeader header,
+        /// <summary>Decodes one payload within its declared bounds and calls the matching sink method.</summary>
+        private static void DispatchSubEvent(
+            AsyncEventID eventId, long timestampQpc, in BufferHeader header,
             byte[] buffer, int payloadStart, int payloadEnd, Manifest manifest, ISubEventSink sink)
         {
             int index = payloadStart;
@@ -266,155 +265,169 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
             {
                 case AsyncEventID.CreateRuntimeAsyncContext:
                 case AsyncEventID.CreateStateMachineAsyncContext:
-                {
-                    if (!BufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong parentDispatcherId) ||
-                        !BufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong dispatcherId))
                     {
-                        ReportMalformedPayload(eventId, timestampQpc, header, payloadStart, sink);
+                        if (!BufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong parentDispatcherId) ||
+                            !BufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong dispatcherId))
+                        {
+                            ReportMalformedPayload(eventId, timestampQpc, header, payloadStart, sink);
+                            return;
+                        }
+
+                        sink.OnContextCreate(
+                            new AsyncContextEvent(eventId, timestampQpc, header, parentDispatcherId, dispatcherId));
                         return;
                     }
-                    sink.OnContextCreate(new AsyncContextEvent(eventId, timestampQpc, header, parentDispatcherId, dispatcherId));
-                    return;
-                }
                 case AsyncEventID.ResumeRuntimeAsyncContext:
                 case AsyncEventID.ResumeStateMachineAsyncContext:
-                {
-                    if (!BufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong dispatcherId))
                     {
-                        ReportMalformedPayload(eventId, timestampQpc, header, payloadStart, sink);
+                        if (!BufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong dispatcherId))
+                        {
+                            ReportMalformedPayload(eventId, timestampQpc, header, payloadStart, sink);
+                            return;
+                        }
+
+                        sink.OnContextResume(new AsyncContextEvent(eventId, timestampQpc, header, 0, dispatcherId));
                         return;
                     }
-                    sink.OnContextResume(new AsyncContextEvent(eventId, timestampQpc, header, 0, dispatcherId));
-                    return;
-                }
                 case AsyncEventID.SuspendRuntimeAsyncContext:
                 case AsyncEventID.SuspendStateMachineAsyncContext:
-                {
-                    sink.OnContextSuspend(new AsyncContextEvent(eventId, timestampQpc, header, 0, 0));
-                    return;
-                }
-                case AsyncEventID.CompleteRuntimeAsyncContext:
-                case AsyncEventID.CompleteStateMachineAsyncContext:
-                {
-                    sink.OnContextComplete(new AsyncContextEvent(eventId, timestampQpc, header, 0, 0));
-                    return;
-                }
-                case AsyncEventID.UnwindRuntimeAsyncException:
-                case AsyncEventID.UnwindStateMachineAsyncException:
-                {
-                    if (!BufferReader.TryReadCompressedUInt32(buffer, ref index, payloadEnd, out uint unwoundFrames))
                     {
-                        ReportMalformedPayload(eventId, timestampQpc, header, payloadStart, sink);
+                        sink.OnContextSuspend(new AsyncContextEvent(eventId, timestampQpc, header, 0, 0));
                         return;
                     }
-                    sink.OnException(new AsyncUnwindEvent(eventId, timestampQpc, header, unwoundFrames));
-                    return;
-                }
+                case AsyncEventID.CompleteRuntimeAsyncContext:
+                case AsyncEventID.CompleteStateMachineAsyncContext:
+                    {
+                        sink.OnContextComplete(new AsyncContextEvent(eventId, timestampQpc, header, 0, 0));
+                        return;
+                    }
+                case AsyncEventID.UnwindRuntimeAsyncException:
+                case AsyncEventID.UnwindStateMachineAsyncException:
+                    {
+                        if (!BufferReader.TryReadCompressedUInt32(buffer, ref index, payloadEnd, out uint unwoundFrames))
+                        {
+                            ReportMalformedPayload(eventId, timestampQpc, header, payloadStart, sink);
+                            return;
+                        }
+
+                        sink.OnException(new AsyncUnwindEvent(eventId, timestampQpc, header, unwoundFrames));
+                        return;
+                    }
                 case AsyncEventID.CreateRuntimeAsyncCallstack:
                 case AsyncEventID.ResumeRuntimeAsyncCallstack:
                 case AsyncEventID.SuspendRuntimeAsyncCallstack:
                 case AsyncEventID.ResumeStateMachineAsyncCallstack:
                 case AsyncEventID.AppendStateMachineAsyncCallstack:
-                {
-                    bool parsed;
-                    if (sink is ICallstackPayloadSink payloadSink)
                     {
-                        parsed = payloadSink.TryOnCallstack(eventId, timestampQpc, header, buffer, ref index, payloadEnd);
-                    }
-                    else if (AsyncCallstackEvent.TryRead(eventId, timestampQpc, header, buffer, ref index, payloadEnd, out AsyncCallstackEvent callstack))
-                    {
-                        sink.OnCallstack(callstack);
-                        parsed = true;
-                    }
-                    else
-                    {
-                        parsed = false;
-                    }
+                        bool parsed;
+                        // Let sinks with reusable buffers decode the call-stack payload themselves.
+                        if (sink is ICallstackPayloadSink payloadSink)
+                        {
+                            parsed = payloadSink.TryOnCallstack(eventId, timestampQpc, header, buffer, ref index, payloadEnd);
+                        }
+                        else if (AsyncCallstackEvent.TryRead(eventId, timestampQpc, header, buffer, ref index, payloadEnd, out AsyncCallstackEvent callstack))
+                        {
+                            sink.OnCallstack(callstack);
+                            parsed = true;
+                        }
+                        else
+                        {
+                            parsed = false;
+                        }
 
-                    if (!parsed)
-                    {
-                        ReportMalformedPayload(eventId, timestampQpc, header, payloadStart, sink);
-                    }
-                    return;
-                }
-                case AsyncEventID.ResumeRuntimeAsyncMethod:
-                case AsyncEventID.ResumeStateMachineAsyncMethod:
-                {
-                    sink.OnMethodResume(new AsyncMethodEvent(eventId, timestampQpc, header));
-                    return;
-                }
-                case AsyncEventID.CompleteRuntimeAsyncMethod:
-                case AsyncEventID.CompleteStateMachineAsyncMethod:
-                {
-                    sink.OnMethodComplete(new AsyncMethodEvent(eventId, timestampQpc, header));
-                    return;
-                }
-                case AsyncEventID.ResetAsyncThreadContext:
-                {
-                    sink.OnResetThreadContext(new AsyncNeutralEvent(eventId, timestampQpc, header));
-                    return;
-                }
-                case AsyncEventID.ResetAsyncContinuationWrapperIndex:
-                {
-                    sink.OnResetContinuationWrapperIndex(new AsyncNeutralEvent(eventId, timestampQpc, header));
-                    return;
-                }
-                case AsyncEventID.AsyncProfilerMetadata:
-                {
-                    if (AsyncMetadataEvent.TryRead(timestampQpc, header, buffer, ref index, payloadEnd, out AsyncMetadataEvent metadata))
-                    {
-                        // Adopt the advertised manifest so subsequent sub-events (in this and later buffers)
-                        // are framed with the runtime's authoritative payload-length widths and versions.
-                        manifest.Apply(metadata);
-                        sink.OnMetadata(metadata);
-                    }
-                    else
-                    {
-                        ReportMalformedPayload(eventId, timestampQpc, header, payloadStart, sink);
-                    }
-                    return;
-                }
-                case AsyncEventID.AsyncProfilerSyncClock:
-                {
-                    if (!BufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong qpcSync) ||
-                        !BufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong utcSync))
-                    {
-                        ReportMalformedPayload(eventId, timestampQpc, header, payloadStart, sink);
+                        if (!parsed)
+                        {
+                            ReportMalformedPayload(eventId, timestampQpc, header, payloadStart, sink);
+                        }
                         return;
                     }
-                    sink.OnSyncClock(new AsyncSyncClockEvent(timestampQpc, header, qpcSync, utcSync));
-                    return;
-                }
+                case AsyncEventID.ResumeRuntimeAsyncMethod:
+                case AsyncEventID.ResumeStateMachineAsyncMethod:
+                    {
+                        sink.OnMethodResume(new AsyncMethodEvent(eventId, timestampQpc, header));
+                        return;
+                    }
+                case AsyncEventID.CompleteRuntimeAsyncMethod:
+                case AsyncEventID.CompleteStateMachineAsyncMethod:
+                    {
+                        sink.OnMethodComplete(new AsyncMethodEvent(eventId, timestampQpc, header));
+                        return;
+                    }
+                case AsyncEventID.ResetAsyncThreadContext:
+                    {
+                        sink.OnResetThreadContext(new AsyncNeutralEvent(eventId, timestampQpc, header));
+                        return;
+                    }
+                case AsyncEventID.ResetAsyncContinuationWrapperIndex:
+                    {
+                        sink.OnResetContinuationWrapperIndex(new AsyncNeutralEvent(eventId, timestampQpc, header));
+                        return;
+                    }
+                case AsyncEventID.AsyncProfilerMetadata:
+                    {
+                        if (AsyncMetadataEvent.TryRead(
+                            timestampQpc, header, buffer, ref index, payloadEnd, out AsyncMetadataEvent metadata))
+                        {
+                            // Apply metadata before decoding subsequent events.
+                            manifest.Apply(metadata);
+                            sink.OnMetadata(metadata);
+                        }
+                        else
+                        {
+                            ReportMalformedPayload(eventId, timestampQpc, header, payloadStart, sink);
+                        }
+                        return;
+                    }
+                case AsyncEventID.AsyncProfilerSyncClock:
+                    {
+                        if (!BufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong qpcSync) ||
+                            !BufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong utcSync))
+                        {
+                            ReportMalformedPayload(eventId, timestampQpc, header, payloadStart, sink);
+                            return;
+                        }
+
+                        sink.OnSyncClock(new AsyncSyncClockEvent(timestampQpc, header, qpcSync, utcSync));
+                        return;
+                    }
                 default:
-                {
-                    // Unknown/future sub-event. The payload-length prefix lets ParseBuffer skip it safely,
-                    // so simply report it and let the caller decide whether to care.
-                    sink.OnUnknown(new AsyncUnknownEvent(eventId, timestampQpc, header, payloadEnd - payloadStart));
-                    return;
-                }
+                    {
+                        // Report the unknown event; ParseBuffer skips its declared payload.
+                        sink.OnUnknown(new AsyncUnknownEvent(eventId, timestampQpc, header, payloadEnd - payloadStart));
+                        return;
+                    }
             }
         }
 
-        private static void ReportMalformedPayload(AsyncEventID eventId, long timestampQpc,
+        /// <summary>Reports a payload error at the start of the affected event's payload.</summary>
+        private static void ReportMalformedPayload(
+            AsyncEventID eventId, long timestampQpc,
             in BufferHeader header, int payloadStart, ISubEventSink sink)
         {
-            sink.OnParseError(new ParseError("Invalid or truncated payload for " + eventId, payloadStart,
-                header, timestampQpc, eventId));
+            sink.OnParseError(new ParseError("Invalid or truncated payload for " + eventId, payloadStart, header, timestampQpc, eventId));
         }
+
+        private static volatile TraceEvent[] s_templates;
 
         #endregion
     }
 
     /// <summary>
-    /// Raw <c>AsyncEvents</c> ETW/EventPipe event template. Exposes the encoded buffer untouched so that
-    /// filters / Events View / TraceLog round-trip work unchanged. Use
-    /// <see cref="AsyncProfilerTraceEventParser.ParseBuffer(byte[], ISubEventSink)"/> to decode <see cref="Buffer"/>.
+    /// Raw <c>AsyncEvents</c> event from ETW or EventPipe.
+    /// Use <see cref="AsyncProfilerTraceEventParser.ParseBuffer(byte[], ISubEventSink)"/>
+    /// to decode <see cref="Buffer"/>.
     /// </summary>
     internal sealed class AsyncProfilerTraceEvent : TraceEvent
     {
-        private static readonly string[] s_payloadNames = new[] { "Length", "Buffer" };
+        internal AsyncProfilerTraceEvent(
+            Action<AsyncProfilerTraceEvent> action, int eventID, int task, string taskName,
+            Guid taskGuid, int opcode, string opcodeName, Guid providerGuid, string providerName)
+            : base(eventID, task, taskName, taskGuid, opcode, opcodeName, providerGuid, providerName)
+        {
+            m_target = action;
+        }
 
-        /// <summary>The length (in bytes) of the encoded buffer (an EventSource int32 length prefix).</summary>
+        /// <summary>The declared buffer length, in bytes, stored at the start of the event payload.</summary>
         public int Length
         {
             get
@@ -423,11 +436,12 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
                 {
                     throw new InvalidDataException("AsyncEvents payload is missing its length prefix.");
                 }
+
                 return GetInt32At(0);
             }
         }
 
-        /// <summary>The encoded async-profiler buffer. Decode with <see cref="AsyncProfilerTraceEventParser.ParseBuffer(byte[], ISubEventSink)"/>.</summary>
+        /// <summary>The encoded async-profiler buffer, excluding the event's length prefix.</summary>
         public byte[] Buffer
         {
             get
@@ -436,44 +450,12 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
                 {
                     throw new InvalidDataException("Invalid or truncated AsyncEvents envelope.");
                 }
+
                 return buffer;
             }
         }
 
-        internal bool TryGetBuffer(out byte[] buffer)
-        {
-            // Validate here instead of asserting during dispatch, so malformed envelopes reach parse-error recovery.
-            buffer = null;
-            if (EventDataLength < sizeof(int))
-            {
-                return false;
-            }
-            int length = GetInt32At(0);
-            if (length < 0 || length > EventDataLength - sizeof(int))
-            {
-                return false;
-            }
-            buffer = EventData(null, 0, sizeof(int), length);
-            return true;
-        }
-
-        #region Private
-        internal AsyncProfilerTraceEvent(Action<AsyncProfilerTraceEvent> action, int eventID, int task, string taskName, Guid taskGuid, int opcode, string opcodeName, Guid providerGuid, string providerName)
-            : base(eventID, task, taskName, taskGuid, opcode, opcodeName, providerGuid, providerName)
-        {
-            m_target = action;
-        }
-
-        protected internal override void Dispatch()
-        {
-            m_target?.Invoke(this);
-        }
-
-        protected internal override Delegate Target
-        {
-            get { return m_target; }
-            set { m_target = (Action<AsyncProfilerTraceEvent>)value; }
-        }
+        public override string[] PayloadNames { get { return s_payloadNames; } }
 
         public override StringBuilder ToXml(StringBuilder sb)
         {
@@ -482,8 +464,6 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
             sb.Append("/>");
             return sb;
         }
-
-        public override string[] PayloadNames { get { return s_payloadNames; } }
 
         public override object PayloadValue(int index)
         {
@@ -499,7 +479,43 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
             }
         }
 
+        #region private
+
+        /// <summary>Copies the encoded buffer if the event payload contains its complete declared length.</summary>
+        internal bool TryGetBuffer(out byte[] buffer)
+        {
+            // Let the caller handle malformed payloads instead of asserting during event dispatch.
+            buffer = null;
+            if (EventDataLength < sizeof(int))
+            {
+                return false;
+            }
+
+            int length = GetInt32At(0);
+            bool hasValidLength = length >= 0 && length <= EventDataLength - sizeof(int);
+            if (!hasValidLength)
+            {
+                return false;
+            }
+
+            buffer = EventData(null, 0, sizeof(int), length);
+            return true;
+        }
+
+        protected internal override void Dispatch()
+        {
+            m_target?.Invoke(this);
+        }
+
+        protected internal override Delegate Target
+        {
+            get { return m_target; }
+            set { m_target = (Action<AsyncProfilerTraceEvent>)value; }
+        }
+
+        private static readonly string[] s_payloadNames = new[] { "Length", "Buffer" };
         private event Action<AsyncProfilerTraceEvent> m_target;
+
         #endregion
     }
 }

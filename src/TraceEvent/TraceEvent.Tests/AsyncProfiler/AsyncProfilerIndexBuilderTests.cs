@@ -584,10 +584,10 @@ namespace TraceEventTests
                 Assert.Same(parent, reusableParent);
                 Assert.Equal(creationQpc, reusableCreationQpc);
 
-                var augmenter = new AsyncProfilerParentContextAugmenter();
+                var parentContextBuilder = new AsyncProfilerParentContextBuilder();
                 for (int pass = 0; pass < 2; pass++)
                 {
-                    Assert.True(augmenter.Prepare(index, new[] { child }));
+                    Assert.True(parentContextBuilder.HasParentContextsToAdd(index, new[] { child }));
                     var frames = new List<AsyncProfilerStitchedFrame>
                     {
                         AsyncProfilerStitchedFrame.CreateAsync(child, 0),
@@ -597,7 +597,7 @@ namespace TraceEventTests
                         new AsyncProfilerCallStackPlacement(child, leafIndex: 0, rootIndexExclusive: 1),
                     };
 
-                    augmenter.Augment(index, new[] { child }, placements, frames, maximumDepth: 1);
+                    parentContextBuilder.AddParentContexts(index, new[] { child }, placements, frames, maximumDepth: 1);
 
                     Assert.Equal(2, frames.Count);
                     Assert.Same(parent, frames[1].Context);

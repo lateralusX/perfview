@@ -33,7 +33,7 @@ namespace TraceEventTests
                 EnableNormalization = enableNormalization,
                 EnableInfrastructureCleanup = enableInfrastructureCleanup,
             };
-            pipeline.Add(context => calls.Add("Custom"));
+            pipeline.AddCustomTransform(context => calls.Add("Custom"));
 
             foreach (StageProfile profile in new[] { first, second })
             {

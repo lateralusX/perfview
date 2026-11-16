@@ -114,6 +114,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             string sourceMethod = stateMachineType.Substring(1, suffixStart - 2);
             logicalName = declaringType + "." + sourceMethod;
             stateMachineSuffix = stateMachineType.Substring(suffixStart);
+
             return true;
         }
 
@@ -149,7 +150,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// </summary>
         public static string FormatLogicalStateMachineMethodName(string logicalName, string stateMachineSuffix, int? state = null)
         {
-            string ordinal = stateMachineSuffix.StartsWith("d__", StringComparison.Ordinal)
+            string ordinal =
+                stateMachineSuffix.StartsWith("d__", StringComparison.Ordinal)
                 ? stateMachineSuffix.Substring(3)
                 : (stateMachineSuffix.StartsWith("d_", StringComparison.Ordinal) ? stateMachineSuffix.Substring(2) : null);
             if (ordinal == null)
@@ -209,6 +211,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     }
                 }
             }
+
             if (bracketDepth != 0)
             {
                 return methodName;
@@ -219,6 +222,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 methodName = methodName.Substring(0, moduleEnd) + methodName.Substring(typeStart);
                 separator -= typeStart - moduleEnd;
             }
+
             return separator >= 0 ? methodName.Substring(0, separator) + "." + methodName.Substring(separator + 2) : methodName;
         }
 
@@ -297,7 +301,6 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// Extracts the simple implementing type after a known namespace prefix.
         /// Unlike the final method separator, the first member separator also handles explicit-interface members.
         /// </summary>
-        /// <param name="typeStart">The position immediately after the namespace prefix.</param>
         public static string GetImplementingTypeName(string frameName, int typeStart)
         {
             int start = typeStart;
@@ -329,6 +332,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     return null;
                 }
             }
+
             return null;
         }
 
@@ -345,8 +349,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             int typeStart = IsModuleQualifiedFrame(frameName, moduleName) ? moduleName.Length + 1 : 0;
-            if (frameName.Length - typeStart <= fullTypeName.Length ||
-                string.CompareOrdinal(frameName, typeStart, fullTypeName, 0, fullTypeName.Length) != 0)
+            if (frameName.Length - typeStart <= fullTypeName.Length || string.CompareOrdinal(frameName, typeStart, fullTypeName, 0, fullTypeName.Length) != 0)
             {
                 return false;
             }
@@ -363,17 +366,16 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
             if (nestedTypeName != null)
             {
-                if (frameName.Length - typeEnd <= nestedTypeName.Length + 1 ||
-                    frameName[typeEnd] != '+' ||
+                if (frameName.Length - typeEnd <= nestedTypeName.Length + 1 || frameName[typeEnd] != '+' ||
                     string.CompareOrdinal(frameName, typeEnd + 1, nestedTypeName, 0, nestedTypeName.Length) != 0)
                 {
                     return false;
                 }
+
                 typeEnd += nestedTypeName.Length + 1;
             }
 
-            return typeEnd < frameName.Length &&
-                frameName[typeEnd] == '.' &&
+            return typeEnd < frameName.Length && frameName[typeEnd] == '.' &&
                 string.CompareOrdinal(frameName, typeEnd + 1, method, 0, method.Length) == 0 &&
                 (typeEnd + 1 + method.Length == frameName.Length || frameName[typeEnd + 1 + method.Length] == '(');
         }
@@ -388,16 +390,14 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
             int start = frameName.IndexOf('!') + 1;
             int typeEnd = start + typeName.Length;
-            if (frameName.Length <= typeEnd ||
-                string.CompareOrdinal(frameName, start, typeName, 0, typeName.Length) != 0)
+            if (frameName.Length <= typeEnd || string.CompareOrdinal(frameName, start, typeName, 0, typeName.Length) != 0)
             {
                 return false;
             }
 
             int end = GetMethodNameEnd(frameName);
             int member = frameName.LastIndexOf('.', end - 1, end);
-            return (frameName[typeEnd] == '+' && member > typeEnd + 1) ||
-                (frameName[typeEnd] == '.' && member == typeEnd);
+            return (frameName[typeEnd] == '+' && member > typeEnd + 1) || (frameName[typeEnd] == '.' && member == typeEnd);
         }
 
         #region private
@@ -496,6 +496,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     return i + 1;
                 }
             }
+
             return -1;
         }
 

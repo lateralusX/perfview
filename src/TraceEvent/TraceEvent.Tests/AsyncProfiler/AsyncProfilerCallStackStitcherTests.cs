@@ -2201,14 +2201,14 @@ namespace TraceEventTests
 
             AsyncProfilerStitchResult structural = s.Run(sync, new[] { inner, outer });
             var frames = structural.Frames.ToList();
-            var augmenter = new AsyncProfilerParentContextAugmenter();
+            var parentContextBuilder = new AsyncProfilerParentContextBuilder();
             var pipeline = new AsyncProfilerCallStackTransformPipeline();
             var transforms = new AsyncCallStackTransforms(pipeline)
             {
                 MaximumParentContextDepth = 3,
             };
 
-            augmenter.Augment(
+            parentContextBuilder.AddParentContexts(
                 index,
                 new[] { inner, outer },
                 structural.SegmentPlacements,
@@ -2267,7 +2267,7 @@ namespace TraceEventTests
 
             var limitedFrames = structural.Frames.ToList();
             transforms.MaximumParentContextDepth = 2;
-            augmenter.Augment(
+            parentContextBuilder.AddParentContexts(
                 index,
                 new[] { inner, outer },
                 structural.SegmentPlacements,
@@ -2289,7 +2289,7 @@ namespace TraceEventTests
 
             var defaultFrames = structural.Frames.ToList();
             var defaultPipeline = new AsyncProfilerCallStackTransformPipeline();
-            augmenter.Augment(
+            parentContextBuilder.AddParentContexts(
                 index,
                 new[] { inner, outer },
                 structural.SegmentPlacements,
@@ -2342,7 +2342,7 @@ namespace TraceEventTests
                 new AsyncProfilerCallStackPlacement(child, leafIndex: 0, rootIndexExclusive: 3),
             };
 
-            new AsyncProfilerParentContextAugmenter().Augment(
+            new AsyncProfilerParentContextBuilder().AddParentContexts(
                 index,
                 new[] { child },
                 placements,
@@ -2394,12 +2394,12 @@ namespace TraceEventTests
                 new AsyncProfilerCallStackPlacement(child, leafIndex: 0, rootIndexExclusive: 2),
             };
 
-            new AsyncProfilerParentContextAugmenter().Augment(
+            new AsyncProfilerParentContextBuilder().AddParentContexts(
                 index,
                 new[] { child },
                 placements,
                 frames,
-                AsyncProfilerParentContextAugmenter.DefaultMaximumDepth);
+                AsyncProfilerParentContextBuilder.DefaultMaximumDepth);
 
             AsyncProfilerStitchedFrame[] historical = frames
                 .Where(frame =>
@@ -2438,12 +2438,12 @@ namespace TraceEventTests
                 new AsyncProfilerCallStackPlacement(child, leafIndex: 0, rootIndexExclusive: 2),
             };
 
-            new AsyncProfilerParentContextAugmenter().Augment(
+            new AsyncProfilerParentContextBuilder().AddParentContexts(
                 index,
                 new[] { child },
                 placements,
                 frames,
-                AsyncProfilerParentContextAugmenter.DefaultMaximumDepth);
+                AsyncProfilerParentContextBuilder.DefaultMaximumDepth);
 
             Assert.Equal(
                 2,
@@ -2482,12 +2482,12 @@ namespace TraceEventTests
                 new AsyncProfilerCallStackPlacement(child, leafIndex: 0, rootIndexExclusive: 2),
             };
 
-            new AsyncProfilerParentContextAugmenter().Augment(
+            new AsyncProfilerParentContextBuilder().AddParentContexts(
                 index,
                 new[] { child },
                 placements,
                 frames,
-                AsyncProfilerParentContextAugmenter.DefaultMaximumDepth);
+                AsyncProfilerParentContextBuilder.DefaultMaximumDepth);
 
             Assert.Equal(
                 2,
@@ -2523,10 +2523,10 @@ namespace TraceEventTests
             {
                 new AsyncProfilerCallStackPlacement(a, leafIndex: 0, rootIndexExclusive: 1),
             };
-            var augmenter = new AsyncProfilerParentContextAugmenter();
+            var parentContextBuilder = new AsyncProfilerParentContextBuilder();
 
-            Assert.True(augmenter.Prepare(index, new[] { a }));
-            augmenter.Augment(
+            Assert.True(parentContextBuilder.HasParentContextsToAdd(index, new[] { a }));
+            parentContextBuilder.AddParentContexts(
                 index,
                 new[] { a },
                 placements,
@@ -2565,7 +2565,7 @@ namespace TraceEventTests
             index.AddDispatcherInfo(
                 parentThread, dispatcherId: 2, parentDispatcherId: 10, creationQpc: 150);
 
-            var augmenter = new AsyncProfilerParentContextAugmenter();
+            var parentContextBuilder = new AsyncProfilerParentContextBuilder();
             AssertSharedParent(firstChild);
             AssertSharedParent(secondChild);
 
@@ -2580,13 +2580,13 @@ namespace TraceEventTests
                     new AsyncProfilerCallStackPlacement(child, leafIndex: 0, rootIndexExclusive: 1),
                 };
 
-                Assert.True(augmenter.Prepare(index, new[] { child }));
-                augmenter.Augment(
+                Assert.True(parentContextBuilder.HasParentContextsToAdd(index, new[] { child }));
+                parentContextBuilder.AddParentContexts(
                     index,
                     new[] { child },
                     placements,
                     frames,
-                    AsyncProfilerParentContextAugmenter.DefaultMaximumDepth);
+                    AsyncProfilerParentContextBuilder.DefaultMaximumDepth);
 
                 AsyncProfilerStitchedFrame[] parents = frames
                     .Where(frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncContextParent)
@@ -2693,12 +2693,12 @@ namespace TraceEventTests
             AsyncProfilerStitchResult structural = s.Run(sync, new[] { child });
             var frames = structural.Frames.ToList();
 
-            new AsyncProfilerParentContextAugmenter().Augment(
+            new AsyncProfilerParentContextBuilder().AddParentContexts(
                 index,
                 new[] { child },
                 structural.SegmentPlacements,
                 frames,
-                AsyncProfilerParentContextAugmenter.DefaultMaximumDepth);
+                AsyncProfilerParentContextBuilder.DefaultMaximumDepth);
 
             Assert.Equal(
                 new[] { Scenario.CA(100), Scenario.CA(101), Scenario.CA(102) },
@@ -2772,16 +2772,16 @@ namespace TraceEventTests
                 s.Sync(52, 999),
             };
             AsyncProfilerStitchResult structural = s.Run(sync, new[] { child });
-            var augmenter = new AsyncProfilerParentContextAugmenter();
+            var parentContextBuilder = new AsyncProfilerParentContextBuilder();
             int completed = Math.Min(states.Length, methodCompleted + exceptionCompleted);
 
             for (int pass = 0; pass < 2; pass++)
             {
-                Assert.True(augmenter.Prepare(index, new[] { child }));
+                Assert.True(parentContextBuilder.HasParentContextsToAdd(index, new[] { child }));
                 var frames = structural.Frames.ToList();
-                augmenter.Augment(
+                parentContextBuilder.AddParentContexts(
                     index, new[] { child }, structural.SegmentPlacements, frames,
-                    AsyncProfilerParentContextAugmenter.DefaultMaximumDepth);
+                    AsyncProfilerParentContextBuilder.DefaultMaximumDepth);
                 AsyncProfilerStitchedFrame[] parents = frames.Where(frame =>
                     frame.ContextKind == AsyncProfilerStitchedFrameContextKind.ParentContext).ToArray();
 
@@ -2854,7 +2854,7 @@ namespace TraceEventTests
                 new[] { child });
             var frames = structural.Frames.ToList();
 
-            new AsyncProfilerParentContextAugmenter().Augment(
+            new AsyncProfilerParentContextBuilder().AddParentContexts(
                 index, new[] { child }, structural.SegmentPlacements, frames, maximumDepth: 2);
 
             AsyncProfilerStitchedFrame[] parents = frames.Where(frame =>
@@ -2908,12 +2908,12 @@ namespace TraceEventTests
                 new AsyncProfilerCallStackPlacement(child, leafIndex: 0, rootIndexExclusive: 1),
             };
 
-            new AsyncProfilerParentContextAugmenter().Augment(
+            new AsyncProfilerParentContextBuilder().AddParentContexts(
                 index,
                 new[] { child },
                 placements,
                 frames,
-                AsyncProfilerParentContextAugmenter.DefaultMaximumDepth);
+                AsyncProfilerParentContextBuilder.DefaultMaximumDepth);
 
             AsyncProfilerStitchedFrame[] parentContextFrames =
                 frames.Where(frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncContextParent).ToArray();

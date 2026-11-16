@@ -95,7 +95,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 throw new ArgumentNullException(nameof(transform));
             }
             var context = new AsyncProfilerCallStackTransformContext(transform);
-            m_pipeline.Add(context.Invoke, requiresCompletionObservations: true);
+            m_pipeline.AddCustomTransform(context.Invoke, requiresCompletionObservations: true);
         }
 
         /// <summary>Removes custom callbacks without changing built-in settings.</summary>
