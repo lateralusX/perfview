@@ -128,7 +128,6 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         public StackSourceCallStackIndex GetCallStack(TraceEvent data, StackSourceCallStackIndex root = StackSourceCallStackIndex.Invalid)
         {
             AsyncProfilerCallStackComputer.ValidateEvent(data, m_log, nameof(data));
-            // Delegate even without a stack so argument and state checks still run.
             data.TryGetCallStackIndex(out CallStackIndex stack, out long timestampQpc);
             return GetCallStack(stack, timestampQpc, root);
         }

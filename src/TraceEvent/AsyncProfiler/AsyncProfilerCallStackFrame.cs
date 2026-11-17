@@ -84,6 +84,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             {
                 throw new ArgumentException("A default frame has no identity or display label.");
             }
+
             return m_frame;
         }
 

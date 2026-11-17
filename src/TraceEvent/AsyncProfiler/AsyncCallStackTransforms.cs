@@ -94,6 +94,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             {
                 throw new ArgumentNullException(nameof(transform));
             }
+
             var context = new AsyncProfilerCallStackTransformContext(transform);
             m_pipeline.AddCustomTransform(context.Invoke, requiresCompletionObservations: true);
         }

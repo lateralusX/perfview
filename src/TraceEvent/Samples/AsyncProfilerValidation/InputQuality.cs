@@ -163,7 +163,7 @@ namespace AsyncProfilerValidation
                 RuntimeModules = log.Processes.Where(process => pid == 0 || process.ProcessID == pid)
                     .SelectMany(process => process.LoadedModules)
                     .Select(loaded => loaded.ModuleFile)
-                    .Where(AsyncProfilerRuntimeRuleProfileCache.IsHostModule)
+                    .Where(AsyncProfilerRuntimeResolver.IsHostModule)
                     .Select(module => new
                     {
                         ModuleFileIndex = (int)module.ModuleFileIndex, module.FilePath,
@@ -201,7 +201,7 @@ namespace AsyncProfilerValidation
                 foreach (TraceLoadedModule loaded in process.LoadedModules)
                 {
                     TraceModuleFile module = loaded.ModuleFile;
-                    if (AsyncProfilerRuntimeRuleProfileCache.IsHostModule(module) && seen.Add(module.ModuleFileIndex))
+                    if (AsyncProfilerRuntimeResolver.IsHostModule(module) && seen.Add(module.ModuleFileIndex))
                     {
                         // Normal ETW collection uses native PDBs for precompiled CoreLib methods, not NGen rundown.
                         log.CodeAddresses.LookupSymbolsForModule(symbols, module);

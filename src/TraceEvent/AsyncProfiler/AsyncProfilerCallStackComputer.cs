@@ -65,6 +65,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             {
                 throw new ArgumentNullException(parameterName);
             }
+
             if (!ReferenceEquals(data.Log(), log))
             {
                 throw new ArgumentException("The event must belong to the owning TraceLog.", parameterName);

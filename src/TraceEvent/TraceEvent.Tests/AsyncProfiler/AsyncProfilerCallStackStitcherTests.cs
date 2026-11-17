@@ -11,7 +11,7 @@ using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
 
 using Xunit;
 
-using static Microsoft.Diagnostics.Tracing.Computers.AsyncProfilerRuntimeRuleProfile;
+using static Microsoft.Diagnostics.Tracing.Computers.AsyncProfilerRuntimeSupport;
 
 namespace TraceEventTests
 {
@@ -28,12 +28,12 @@ namespace TraceEventTests
         [InlineData((int)AsyncCallstackKind.RuntimeAsync, true, false)]
         [InlineData((int)AsyncCallstackKind.StateMachineAsync, false, true)]
         [InlineData((int)AsyncCallstackKind.RuntimeAsync, false, true)]
-        public void ProfiledStructuralInfrastructure_RecognizesInsertedHelpersButPreservesForeignSpansAndBoundaries(
-            int kindValue, bool foreignProfile, bool crossesBoundary)
+        public void SupportedStructuralInfrastructure_RecognizesInsertedHelpersButPreservesForeignSpansAndBoundaries(
+            int kindValue, bool foreignSupport, bool crossesBoundary)
         {
             var kind = (AsyncCallstackKind)kindValue;
             var s = new Scenario();
-            var profile = new StructuralRulesProfile(2);
+            var support = new StructuralRulesSupport(2);
             AsyncProfilerCallStack segment = s.Segment(kind, new[] { 800, 801 }, new[] { 10, 11 });
             var sync = new[]
             {
@@ -46,16 +46,16 @@ namespace TraceEventTests
             };
             AsyncProfilerStitchResult common = s.Run(sync, new[] { segment });
             Assert.Contains(common.Frames, frame => frame.CodeAddress == Scenario.CA(52));
-            AsyncProfilerStitchResult changed = s.Run(sync, new[] { segment }, profile,
-                ca => foreignProfile && ca == Scenario.CA(52) ? AsyncProfilerRuntimeRuleProfile.Common : profile);
-            Assert.Equal(foreignProfile || crossesBoundary,
+            AsyncProfilerStitchResult changed = s.Run(sync, new[] { segment }, support,
+                ca => foreignSupport && ca == Scenario.CA(52) ? AsyncProfilerRuntimeSupport.Common : support);
+            Assert.Equal(foreignSupport || crossesBoundary,
                 changed.Frames.Any(frame => frame.CodeAddress == Scenario.CA(52)));
             Assert.Contains(changed.Frames, frame => frame.CodeAddress == Scenario.CA(54));
             Assert.Contains(changed.Frames, frame => frame.CodeAddress == Scenario.CA(801));
         }
 
         [Fact]
-        public void ProfiledStructuralInfrastructure_InvalidBoundsThrow()
+        public void SupportedStructuralInfrastructure_InvalidBoundsThrow()
         {
             var s = new Scenario();
             AsyncProfilerCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync, new[] { 800 }, new[] { 10 });
@@ -65,7 +65,7 @@ namespace TraceEventTests
                 s.Sync(52, 90, AsyncProfilerStitchSyncFrameKind.V1MethodHelper),
             };
             Assert.Throws<InvalidOperationException>(() =>
-                s.Run(sync, new[] { segment }, new StructuralRulesProfile(10)));
+                s.Run(sync, new[] { segment }, new StructuralRulesSupport(10)));
         }
 
         [Theory]
@@ -73,19 +73,20 @@ namespace TraceEventTests
         [InlineData(true, false)]
         [InlineData(false, true)]
         [InlineData(true, true)]
-        public void ProfiledCarrierEvidence_CannotOverridePhysicalBodyPrecedence(bool allowCarrier, bool physicalBody)
+        public void V1BoxCarrier_RejectsCallbacksAndPreservesPhysicalBodyPrecedence(bool isCallback, bool physicalBody)
         {
             var s = new Scenario();
             AsyncProfilerCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { 800, 801 }, new[] { 10, 11 });
             var sync = new[]
             {
-                s.Sync(50, physicalBody ? 10 : 90), s.BoxCarrier(51, 10),
+                s.Sync(50, physicalBody ? 10 : 90),
+                s.BoxCarrier(51, 10,
+                    isCallback ? AsyncProfilerStitchSyncFrameKind.V1BoxCallback : AsyncProfilerStitchSyncFrameKind.None),
                 s.Boundary(52, s_v1Dispatcher), s.Sync(53, 99),
             };
-            AsyncProfilerStitchResult result = s.Run(sync, new[] { segment },
-                new StructuralRulesProfile(0, allowCarrier: allowCarrier));
-            Assert.Equal(allowCarrier && !physicalBody, result.Frames.Any(frame => frame.IsStateMachineBoxCarrier));
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { segment });
+            Assert.Equal(!isCallback && !physicalBody, result.Frames.Any(frame => frame.IsStateMachineBoxCarrier));
             Assert.Contains(result.Frames, frame => frame.CodeAddress == Scenario.CA(50));
         }
 
@@ -1077,8 +1078,8 @@ namespace TraceEventTests
             {
                 s.Sync(40, 70), // CPU work
                 s.Sync(41, 71, AsyncProfilerStitchSyncFrameKind.V1StateMachineBody),
-                s.Sync(42, 72, HelperKind.V1Startup),
-                s.Sync(43, 73, HelperKind.V1Startup),
+                s.Sync(42, 72, RuntimeFrameKind.V1Startup),
+                s.Sync(43, 73, RuntimeFrameKind.V1Startup),
                 s.Sync(44, 30), // child kickoff/current async method
                 s.Boundary(45, s_v1Dispatcher),
                 s.Sync(46, 99),
@@ -1628,16 +1629,16 @@ namespace TraceEventTests
         public void V1_SurvivingDispatcher_PreservesUnverifiedCallerTail(string obstruction)
         {
             var s = new Scenario();
-            var profile = new StructuralRulesProfile(0);
+            var support = new StructuralRulesSupport(0);
             AsyncProfilerCallStack segment = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { 500, 501 }, new[] { 30, 31 });
             AsyncProfilerStitchSyncFrame tail = obstruction == "unknown" ? s.Sync(43, 90) :
                 s.Boundary(43, obstruction == "foreign-boundary" ? Wrapper(0) : s_v1Infrastructure);
             var sync = new[] { s.Sync(40, 30), s.Boundary(42, s_v1Dispatcher), tail };
 
-            AsyncProfilerStitchResult result = s.Run(sync, new[] { segment }, profile,
+            AsyncProfilerStitchResult result = s.Run(sync, new[] { segment }, support,
                 ca => obstruction == "foreign-profile" && ca == Scenario.CA(43)
-                    ? AsyncProfilerRuntimeRuleProfile.Common : profile);
+                    ? AsyncProfilerRuntimeSupport.Common : support);
 
             Assert.Equal(Scenario.CA(43), result.Frames.Last().CodeAddress);
             Assert.DoesNotContain(result.Frames, frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.IncompletePhysicalRoot);
@@ -3095,8 +3096,8 @@ namespace TraceEventTests
             Assert.Equal(1, result.Diagnostics.V1InlineFallbackUsed);
             Assert.Equal(0, result.Diagnostics.BoundariesNotFound);
 
-            AsyncProfilerStitchResult withoutCompletionProof = s.Run(sync, new[] { inner, outer },
-                new StructuralRulesProfile(0, allowCompletion: false));
+            sync[5] = s.Sync(55, 91);
+            AsyncProfilerStitchResult withoutCompletionProof = s.Run(sync, new[] { inner, outer });
             Assert.Contains(withoutCompletionProof.Frames, frame =>
                 frame.CodeAddress == Scenario.CA(56) && frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent);
         }
@@ -4098,8 +4099,9 @@ namespace TraceEventTests
             public AsyncProfilerStitchSyncFrame Sync(int codeAddr, int method, FrameClassification kind) =>
                 new AsyncProfilerStitchSyncFrame(CA(codeAddr), MI(method), kind);
 
-            public AsyncProfilerStitchSyncFrame BoxCarrier(int codeAddr, int boxedMethod) =>
-                new AsyncProfilerStitchSyncFrame(CA(codeAddr), MI(codeAddr), AsyncProfilerStitchSyncFrameKind.None, MI(boxedMethod));
+            public AsyncProfilerStitchSyncFrame BoxCarrier(int codeAddr, int boxedMethod,
+                AsyncProfilerStitchSyncFrameKind kind = AsyncProfilerStitchSyncFrameKind.None) =>
+                new AsyncProfilerStitchSyncFrame(CA(codeAddr), MI(codeAddr), kind, MI(boxedMethod));
 
             public AsyncProfilerStitchSyncFrame Boundary(int codeAddr, AsyncProfilerCallStackStitchBoundaryInfo info)
             {
@@ -4163,14 +4165,14 @@ namespace TraceEventTests
             }
 
             public AsyncProfilerStitchResult Run(IReadOnlyList<AsyncProfilerStitchSyncFrame> sync, IReadOnlyList<AsyncProfilerCallStack> segments,
-                AsyncProfilerRuntimeRuleProfile profile, Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile> runtimeProfileResolver = null)
+                AsyncProfilerRuntimeSupport support, Func<CodeAddressIndex, AsyncProfilerRuntimeSupport> runtimeSupportResolver = null)
             {
                 var output = new List<AsyncProfilerStitchedFrame>();
                 var diagnostics = new AsyncProfilerCallStackDiagnostics();
                 var stitchingState = new AsyncProfilerCallStackStitchingState();
                 AsyncProfilerCallStackStitcher.StitchInto(sync, segments, Qpc, Classify,
                     (process, kind, qpc) => MethodCompletionObserved(kind), ProcessIndex.Invalid, MethodOf,
-                    false, output, diagnostics, stitchingState, null, runtimeProfileResolver ?? (_ => profile), profile);
+                    false, output, diagnostics, stitchingState, null, runtimeSupportResolver ?? (_ => support), support);
                 return new AsyncProfilerStitchResult(output, diagnostics, stitchingState);
             }
 
@@ -4184,14 +4186,12 @@ namespace TraceEventTests
             #endregion
         }
 
-        private sealed class StructuralRulesProfile : AsyncProfilerRuntimeRuleProfile
+        private sealed class StructuralRulesSupport : AsyncProfilerRuntimeSupport
         {
-            public StructuralRulesProfile(int infrastructureLength, bool allowCarrier = true, bool allowCompletion = true)
+            public StructuralRulesSupport(int infrastructureLength)
                 : base("Test-only structural rules")
             {
                 m_infrastructureLength = infrastructureLength;
-                m_allowCarrier = allowCarrier;
-                m_allowCompletion = allowCompletion;
             }
 
             public override AsyncProfilerRuntimeSequenceMatch MatchDispatchInfrastructure(
@@ -4202,18 +4202,9 @@ namespace TraceEventTests
                     ? AsyncProfilerRuntimeSequenceMatch.Match(m_infrastructureLength)
                     : base.MatchDispatchInfrastructure(kind, frames, start, end, classify);
 
-            public override bool IsV1BoxCarrierCandidate(
-                IReadOnlyList<AsyncProfilerStitchSyncFrame> frames, int start, int end, int index) =>
-                m_allowCarrier && base.IsV1BoxCarrierCandidate(frames, start, end, index);
-
-            public override bool HasV1CompletionEvidence(IReadOnlyList<AsyncProfilerStitchSyncFrame> frames, int start, int end) =>
-                m_allowCompletion && base.HasV1CompletionEvidence(frames, start, end);
-
             #region private
 
             private readonly int m_infrastructureLength;
-            private readonly bool m_allowCarrier;
-            private readonly bool m_allowCompletion;
 
             #endregion
         }

@@ -121,7 +121,7 @@ The following paths are relative to `src\TraceEvent`:
 | Public segment queries and standalone reconstruction | `AsyncProfiler\AsyncProfilerCallStackComputer.cs`, `AsyncProfiler\AsyncProfilerCallStackSourceBuilder.cs` | `AsyncProfilerTraceLogTests.cs`, `AsyncProfilerStitchIntegrationTests.cs` |
 | Structural matching, boundaries, missing roots | `AsyncProfiler\AsyncProfilerCallStackStitcher.cs`, `AsyncProfiler\AsyncProfilerCallStackStitchBoundary.cs` | `AsyncProfilerCallStackStitcherTests.cs`, `AsyncProfilerCallStackStitchBoundaryTests.cs` |
 | Shared symbol and generated-name parsing | `AsyncProfiler\AsyncProfilerMethodNames.cs` | `AsyncProfilerMethodNamesTests.cs` |
-| Runtime ownership and sequence recognition | `AsyncProfiler\AsyncProfilerRuntimeRuleProfile*.cs`, `AsyncProfiler\AsyncProfilerRuntimeSequenceMatch.cs` | `AsyncProfilerRuntimeRuleProfileTests.cs`, `AsyncProfilerRuntimeSequenceTests.cs`, `AsyncProfilerRuntimeProfileExtensibilityTests.cs` |
+| Runtime ownership and sequence recognition | `AsyncProfiler\AsyncProfilerRuntime*.cs` | `AsyncProfilerRuntimeSupportTests.cs`, `AsyncProfilerRuntimeSequenceTests.cs`, `AsyncProfilerRuntimeSupportExtensibilityTests.cs` |
 | Presentation and provenance emission | `AsyncProfiler\AsyncCallStackTransforms.cs`, `AsyncProfiler\AsyncProfilerCallStackTransformPipeline.cs`, `AsyncProfiler\AsyncProfilerCallStackTransformPasses.cs`, `AsyncProfiler\AsyncProfilerCallStackSourceBuilderCore.cs`, `TraceEventStacks.cs` | `AsyncProfilerCallStackTransformPipelineTests.cs`, `AsyncProfilerStitchIntegrationTests.cs` |
 | End-to-end sample projection | `Computers\SampleProfilerThreadTimeComputer.cs`, `Computers\ThreadTimeComputer.cs` | `AsyncProfilerStitchIntegrationTests.cs` |
 | Speedscope output | `Stacks\SpeedScopeStackSourceWriter.cs`, `Stacks\StackSourceWriterHelper.cs` | `AsyncCallStackExporterTests.cs`, `TraceEvent.Tests\Speedscope\SpeedScopeExporterTests.cs` |
@@ -1310,7 +1310,7 @@ not loss-free coverage or only events before that query.
 
 The detailed diagnostics below also use **internal development APIs**.
 Use the signed validation helper or repository tests for internal index,
-classifier, runtime-profile, and emitted-provenance access.
+classifier, runtime-support, and emitted-provenance access.
 
 For each returned activation, dump:
 
@@ -1356,7 +1356,7 @@ in contrast, are stable and may be retained across later queries.
 At the emitted stack-source layer,
 `source.TryGetAsyncProfilerCallStackFrameInfo(frameIndex, out info)` exposes captured identity and
 role flags. Speedscope names do not preserve all that provenance. Do not use
-internal parser/index queries, frame-provenance hooks, or runtime-profile
+internal parser/index queries, frame-provenance hooks, or runtime-support
 members as if they were public APIs in an external helper. Public presentation
 callbacks use `AsyncCallStackTransforms.Add` and the narrow
 `AsyncProfilerCallStackTransformContext`, without internal diagnostics or

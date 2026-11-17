@@ -456,7 +456,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// </summary>
         internal bool IsLatestCallStack(AsyncProfilerCallStack callStack, long timestampQpc)
         {
-            return _threads.TryGetValue(callStack.Thread, out ThreadCallStacks callStacks) && callStacks.QueryIndex().IsLatestCallStack(callStack, timestampQpc);
+            if (!_threads.TryGetValue(callStack.Thread, out ThreadCallStacks callStacks))
+            {
+                return false;
+            }
+
+            return callStacks.QueryIndex().IsLatestCallStack(callStack, timestampQpc);
         }
 
         /// <summary>
@@ -548,9 +553,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
             var index = (AsyncProfilerCallStackFramesIndex)_internedCallStackFrames.Count;
             var frames = new AsyncProfilerCallStackFrames(kind, instructionPointers, frameStates, processIndex);
+
             _internedCallStackFrames.Add(frames);
             _frameKeyToIndex[key] = index;
             OnFrameInterned?.Invoke(frames);
+
             return index;
         }
 
@@ -649,6 +656,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     hi = mid;
                 }
             }
+
             if (lo == 0)
             {
                 return -1;
@@ -740,6 +748,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 var thread = new AsyncProfilerThreadKey(processIndex, osThreadId);
                 var callStacks = new ThreadCallStacks(thread, count);
                 _threads[thread] = callStacks;
+
                 for (int i = 0; i < count; i++)
                 {
                     callStacks.ReadAndAdd(deserializer);
@@ -752,10 +761,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 ProcessIndex processIndex = (ProcessIndex)deserializer.ReadInt();
                 int epochCount = deserializer.ReadInt();
                 var epochs = new List<CompletionAvailabilityEpoch>(epochCount);
+
                 for (int e = 0; e < epochCount; e++)
                 {
                     epochs.Add(new CompletionAvailabilityEpoch(deserializer.ReadInt64(), deserializer.ReadByte()));
                 }
+
                 _completionAvailability[processIndex] = epochs;
             }
 
@@ -1084,6 +1095,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     methodCompletions,
                     exceptionCompletions,
                     wrapperResets);
+
                 return reusable;
             }
 
@@ -1181,6 +1193,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
                 int index = _timelines.Count;
                 _timelines.Add(new CallStackTimelines(methodCompletions, exceptionCompletions, wrapperResets));
+
                 return index;
             }
 
@@ -1382,6 +1395,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                         hi = mid;
                     }
                 }
+
                 if (lo == 0)
                 {
                     return false;
@@ -1389,13 +1403,27 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
                 // A later call stack can leave its dispatcher on the physical stack even after it ends.
                 CallStackRecord latest = _records[_byStart[lo - 1]];
-                return latest.StartQpc == callStack.StartQpc &&
-                    latest.EndQpc == callStack.EndQpc &&
-                    latest.EndQpc > timestampQpc &&
-                    latest.DispatcherId == callStack.DispatcherId &&
-                    latest.Depth == callStack.Depth &&
-                    latest.FramesIndex == callStack.FramesIndex &&
-                    (lo < 2 || _records[_byStart[lo - 2]].StartQpc != latest.StartQpc);
+                if (latest.StartQpc != callStack.StartQpc || latest.EndQpc != callStack.EndQpc)
+                {
+                    return false;
+                }
+
+                if (latest.EndQpc <= timestampQpc)
+                {
+                    return false;
+                }
+
+                if (latest.DispatcherId != callStack.DispatcherId || latest.Depth != callStack.Depth || latest.FramesIndex != callStack.FramesIndex)
+                {
+                    return false;
+                }
+
+                if (lo >= 2 && _records[_byStart[lo - 2]].StartQpc == latest.StartQpc)
+                {
+                    return false;
+                }
+
+                return true;
             }
 
             #region private

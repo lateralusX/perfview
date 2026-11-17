@@ -37,7 +37,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         V1Dispatcher,
 
         /// <summary>
-        /// Profile-recognized V1 box or dispatcher helpers. A verified contiguous span can be grouped with
+        /// Runtime-recognized V1 box or dispatcher helpers. A verified contiguous span can be grouped with
         /// a consumed dispatcher; these frames are not splice boundaries.
         /// </summary>
         V1DispatcherInfrastructure,
@@ -75,7 +75,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
     /// <summary>
     /// Recognizes profiler dispatcher contracts and continuation-wrapper slots.
-    /// Runtime-specific helper recognition belongs to <see cref="AsyncProfilerRuntimeRuleProfile"/>.
+    /// Runtime-specific helper recognition belongs to <see cref="AsyncProfilerRuntimeSupport"/>.
     /// The cache below verifies CoreLib ownership before classifying captured methods.
     /// </summary>
     internal static class AsyncProfilerCallStackStitchBoundary
@@ -170,13 +170,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// </summary>
     internal sealed class AsyncProfilerCallStackStitchBoundaryCache
     {
-        internal AsyncProfilerCallStackStitchBoundaryCache(TraceCodeAddresses codeAddresses, AsyncProfilerRuntimeRuleProfileCache runtimeProfiles)
+        internal AsyncProfilerCallStackStitchBoundaryCache(TraceCodeAddresses codeAddresses, AsyncProfilerRuntimeResolver runtimeResolver)
         {
             m_codeAddresses = codeAddresses ?? throw new ArgumentNullException(nameof(codeAddresses));
-            m_runtimeProfiles = runtimeProfiles ?? throw new ArgumentNullException(nameof(runtimeProfiles));
+            m_runtimeResolver = runtimeResolver ?? throw new ArgumentNullException(nameof(runtimeResolver));
         }
 
-        internal AsyncProfilerRuntimeRuleProfileCache RuntimeProfiles => m_runtimeProfiles;
+        internal AsyncProfilerRuntimeResolver RuntimeResolver => m_runtimeResolver;
 
         internal TraceLog TraceLog => m_codeAddresses.ModuleFiles.Log;
 
@@ -201,8 +201,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         #region private
 
-        internal AsyncProfilerRuntimeRuleProfile GetRuntimeProfile(CodeAddressIndex codeAddress) =>
-            codeAddress == CodeAddressIndex.Invalid ? AsyncProfilerRuntimeRuleProfile.Common : m_runtimeProfiles.GetProfile(m_codeAddresses.ModuleFileIndex(codeAddress));
+        internal AsyncProfilerRuntimeSupport GetRuntimeSupport(CodeAddressIndex codeAddress) =>
+            codeAddress == CodeAddressIndex.Invalid ? AsyncProfilerRuntimeSupport.Common : m_runtimeResolver.ResolveModuleSupport(m_codeAddresses.ModuleFileIndex(codeAddress));
 
         /// <summary>
         /// Builds classifications once, checking CoreLib ownership before reading method names.
@@ -214,7 +214,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 return;
             }
 
-            Dictionary<ModuleFileIndex, AsyncProfilerRuntimeRuleProfile> hostModules = GetHostModules();
+            Dictionary<ModuleFileIndex, AsyncProfilerRuntimeSupport> hostModules = GetHostModules();
             if (hostModules.Count != 0)
             {
                 TraceMethods methods = m_codeAddresses.Methods;
@@ -223,13 +223,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 {
                     var methodIndex = (MethodIndex)i;
                     ModuleFileIndex moduleIndex = methods.MethodModuleFileIndex(methodIndex);
-                    if (!hostModules.TryGetValue(moduleIndex, out AsyncProfilerRuntimeRuleProfile profile))
+                    if (!hostModules.TryGetValue(moduleIndex, out AsyncProfilerRuntimeSupport support))
                     {
                         continue;
                     }
 
                     string name = AsyncProfilerMethodNames.NormalizeMethodName(methods.FullMethodName(methodIndex));
-                    AsyncProfilerCallStackStitchBoundaryInfo info = profile.ClassifyBoundary(name);
+                    AsyncProfilerCallStackStitchBoundaryInfo info = support.ClassifyBoundary(name);
                     if (info.Kind != AsyncProfilerCallStackStitchBoundaryKind.None)
                     {
                         m_boundaries[methodIndex] = info;
@@ -240,16 +240,16 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             m_built = true;
         }
 
-        /// <summary>Gets the profile for each captured CoreLib module, including linked native images.</summary>
-        private Dictionary<ModuleFileIndex, AsyncProfilerRuntimeRuleProfile> GetHostModules()
+        /// <summary>Gets the support for each captured CoreLib module, including linked native images.</summary>
+        private Dictionary<ModuleFileIndex, AsyncProfilerRuntimeSupport> GetHostModules()
         {
-            var result = new Dictionary<ModuleFileIndex, AsyncProfilerRuntimeRuleProfile>();
+            var result = new Dictionary<ModuleFileIndex, AsyncProfilerRuntimeSupport>();
             TraceModuleFiles moduleFiles = m_codeAddresses.ModuleFiles;
             foreach (TraceModuleFile moduleFile in moduleFiles)
             {
-                if (m_runtimeProfiles.IsHostModule(moduleFile.ModuleFileIndex))
+                if (m_runtimeResolver.IsHostModule(moduleFile.ModuleFileIndex))
                 {
-                    result.Add(moduleFile.ModuleFileIndex, m_runtimeProfiles.GetProfile(moduleFile.ModuleFileIndex));
+                    result.Add(moduleFile.ModuleFileIndex, m_runtimeResolver.ResolveModuleSupport(moduleFile.ModuleFileIndex));
                 }
             }
 
@@ -259,7 +259,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         // Only recognized boundaries and helpers are stored; an absent MethodIndex means None.
         private readonly Dictionary<MethodIndex, AsyncProfilerCallStackStitchBoundaryInfo> m_boundaries = new Dictionary<MethodIndex, AsyncProfilerCallStackStitchBoundaryInfo>();
         private readonly TraceCodeAddresses m_codeAddresses;
-        private readonly AsyncProfilerRuntimeRuleProfileCache m_runtimeProfiles;
+        private readonly AsyncProfilerRuntimeResolver m_runtimeResolver;
         private bool m_built;
 
         #endregion

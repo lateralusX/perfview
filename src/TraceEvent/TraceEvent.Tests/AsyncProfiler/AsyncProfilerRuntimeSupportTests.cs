@@ -7,12 +7,12 @@ using Microsoft.Diagnostics.Tracing.Parsers.Clr;
 
 using Xunit;
 
-using static Microsoft.Diagnostics.Tracing.Computers.AsyncProfilerRuntimeRuleProfile;
+using static Microsoft.Diagnostics.Tracing.Computers.AsyncProfilerRuntimeSupport;
 
 namespace TraceEventTests
 {
-    /// <summary>Checks captured-runtime selection and ownership-sensitive frame classification.</summary>
-    public class AsyncProfilerRuntimeRuleProfileTests
+    /// <summary>Checks runtime-support selection and ownership-sensitive frame classification.</summary>
+    public class AsyncProfilerRuntimeSupportTests
     {
         [Theory]
         [InlineData("11.0.26.12345", "11.0.0", RuntimeSku.CoreClr, true)]
@@ -23,84 +23,88 @@ namespace TraceEventTests
         [InlineData(" 11.0.0 ", " 11.0.0+abcdef ", RuntimeSku.CoreClr, true)]
         [InlineData("invalid", "11.0.0", RuntimeSku.CoreClr, true)]
         [InlineData("11.0.0", "invalid", RuntimeSku.CoreClr, true)]
+        [InlineData("12.0.26.12345", "12.0.0-preview.1", RuntimeSku.CoreClr, true)]
+        [InlineData("13.2.0.0", null, RuntimeSku.CoreClr, true)]
+        [InlineData(null, "111.0.0", RuntimeSku.CoreClr, true)]
+        [InlineData(null, "12.0.0-preview.1", RuntimeSku.CoreClr, true)]
+        [InlineData(null, "11.1.0", RuntimeSku.CoreClr, true)]
         [InlineData(null, null, RuntimeSku.CoreClr, false)]
         [InlineData("", "", RuntimeSku.CoreClr, false)]
         [InlineData("invalid", "not-a-version", RuntimeSku.CoreClr, false)]
         [InlineData("11", null, RuntimeSku.CoreClr, false)]
         [InlineData(null, "11.0garbage", RuntimeSku.CoreClr, false)]
-        [InlineData(null, "111.0.0", RuntimeSku.CoreClr, false)]
-        [InlineData(null, "12.0.0-preview.1", RuntimeSku.CoreClr, false)]
-        [InlineData(null, "11.1.0", RuntimeSku.CoreClr, false)]
         [InlineData(null, "10.0.0", RuntimeSku.CoreClr, false)]
         [InlineData(null, "8.0.0", RuntimeSku.CoreClr, false)]
         [InlineData("12.0.0.0", "11.0.0", RuntimeSku.CoreClr, false)]
         [InlineData("11.0.0.0", "12.0.0", RuntimeSku.CoreClr, false)]
         [InlineData("11.1.0.0", "11.0.0", RuntimeSku.CoreClr, false)]
+        [InlineData("12.0.0.0", "13.0.0", RuntimeSku.CoreClr, false)]
         [InlineData("11.0.0", null, RuntimeSku.None, false)]
         [InlineData("11.0.0", null, RuntimeSku.Mono, false)]
+        [InlineData(null, "12.0.0", RuntimeSku.Mono, false)]
         [InlineData("11.0.0", null, RuntimeSku.DesktopClr, false)]
         [InlineData("11.0.0", null, RuntimeSku.CoreClr | RuntimeSku.Mono, false)]
-        public void Select_UsesOnlySupportedCapturedVersionsAndFlavors(
+        public void Select_UsesNewestApplicableSupportForCapturedRuntime(
             string fileVersion, string productVersion, RuntimeSku flavor, bool supported)
         {
-            AsyncProfilerRuntimeRuleProfile profile = AsyncProfilerRuntimeRuleProfile.Select(fileVersion, productVersion, flavor);
-            Assert.Same(supported ? AsyncProfilerRuntimeRuleProfile.CoreClr11 : AsyncProfilerRuntimeRuleProfile.Common, profile);
-            Assert.Equal(supported ? "CoreCLR 11.0" : "Common", profile.Name);
+            AsyncProfilerRuntimeSupport support = AsyncProfilerRuntimeSupport.Select(fileVersion, productVersion, flavor);
+            Assert.Same(supported ? AsyncProfilerRuntimeSupport.CoreClr11 : AsyncProfilerRuntimeSupport.Common, support);
+            Assert.Equal(supported ? "CoreCLR 11.0" : "Common", support.Name);
         }
 
         [Theory]
         [InlineData("App!Scenario+<Run>d__1.MoveNext()", false, AsyncProfilerStitchSyncFrameKind.V1StateMachineBody)]
-        [InlineData("System.Runtime.CompilerServices.AsyncMethodBuilderCore.Start(!!0&)", true, HelperKind.V1Startup)]
+        [InlineData("System.Runtime.CompilerServices.AsyncMethodBuilderCore.Start(!!0&)", true, RuntimeFrameKind.V1Startup)]
         [InlineData("System.Runtime.CompilerServices.AsyncMethodBuilderCore.Start(!!0&)", false, AsyncProfilerStitchSyncFrameKind.None)]
         [InlineData("Other.CoreLib!System.Runtime.CompilerServices.AsyncMethodBuilderCore.Start()", true, AsyncProfilerStitchSyncFrameKind.None)]
-        [InlineData("System.Threading.Tasks.Task.RunContinuations()", true, HelperKind.TaskContinuations)]
+        [InlineData("System.Threading.Tasks.Task.RunContinuations()", true, RuntimeFrameKind.TaskContinuations)]
         [InlineData("System.Threading.Tasks.Task.RunContinuations()", false, AsyncProfilerStitchSyncFrameKind.None)]
         [InlineData("Other.Namespace.Task.RunContinuations()", true, AsyncProfilerStitchSyncFrameKind.None)]
-        [InlineData("System.Runtime.CompilerServices.AsyncProfiler+ResumeAsyncContext.Resume()", true, HelperKind.ProfilerResume)]
+        [InlineData("System.Runtime.CompilerServices.AsyncProfiler+ResumeAsyncContext.Resume()", true, RuntimeFrameKind.ProfilerResume)]
         [InlineData("System.Runtime.CompilerServices.AsyncProfiler+ResumeAsyncContext.Resume()", false, AsyncProfilerStitchSyncFrameKind.None)]
-        [InlineData("System.Runtime.CompilerServices.ValueTaskAwaiter.System.Runtime.CompilerServices.IStateMachineBoxAwareAwaiter.AwaitUnsafeOnCompleted(class System.Runtime.CompilerServices.IAsyncStateMachineBox)", true, HelperKind.V1AwaiterRegistration)]
-        [InlineData("System.Runtime.CompilerServices.ValueTaskAwaiter`1[System.Int64].System.Runtime.CompilerServices.IStateMachineBoxAwareAwaiter.AwaitUnsafeOnCompleted(class System.Runtime.CompilerServices.IAsyncStateMachineBox)", true, HelperKind.V1AwaiterRegistration)]
-        [InlineData("System.Runtime.CompilerServices.ConfiguredValueTaskAwaitable+ConfiguredValueTaskAwaiter.System.Runtime.CompilerServices.IStateMachineBoxAwareAwaiter.AwaitUnsafeOnCompleted(class System.Runtime.CompilerServices.IAsyncStateMachineBox)", true, HelperKind.V1AwaiterRegistration)]
-        [InlineData("System.Runtime.CompilerServices.ConfiguredValueTaskAwaitable`1[System.Int64]+ConfiguredValueTaskAwaiter.System.Runtime.CompilerServices.IStateMachineBoxAwareAwaiter.AwaitUnsafeOnCompleted(class System.Runtime.CompilerServices.IAsyncStateMachineBox)", true, HelperKind.V1AwaiterRegistration)]
+        [InlineData("System.Runtime.CompilerServices.ValueTaskAwaiter.System.Runtime.CompilerServices.IStateMachineBoxAwareAwaiter.AwaitUnsafeOnCompleted(class System.Runtime.CompilerServices.IAsyncStateMachineBox)", true, RuntimeFrameKind.V1AwaiterRegistration)]
+        [InlineData("System.Runtime.CompilerServices.ValueTaskAwaiter`1[System.Int64].System.Runtime.CompilerServices.IStateMachineBoxAwareAwaiter.AwaitUnsafeOnCompleted(class System.Runtime.CompilerServices.IAsyncStateMachineBox)", true, RuntimeFrameKind.V1AwaiterRegistration)]
+        [InlineData("System.Runtime.CompilerServices.ConfiguredValueTaskAwaitable+ConfiguredValueTaskAwaiter.System.Runtime.CompilerServices.IStateMachineBoxAwareAwaiter.AwaitUnsafeOnCompleted(class System.Runtime.CompilerServices.IAsyncStateMachineBox)", true, RuntimeFrameKind.V1AwaiterRegistration)]
+        [InlineData("System.Runtime.CompilerServices.ConfiguredValueTaskAwaitable`1[System.Int64]+ConfiguredValueTaskAwaiter.System.Runtime.CompilerServices.IStateMachineBoxAwareAwaiter.AwaitUnsafeOnCompleted(class System.Runtime.CompilerServices.IAsyncStateMachineBox)", true, RuntimeFrameKind.V1AwaiterRegistration)]
         [InlineData("System.Runtime.CompilerServices.ValueTaskAwaiter.System.Runtime.CompilerServices.IStateMachineBoxAwareAwaiter.AwaitUnsafeOnCompleted()", false, AsyncProfilerStitchSyncFrameKind.None)]
         [InlineData("Other.Namespace.ValueTaskAwaiter.System.Runtime.CompilerServices.IStateMachineBoxAwareAwaiter.AwaitUnsafeOnCompleted()", true, AsyncProfilerStitchSyncFrameKind.None)]
         [InlineData("System.Runtime.CompilerServices.OtherAwaiter.System.Runtime.CompilerServices.IStateMachineBoxAwareAwaiter.AwaitUnsafeOnCompleted()", true, AsyncProfilerStitchSyncFrameKind.None)]
         [InlineData("System.Runtime.CompilerServices.ValueTaskAwaiter.Other.Namespace.IStateMachineBoxAwareAwaiter.AwaitUnsafeOnCompleted()", true, AsyncProfilerStitchSyncFrameKind.None)]
         [InlineData("System.Runtime.CompilerServices.AsyncProfiler+Other.Resume()", true, AsyncProfilerStitchSyncFrameKind.ProfilerHelper)]
         [InlineData(null, true, AsyncProfilerStitchSyncFrameKind.None)]
-        public void InitialProfiles_ShareExistingEvidenceAndOwnershipChecks(
+        public void InitialSupports_ShareExistingEvidenceAndOwnershipChecks(
             string method, bool isHostModule, object expectedValue)
         {
             FrameClassification expected = Classification(expectedValue);
-            foreach (AsyncProfilerRuntimeRuleProfile profile in InitialProfiles())
+            foreach (AsyncProfilerRuntimeSupport support in InitialSupport())
             {
-                Assert.Equal(expected, profile.ClassifySynchronousFrame(method, isHostModule));
+                Assert.Equal(expected, support.ClassifySynchronousFrame(method, isHostModule));
             }
         }
 
         [Theory]
         [InlineData("System.Boolean System.Threading.Tasks.Task::TrySetResult()",
-            HelperKind.TaskResult)]
+            RuntimeFrameKind.TaskResult)]
         [InlineData("System.Boolean System.Threading.Tasks.Task`1[System.Int64]::TrySetResult(!0)",
-            HelperKind.TaskResult)]
+            RuntimeFrameKind.TaskResult)]
         [InlineData("System.Void System.Threading.Tasks.Task::RunContinuations(System.Object)",
-            HelperKind.TaskContinuations)]
+            RuntimeFrameKind.TaskContinuations)]
         [InlineData("System.Threading.ThreadPoolWorkQueue+DispatchResult System.Threading.ThreadPoolWorkQueue::Dispatch()",
-            HelperKind.SchedulerEntry)]
+            RuntimeFrameKind.SchedulerEntry)]
         [InlineData("System.Private.CoreLib!System.Boolean System.Threading.Tasks.Task::TrySetResult()",
-            HelperKind.TaskResult)]
+            RuntimeFrameKind.TaskResult)]
         [InlineData("System.Runtime.CompilerServices.YieldAwaitable+YieldAwaiter::QueueContinuation(System.Action,System.Boolean)",
-            HelperKind.V1AwaiterRegistration)]
+            RuntimeFrameKind.V1AwaiterRegistration)]
         [InlineData("System.Private.CoreLib!System.Void System.Runtime.CompilerServices.YieldAwaitable+YieldAwaiter::QueueContinuation(System.Action,System.Boolean)",
-            HelperKind.V1AwaiterRegistration)]
+            RuntimeFrameKind.V1AwaiterRegistration)]
         [InlineData("Other.Namespace.YieldAwaitable+YieldAwaiter::QueueContinuation()", AsyncProfilerStitchSyncFrameKind.None)]
         [InlineData("System.Runtime.CompilerServices.OtherAwaitable+YieldAwaiter::QueueContinuation()", AsyncProfilerStitchSyncFrameKind.None)]
         [InlineData("System.Runtime.CompilerServices.YieldAwaitable+YieldAwaiter::QueueContinuationExtra()", AsyncProfilerStitchSyncFrameKind.None)]
         [InlineData("Other.CoreLib!System.Runtime.CompilerServices.YieldAwaitable+YieldAwaiter::QueueContinuation()", AsyncProfilerStitchSyncFrameKind.None)]
         [InlineData("System.Runtime.CompilerServices.YieldAwaitable+YieldAwaiter::OutputCorrelationEtwEvent(System.Action)",
-            HelperKind.V1AwaiterRegistration)]
+            RuntimeFrameKind.V1AwaiterRegistration)]
         [InlineData("System.Private.CoreLib!System.Action System.Runtime.CompilerServices.YieldAwaitable+YieldAwaiter::OutputCorrelationEtwEvent(System.Action)",
-            HelperKind.V1AwaiterRegistration)]
+            RuntimeFrameKind.V1AwaiterRegistration)]
         [InlineData("Other.Namespace.YieldAwaitable+YieldAwaiter::OutputCorrelationEtwEvent()", AsyncProfilerStitchSyncFrameKind.None)]
         [InlineData("System.Runtime.CompilerServices.OtherAwaitable+YieldAwaiter::OutputCorrelationEtwEvent()", AsyncProfilerStitchSyncFrameKind.None)]
         [InlineData("System.Runtime.CompilerServices.YieldAwaitable+YieldAwaiter::OutputCorrelationEtwEventExtra()", AsyncProfilerStitchSyncFrameKind.None)]
@@ -121,10 +125,10 @@ namespace TraceEventTests
         public void PdbNames_PreserveExactDeclaringTypeAndModuleOwnershipChecks(string name, object expected)
         {
             string normalized = AsyncProfilerMethodNames.NormalizeMethodName(name);
-            foreach (AsyncProfilerRuntimeRuleProfile profile in InitialProfiles())
+            foreach (AsyncProfilerRuntimeSupport support in InitialSupport())
             {
-                Assert.Equal(Classification(expected), profile.ClassifySynchronousFrame(normalized, true));
-                Assert.Equal(AsyncProfilerStitchSyncFrameKind.None, profile.ClassifySynchronousFrame(normalized, false));
+                Assert.Equal(Classification(expected), support.ClassifySynchronousFrame(normalized, true));
+                Assert.Equal(AsyncProfilerStitchSyncFrameKind.None, support.ClassifySynchronousFrame(normalized, false));
             }
         }
 
@@ -136,16 +140,16 @@ namespace TraceEventTests
         [InlineData("dynamicClass.IL_STUB_AsyncResumeOther()", false)]
         [InlineData("Other.IL_STUB_AsyncResume()", false)]
         [InlineData("IL_STUB_AsyncResume()", false)]
-        public void ResumeStub_IsProfileSpecificApplicationInfrastructureNotABoundary(string name, bool recognized)
+        public void ResumeStub_IsSupportSpecificApplicationInfrastructureNotABoundary(string name, bool recognized)
         {
-            foreach (AsyncProfilerRuntimeRuleProfile profile in InitialProfiles())
+            foreach (AsyncProfilerRuntimeSupport support in InitialSupport())
             {
                 foreach (bool hostModule in new[] { false, true })
                 {
                     Assert.Equal(recognized ? AsyncProfilerStitchSyncFrameKind.V2ResumeStub : AsyncProfilerStitchSyncFrameKind.None,
-                        profile.ClassifySynchronousFrame(name, hostModule));
+                        support.ClassifySynchronousFrame(name, hostModule));
                 }
-                Assert.Equal(AsyncProfilerCallStackStitchBoundaryKind.None, profile.ClassifyBoundary(name).Kind);
+                Assert.Equal(AsyncProfilerCallStackStitchBoundaryKind.None, support.ClassifyBoundary(name).Kind);
             }
         }
 
@@ -159,14 +163,14 @@ namespace TraceEventTests
         [InlineData(@"C:\other\coreclr.dll", @"C:\runtime\System.Private.CoreLib.dll", false)]
         [InlineData(@"C:\runtime\coreclr.extra.dll", @"C:\runtime\System.Private.CoreLib.dll", false)]
         [InlineData("clrjit.dll", "System.Private.CoreLib.dll", false)]
-        public void NativeDispatchModules_RequireCapturedRuntimeImagesInTheHostDirectory(
+        public void NativeRuntimeModules_RequireCapturedRuntimeImagesInTheHostDirectory(
             string path, string hostPath, bool recognized)
         {
             var module = new TraceModuleFile(path, 0x1000, (ModuleFileIndex)0);
             var host = new TraceModuleFile(hostPath, 0x2000, (ModuleFileIndex)1);
-            foreach (AsyncProfilerRuntimeRuleProfile profile in InitialProfiles())
+            foreach (AsyncProfilerRuntimeSupport support in InitialSupport())
             {
-                Assert.Equal(recognized, profile.IsV2NativeDispatchModule(module, host));
+                Assert.Equal(recognized, support.IsNativeRuntimeModule(module, host));
             }
         }
 
@@ -178,19 +182,19 @@ namespace TraceEventTests
         [InlineData("Box.MoveNextAsDispatcher()", (int)AsyncProfilerCallStackStitchBoundaryKind.V1Dispatcher, -1)]
         [InlineData("System.Runtime.CompilerServices.AsyncStateMachineDispatcher.MoveNext()", (int)AsyncProfilerCallStackStitchBoundaryKind.V1Dispatcher, -1)]
         [InlineData(null, (int)AsyncProfilerCallStackStitchBoundaryKind.None, -1)]
-        public void BoundaryContracts_AreSharedEvenWhenAProfileDisablesDispatcherInfrastructure(
+        public void BoundaryContracts_AreSharedEvenWhenASupportDisablesDispatcherInfrastructure(
             string method, int expectedValue, int expectedWrapperIndex)
         {
             var expected = (AsyncProfilerCallStackStitchBoundaryKind)expectedValue;
-            var profiles = new[]
+            var supports = new[]
             {
-                AsyncProfilerRuntimeRuleProfile.Common,
-                AsyncProfilerRuntimeRuleProfile.CoreClr11,
-                new NoDispatcherInfrastructureProfile(),
+                AsyncProfilerRuntimeSupport.Common,
+                AsyncProfilerRuntimeSupport.CoreClr11,
+                new NoDispatcherInfrastructureSupport(),
             };
-            foreach (AsyncProfilerRuntimeRuleProfile profile in profiles)
+            foreach (AsyncProfilerRuntimeSupport support in supports)
             {
-                AsyncProfilerCallStackStitchBoundaryInfo info = profile.ClassifyBoundary(method);
+                AsyncProfilerCallStackStitchBoundaryInfo info = support.ClassifyBoundary(method);
                 Assert.Equal(expected, info.Kind);
                 Assert.Equal(expectedWrapperIndex, info.WrapperIndex);
             }
@@ -207,7 +211,7 @@ namespace TraceEventTests
         [InlineData("System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1+AsyncProfilerAsyncStateMachineBox`1[System.Int64,V1TraceScenarios+<BurnCpuAsync>d__15].InstrumentedMoveNext(class System.Threading.Thread,value class Flags)")]
         public void ClassifyBoundary_RecognizesV1DispatcherInfrastructure(string frameName)
         {
-            AsyncProfilerCallStackStitchBoundaryInfo info = AsyncProfilerRuntimeRuleProfile.Common.ClassifyBoundary(frameName);
+            AsyncProfilerCallStackStitchBoundaryInfo info = AsyncProfilerRuntimeSupport.Common.ClassifyBoundary(frameName);
             Assert.Equal(AsyncProfilerCallStackStitchBoundaryKind.V1DispatcherInfrastructure, info.Kind);
             Assert.Equal(-1, info.WrapperIndex);
         }
@@ -221,14 +225,14 @@ namespace TraceEventTests
             Assert.Equal(AsyncProfilerCallStackStitchBoundaryKind.None, AsyncProfilerCallStackStitchBoundary.ClassifyContractBoundary(box, out _));
             Assert.Equal(
                 AsyncProfilerCallStackStitchBoundaryKind.None,
-                new NoDispatcherInfrastructureProfile().ClassifyBoundary(box).Kind);
+                new NoDispatcherInfrastructureSupport().ClassifyBoundary(box).Kind);
 
-            foreach (AsyncProfilerRuntimeRuleProfile profile in InitialProfiles())
+            foreach (AsyncProfilerRuntimeSupport support in InitialSupport())
             {
-                Assert.Equal(AsyncProfilerCallStackStitchBoundaryKind.V1DispatcherInfrastructure, profile.ClassifyBoundary(box).Kind);
-                Assert.True(profile.TryGetBoxedStateMachineTypeName(box, true, out string stateMachineType));
+                Assert.Equal(AsyncProfilerCallStackStitchBoundaryKind.V1DispatcherInfrastructure, support.ClassifyBoundary(box).Kind);
+                Assert.True(support.TryGetBoxedStateMachineTypeName(box, true, out string stateMachineType));
                 Assert.Equal("Scenario+<Run>d__1", stateMachineType);
-                Assert.False(profile.TryGetBoxedStateMachineTypeName(box, false, out _));
+                Assert.False(support.TryGetBoxedStateMachineTypeName(box, false, out _));
             }
         }
 
@@ -240,9 +244,9 @@ namespace TraceEventTests
         public void BoxCarrier_ExtractsTheFinalConstructedTypeArgument(string boxMethod, string expected)
         {
             string name = "System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1+" + boxMethod;
-            foreach (AsyncProfilerRuntimeRuleProfile profile in InitialProfiles())
+            foreach (AsyncProfilerRuntimeSupport support in InitialSupport())
             {
-                Assert.True(profile.TryGetBoxedStateMachineTypeName(name, true, out string type));
+                Assert.True(support.TryGetBoxedStateMachineTypeName(name, true, out string type));
                 Assert.Equal(expected, type);
             }
         }
@@ -264,9 +268,9 @@ namespace TraceEventTests
         [InlineData("System.Runtime.CompilerServices.AsyncStateMachineBox`1[App]].MoveNext()", true)]
         public void BoxCarrier_RejectsUnknownUnconstructedAndMalformedNames(string name, bool isHostModule)
         {
-            foreach (AsyncProfilerRuntimeRuleProfile profile in InitialProfiles())
+            foreach (AsyncProfilerRuntimeSupport support in InitialSupport())
             {
-                Assert.False(profile.TryGetBoxedStateMachineTypeName(name, isHostModule, out _));
+                Assert.False(support.TryGetBoxedStateMachineTypeName(name, isHostModule, out _));
             }
         }
 
@@ -276,17 +280,17 @@ namespace TraceEventTests
             const string boxType =
                 "System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1+" +
                 "AsyncProfilerAsyncStateMachineBox`1[System.Int64,Scenario+<Run>d__1]";
-            var profile = new NoDispatcherInfrastructureProfile();
+            var support = new NoDispatcherInfrastructureSupport();
 
-            Assert.Equal(AsyncProfilerCallStackStitchBoundaryKind.None, profile.ClassifyBoundary(boxType + ".MoveNext()").Kind);
-            Assert.True(profile.TryGetBoxedStateMachineTypeName(boxType + ".MoveNext()", true, out string type));
+            Assert.Equal(AsyncProfilerCallStackStitchBoundaryKind.None, support.ClassifyBoundary(boxType + ".MoveNext()").Kind);
+            Assert.True(support.TryGetBoxedStateMachineTypeName(boxType + ".MoveNext()", true, out string type));
             Assert.Equal("Scenario+<Run>d__1", type);
             Assert.Equal(
                 AsyncProfilerStitchSyncFrameKind.ProfilerHelper,
-                profile.ClassifySynchronousFrame(boxType + ".GetDiagnosticData()", true));
+                support.ClassifySynchronousFrame(boxType + ".GetDiagnosticData()", true));
             Assert.Equal(
                 AsyncProfilerStitchSyncFrameKind.None,
-                profile.ClassifySynchronousFrame(boxType + ".GetDiagnosticData()", false));
+                support.ClassifySynchronousFrame(boxType + ".GetDiagnosticData()", false));
         }
 
         [Theory]
@@ -317,11 +321,11 @@ namespace TraceEventTests
         [InlineData("App+<Run>d__1.MoveNext()", false)]
         public void DispatchSpanHelpers_RecognizeTypeFamiliesButNotGenericInitialization(string name, bool expected)
         {
-            foreach (AsyncProfilerRuntimeRuleProfile profile in InitialProfiles())
+            foreach (AsyncProfilerRuntimeSupport support in InitialSupport())
             {
-                FrameClassification kind = profile.ClassifySynchronousFrame(name, true);
-                Assert.Equal(expected, profile.IsProfilerDispatchInfrastructure(kind));
-                Assert.False(profile.IsProfilerDispatchInfrastructure(profile.ClassifySynchronousFrame(name, false)));
+                FrameClassification kind = support.ClassifySynchronousFrame(name, true);
+                Assert.Equal(expected, support.IsProfilerDispatchInfrastructure(kind));
+                Assert.False(support.IsProfilerDispatchInfrastructure(support.ClassifySynchronousFrame(name, false)));
             }
         }
 
@@ -337,12 +341,12 @@ namespace TraceEventTests
         [InlineData("System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1+AsyncProfilerAsyncStateMachineBox`1[System.Int64,App+<Run>d__1.System.Runtime.CompilerServices.IAsyncStateMachineDispatcher.get_DispatcherId()", false)]
         public void ProfilerImplementingTypes_RecognizeInterfaceMembersWithoutMethodLists(string name, bool expected)
         {
-            foreach (AsyncProfilerRuntimeRuleProfile profile in InitialProfiles())
+            foreach (AsyncProfilerRuntimeSupport support in InitialSupport())
             {
-                Assert.Equal(expected, profile.IsProfilerDispatchInfrastructure(
-                    profile.ClassifySynchronousFrame(name, true)));
-                Assert.Equal(AsyncProfilerStitchSyncFrameKind.None, profile.ClassifySynchronousFrame(name, false));
-                Assert.Equal(AsyncProfilerCallStackStitchBoundaryKind.None, profile.ClassifyBoundary(name).Kind);
+                Assert.Equal(expected, support.IsProfilerDispatchInfrastructure(
+                    support.ClassifySynchronousFrame(name, true)));
+                Assert.Equal(AsyncProfilerStitchSyncFrameKind.None, support.ClassifySynchronousFrame(name, false));
+                Assert.Equal(AsyncProfilerCallStackStitchBoundaryKind.None, support.ClassifyBoundary(name).Kind);
             }
         }
 
@@ -360,17 +364,17 @@ namespace TraceEventTests
         [InlineData("Other.CoreLib!System.Threading.Tasks.Task.TrySetException(System.Object)", false)]
         public void TaskExceptionInfrastructure_IsClassifiedButNotIndividuallyCleaned(string name, bool expected)
         {
-            foreach (AsyncProfilerRuntimeRuleProfile profile in InitialProfiles())
+            foreach (AsyncProfilerRuntimeSupport support in InitialSupport())
             {
                 string normalized = AsyncProfilerMethodNames.NormalizeMethodName(name);
-                FrameClassification kind = profile.ClassifySynchronousFrame(normalized, true);
+                FrameClassification kind = support.ClassifySynchronousFrame(normalized, true);
                 Assert.Equal(expected, kind == AsyncProfilerStitchSyncFrameKind.FaultHandling);
-                Assert.Equal(expected, profile.IsProfilerDispatchInfrastructure(kind));
-                Assert.Equal(AsyncProfilerStitchSyncFrameKind.None, profile.ClassifySynchronousFrame(normalized, false));
+                Assert.Equal(expected, support.IsProfilerDispatchInfrastructure(kind));
+                Assert.Equal(AsyncProfilerStitchSyncFrameKind.None, support.ClassifySynchronousFrame(normalized, false));
                 var frame = AsyncProfilerStitchedFrame.CreateSync(
                     new AsyncProfilerStitchSyncFrame(CodeAddressIndex.Invalid, MethodIndex.Invalid, kind), null);
-                Assert.False(profile.IsOptionalInfrastructureFrame(frame, AsyncProfilerCallStackStitchBoundaryKind.None));
-                Assert.False(profile.IsV1CompletionUnwindInfrastructure(frame, AsyncProfilerCallStackStitchBoundaryKind.None));
+                Assert.False(support.IsOptionalInfrastructureFrame(frame, AsyncProfilerCallStackStitchBoundaryKind.None));
+                Assert.False(support.IsV1CompletionUnwindInfrastructure(frame, AsyncProfilerCallStackStitchBoundaryKind.None));
             }
         }
 
@@ -385,15 +389,15 @@ namespace TraceEventTests
         [InlineData("Other.CoreLib!System.Runtime.CompilerServices.TaskAwaiter.GetResult()", false)]
         public void AwaiterInfrastructure_IsClassifiedWithoutAuthorizingIndividualCleanup(string name, bool expected)
         {
-            foreach (AsyncProfilerRuntimeRuleProfile profile in InitialProfiles())
+            foreach (AsyncProfilerRuntimeSupport support in InitialSupport())
             {
-                FrameClassification kind = profile.ClassifySynchronousFrame(name, true);
+                FrameClassification kind = support.ClassifySynchronousFrame(name, true);
                 Assert.Equal(expected, kind == AsyncProfilerStitchSyncFrameKind.AwaiterHelper);
-                Assert.Equal(AsyncProfilerStitchSyncFrameKind.None, profile.ClassifySynchronousFrame(name, false));
+                Assert.Equal(AsyncProfilerStitchSyncFrameKind.None, support.ClassifySynchronousFrame(name, false));
                 var frame = AsyncProfilerStitchedFrame.CreateSync(
                     new AsyncProfilerStitchSyncFrame(CodeAddressIndex.Invalid, MethodIndex.Invalid, kind), null);
-                Assert.False(profile.IsOptionalInfrastructureFrame(frame, AsyncProfilerCallStackStitchBoundaryKind.None));
-                Assert.Equal(expected, profile.IsV1CompletionUnwindInfrastructure(frame, AsyncProfilerCallStackStitchBoundaryKind.None));
+                Assert.False(support.IsOptionalInfrastructureFrame(frame, AsyncProfilerCallStackStitchBoundaryKind.None));
+                Assert.Equal(expected, support.IsV1CompletionUnwindInfrastructure(frame, AsyncProfilerCallStackStitchBoundaryKind.None));
             }
         }
 
@@ -410,17 +414,17 @@ namespace TraceEventTests
         [InlineData("System.Runtime.CompilerServices.ConfiguredValueTaskAwaitable`1[System.Int64]+ConfiguredValueTaskAwaiter.get_IsCompleted()")]
         public void AwaiterReadinessCheck_IsOptionalMachineryNotDispatchOrCompletionEvidence(string name)
         {
-            foreach (AsyncProfilerRuntimeRuleProfile profile in InitialProfiles())
+            foreach (AsyncProfilerRuntimeSupport support in InitialSupport())
             {
-                FrameClassification kind = profile.ClassifySynchronousFrame(name, true);
-                Assert.Equal(HelperKind.V1AwaiterReadinessCheck, kind);
-                Assert.Equal(AsyncProfilerStitchSyncFrameKind.None, profile.ClassifySynchronousFrame(name, false));
-                Assert.False(profile.ClassifyBoundary(name).IsDispatchMarker);
+                FrameClassification kind = support.ClassifySynchronousFrame(name, true);
+                Assert.Equal(RuntimeFrameKind.V1AwaiterReadinessCheck, kind);
+                Assert.Equal(AsyncProfilerStitchSyncFrameKind.None, support.ClassifySynchronousFrame(name, false));
+                Assert.False(support.ClassifyBoundary(name).IsDispatchMarker);
                 var frame = AsyncProfilerStitchedFrame.CreateSync(
                     new AsyncProfilerStitchSyncFrame(CodeAddressIndex.Invalid, MethodIndex.Invalid, kind), null);
-                Assert.True(profile.IsOptionalInfrastructureFrame(frame, AsyncProfilerCallStackStitchBoundaryKind.None));
-                Assert.False(profile.IsProfilerDispatchInfrastructure(kind));
-                Assert.False(profile.IsV1CompletionUnwindInfrastructure(frame, AsyncProfilerCallStackStitchBoundaryKind.None));
+                Assert.True(support.IsOptionalInfrastructureFrame(frame, AsyncProfilerCallStackStitchBoundaryKind.None));
+                Assert.False(support.IsProfilerDispatchInfrastructure(kind));
+                Assert.False(support.IsV1CompletionUnwindInfrastructure(frame, AsyncProfilerCallStackStitchBoundaryKind.None));
             }
         }
 
@@ -442,13 +446,13 @@ namespace TraceEventTests
         [InlineData("Scenario.PooledSource.GetStatus(int16)")]
         public void AwaiterReadinessCheck_DoesNotBroadenOtherAwaiterCleanup(string name)
         {
-            foreach (AsyncProfilerRuntimeRuleProfile profile in InitialProfiles())
+            foreach (AsyncProfilerRuntimeSupport support in InitialSupport())
             {
-                FrameClassification kind = profile.ClassifySynchronousFrame(name, true);
-                Assert.NotEqual(HelperKind.V1AwaiterReadinessCheck, kind);
+                FrameClassification kind = support.ClassifySynchronousFrame(name, true);
+                Assert.NotEqual(RuntimeFrameKind.V1AwaiterReadinessCheck, kind);
                 var frame = AsyncProfilerStitchedFrame.CreateSync(
                     new AsyncProfilerStitchSyncFrame(CodeAddressIndex.Invalid, MethodIndex.Invalid, kind), null);
-                Assert.False(profile.IsOptionalInfrastructureFrame(frame, AsyncProfilerCallStackStitchBoundaryKind.None));
+                Assert.False(support.IsOptionalInfrastructureFrame(frame, AsyncProfilerCallStackStitchBoundaryKind.None));
             }
         }
 
@@ -467,11 +471,11 @@ namespace TraceEventTests
         public void ValueTaskCompletionWrapper_RequiresExactBuilderAndNormalCompletion(string name, bool expected)
         {
             string normalized = AsyncProfilerMethodNames.NormalizeMethodName(name);
-            foreach (AsyncProfilerRuntimeRuleProfile profile in InitialProfiles())
+            foreach (AsyncProfilerRuntimeSupport support in InitialSupport())
             {
-                Assert.Equal(expected, profile.ClassifySynchronousFrame(normalized, true) ==
+                Assert.Equal(expected, support.ClassifySynchronousFrame(normalized, true) ==
                     AsyncProfilerStitchSyncFrameKind.V1MethodCompletion);
-                Assert.Equal(AsyncProfilerStitchSyncFrameKind.None, profile.ClassifySynchronousFrame(normalized, false));
+                Assert.Equal(AsyncProfilerStitchSyncFrameKind.None, support.ClassifySynchronousFrame(normalized, false));
             }
         }
 
@@ -496,19 +500,19 @@ namespace TraceEventTests
             AsyncProfilerStitchSyncFrameKind.None)]
         [InlineData(
             "System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1[System.Int64].Start(!!0&)",
-            HelperKind.V1Startup)]
+            RuntimeFrameKind.V1Startup)]
         [InlineData(
             "System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1[System.Int64].AwaitUnsafeOnCompleted(!!0&,!!1&)",
-            HelperKind.V1BuilderAwaitRegistration)]
+            RuntimeFrameKind.V1BuilderAwaitRegistration)]
         [InlineData(
             "System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1[System.Int64].AwaitUnsafeOnCompleted(!!0&,!!1&,class System.Threading.Tasks.Task`1<!0>&)",
-            HelperKind.V1BuilderAwaitRegistration)]
+            RuntimeFrameKind.V1BuilderAwaitRegistration)]
         [InlineData(
             "System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1[System.Int64].AwaitUnsafeOnCompleted(!!0&,class System.Runtime.CompilerServices.IAsyncStateMachineBox)",
-            HelperKind.V1BuilderAwaitRegistration)]
+            RuntimeFrameKind.V1BuilderAwaitRegistration)]
         [InlineData(
             "System.Private.CoreLib!System.Runtime.CompilerServices.AsyncMethodBuilderCore.Start(!!0&)",
-            HelperKind.V1Startup)]
+            RuntimeFrameKind.V1Startup)]
         [InlineData(
             "System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1[System.Int64].SetExistingTaskResult(class System.Threading.Tasks.Task`1<!0>,!0)",
             AsyncProfilerStitchSyncFrameKind.V1MethodCompletion)]
@@ -523,37 +527,37 @@ namespace TraceEventTests
             AsyncProfilerStitchSyncFrameKind.V1MethodHelper)]
         [InlineData(
             "System.Private.CoreLib!System.Runtime.CompilerServices.YieldAwaitable+YieldAwaiter.System.Runtime.CompilerServices.IStateMachineBoxAwareAwaiter.AwaitUnsafeOnCompleted(class System.Runtime.CompilerServices.IAsyncStateMachineBox)",
-            HelperKind.V1AwaiterRegistration)]
+            RuntimeFrameKind.V1AwaiterRegistration)]
         [InlineData(
             "System.Private.CoreLib!System.Runtime.CompilerServices.TaskAwaiter.UnsafeOnCompletedInternal(class System.Threading.Tasks.Task,class System.Action,bool)",
-            HelperKind.V1AwaiterRegistration)]
+            RuntimeFrameKind.V1AwaiterRegistration)]
         [InlineData(
             "System.Private.CoreLib!System.Runtime.CompilerServices.ConfiguredValueTaskAwaitable+ConfiguredValueTaskAwaiter.UnsafeOnCompleted(class System.Action)",
-            HelperKind.V1AwaiterRegistration)]
+            RuntimeFrameKind.V1AwaiterRegistration)]
         [InlineData(
             "System.Private.CoreLib!System.Runtime.CompilerServices.TaskAwaiter.GetResult()",
             AsyncProfilerStitchSyncFrameKind.AwaiterHelper)]
         [InlineData(
             "System.Private.CoreLib!System.Threading.Tasks.Task.RunContinuations(class System.Object)",
-            HelperKind.TaskContinuations)]
+            RuntimeFrameKind.TaskContinuations)]
         [InlineData(
             "System.Private.CoreLib!System.Threading.ThreadPoolWorkQueue.Dispatch()",
-            HelperKind.SchedulerEntry)]
+            RuntimeFrameKind.SchedulerEntry)]
         [InlineData(
             "System.Private.CoreLib!System.Threading.Tasks.Task.TrySetResult()",
-            HelperKind.TaskResult)]
+            RuntimeFrameKind.TaskResult)]
         [InlineData(
             "System.Private.CoreLib!System.Threading.Tasks.Task`1[System.Boolean].TrySetResult(!0)",
-            HelperKind.TaskResult)]
+            RuntimeFrameKind.TaskResult)]
         [InlineData(
             "System.Private.CoreLib!System.Threading.Tasks.TaskCompletionSource`1[System.Boolean].SetResult(!0)",
-            HelperKind.TaskCompletionSourceResult)]
+            RuntimeFrameKind.TaskCompletionSourceResult)]
         [InlineData(
             "System.Private.CoreLib!System.Threading.Tasks.Task`1[[System.Collections.Generic.List`1[System.Int32]]].TrySetResult(!0)",
-            HelperKind.TaskResult)]
+            RuntimeFrameKind.TaskResult)]
         [InlineData(
             "System.Private.CoreLib!System.Threading.Tasks.Task`1.TrySetResult(!0)",
-            HelperKind.TaskResult)]
+            RuntimeFrameKind.TaskResult)]
         [InlineData(
             "System.Private.CoreLib!Other.Namespace.Task.RunContinuations()",
             AsyncProfilerStitchSyncFrameKind.None)]
@@ -628,31 +632,31 @@ namespace TraceEventTests
             AsyncProfilerStitchSyncFrameKind.None)]
         public void ClassifySynchronousFrame_RecognizesKnownAsyncRelatedFrames(string frameName, object expectedValue)
         {
-            Assert.Equal("System.Private.CoreLib", AsyncProfilerRuntimeRuleProfile.HostModuleName);
+            Assert.Equal("System.Private.CoreLib", AsyncProfilerRuntimeSupport.HostModuleName);
             FrameClassification expected = Classification(expectedValue);
-            bool isHostModule = AsyncProfilerRuntimeRuleProfile.IsHostModuleQualifiedFrame(frameName);
-            Assert.Equal(expected, AsyncProfilerRuntimeRuleProfile.Common.ClassifySynchronousFrame(frameName, isHostModule));
+            bool isHostModule = AsyncProfilerRuntimeSupport.IsHostModuleQualifiedFrame(frameName);
+            Assert.Equal(expected, AsyncProfilerRuntimeSupport.Common.ClassifySynchronousFrame(frameName, isHostModule));
         }
 
         [Theory]
         [InlineData(
             "System.Runtime.CompilerServices.AsyncMethodBuilderCore.Start(!!0&)",
-            HelperKind.V1Startup)]
+            RuntimeFrameKind.V1Startup)]
         [InlineData(
             "System.Threading.ThreadPoolWorkQueue.Dispatch()",
-            HelperKind.SchedulerEntry)]
+            RuntimeFrameKind.SchedulerEntry)]
         [InlineData(
             "System.Threading.Tasks.Task`1[System.Int64].TrySetResult(!0)",
-            HelperKind.TaskResult)]
+            RuntimeFrameKind.TaskResult)]
         [InlineData(
             "System.Threading.Tasks.Task`1[!0].TrySetResult(!0)",
-            HelperKind.TaskResult)]
+            RuntimeFrameKind.TaskResult)]
         [InlineData(
             "System.Threading.Tasks.Task`1[[System.Collections.Generic.List`1[System.Int32]]].TrySetResult(!0)",
-            HelperKind.TaskResult)]
+            RuntimeFrameKind.TaskResult)]
         [InlineData(
             "System.Threading.Tasks.TaskCompletionSource`1[System.Boolean].SetResult(!0)",
-            HelperKind.TaskCompletionSourceResult)]
+            RuntimeFrameKind.TaskCompletionSourceResult)]
         [InlineData(
             "System.Runtime.CompilerServices.RuntimeAsyncTaskContinuation+TaskContinuationResume.ResumeTaskContinuation(class System.Runtime.CompilerServices.Continuation,unsigned int8&)",
             AsyncProfilerStitchSyncFrameKind.ContinuationBridge)]
@@ -662,10 +666,10 @@ namespace TraceEventTests
             FrameClassification expected = Classification(expectedValue);
             Assert.Equal(
                 expected,
-                AsyncProfilerRuntimeRuleProfile.Common.ClassifySynchronousFrame(method, isHostModule: true));
+                AsyncProfilerRuntimeSupport.Common.ClassifySynchronousFrame(method, isHostModule: true));
             Assert.Equal(
                 AsyncProfilerStitchSyncFrameKind.None,
-                AsyncProfilerRuntimeRuleProfile.Common.ClassifySynchronousFrame(method, isHostModule: false));
+                AsyncProfilerRuntimeSupport.Common.ClassifySynchronousFrame(method, isHostModule: false));
         }
 
         [Theory]
@@ -694,7 +698,7 @@ namespace TraceEventTests
         {
             Assert.Equal(
                 AsyncProfilerStitchSyncFrameKind.None,
-                AsyncProfilerRuntimeRuleProfile.Common.ClassifySynchronousFrame(method, isHostModule: true));
+                AsyncProfilerRuntimeSupport.Common.ClassifySynchronousFrame(method, isHostModule: true));
         }
 
         [Theory]
@@ -704,14 +708,14 @@ namespace TraceEventTests
         {
             Assert.Equal(
                 AsyncProfilerStitchSyncFrameKind.V1DispatchSetup,
-                AsyncProfilerRuntimeRuleProfile.Common.ClassifySynchronousFrame("System.Private.CoreLib!" + method, isHostModule: true));
+                AsyncProfilerRuntimeSupport.Common.ClassifySynchronousFrame("System.Private.CoreLib!" + method, isHostModule: true));
             Assert.Equal(
                 AsyncProfilerStitchSyncFrameKind.V1DispatchSetup,
-                AsyncProfilerRuntimeRuleProfile.Common.ClassifySynchronousFrame(method, isHostModule: true));
+                AsyncProfilerRuntimeSupport.Common.ClassifySynchronousFrame(method, isHostModule: true));
             Assert.Equal(
                 AsyncProfilerStitchSyncFrameKind.None,
-                AsyncProfilerRuntimeRuleProfile.Common.ClassifySynchronousFrame(method, isHostModule: false));
-            AsyncProfilerCallStackStitchBoundaryInfo info = AsyncProfilerRuntimeRuleProfile.Common.ClassifyBoundary("System.Private.CoreLib!" + method);
+                AsyncProfilerRuntimeSupport.Common.ClassifySynchronousFrame(method, isHostModule: false));
+            AsyncProfilerCallStackStitchBoundaryInfo info = AsyncProfilerRuntimeSupport.Common.ClassifyBoundary("System.Private.CoreLib!" + method);
             Assert.Equal(AsyncProfilerCallStackStitchBoundaryKind.None, info.Kind);
             Assert.Equal(-1, info.WrapperIndex);
         }
@@ -728,25 +732,25 @@ namespace TraceEventTests
         {
             Assert.Equal(
                 AsyncProfilerStitchSyncFrameKind.None,
-                AsyncProfilerRuntimeRuleProfile.Common.ClassifySynchronousFrame(method, isHostModule: true));
+                AsyncProfilerRuntimeSupport.Common.ClassifySynchronousFrame(method, isHostModule: true));
             Assert.Equal(
                 AsyncProfilerStitchSyncFrameKind.None,
-                AsyncProfilerRuntimeRuleProfile.Common.ClassifySynchronousFrame("System.Private.CoreLib!" + method, isHostModule: true));
+                AsyncProfilerRuntimeSupport.Common.ClassifySynchronousFrame("System.Private.CoreLib!" + method, isHostModule: true));
         }
 
         [Theory]
-        [InlineData("System.Runtime.CompilerServices.AsyncProfiler+AsyncCallstack.CaptureStateMachineAsyncCallstack(unsigned int8[],int32&,value class State&)", HelperKind.ProfilerCapture)]
-        [InlineData("System.Runtime.CompilerServices.AsyncProfiler+AsyncCallstack.EmitAsyncCallstack(unsigned int8[],int32&,!!0&)", HelperKind.ProfilerEmission)]
-        [InlineData("System.Runtime.CompilerServices.AsyncProfiler+AsyncCallstack.EmitEvent()", HelperKind.ProfilerEmission)]
-        [InlineData("System.Runtime.CompilerServices.AsyncProfiler+ResumeAsyncContext.Resume()", HelperKind.ProfilerResume)]
+        [InlineData("System.Runtime.CompilerServices.AsyncProfiler+AsyncCallstack.CaptureStateMachineAsyncCallstack(unsigned int8[],int32&,value class State&)", RuntimeFrameKind.ProfilerCapture)]
+        [InlineData("System.Runtime.CompilerServices.AsyncProfiler+AsyncCallstack.EmitAsyncCallstack(unsigned int8[],int32&,!!0&)", RuntimeFrameKind.ProfilerEmission)]
+        [InlineData("System.Runtime.CompilerServices.AsyncProfiler+AsyncCallstack.EmitEvent()", RuntimeFrameKind.ProfilerEmission)]
+        [InlineData("System.Runtime.CompilerServices.AsyncProfiler+ResumeAsyncContext.Resume()", RuntimeFrameKind.ProfilerResume)]
         [InlineData("System.Runtime.CompilerServices.AsyncProfiler+SyncPoint.ResetContext()", AsyncProfilerStitchSyncFrameKind.ProfilerHelper)]
         [InlineData("System.Runtime.CompilerServices.AsyncStateMachineDiagnostics`1[Scenario+<ChildAsync>d__3]..cctor()", AsyncProfilerStitchSyncFrameKind.ProfilerHelper)]
         [InlineData("System.Runtime.CompilerServices.AsyncStateMachineDiagnostics`1[Scenario+<ChildAsync>d__3].get_MethodId()", AsyncProfilerStitchSyncFrameKind.ProfilerHelper)]
         [InlineData("System.Runtime.CompilerServices.AsyncStateMachineDiagnostics`1[!0].get_StateOffset()", AsyncProfilerStitchSyncFrameKind.ProfilerHelper)]
-        [InlineData("System.Runtime.CompilerServices.InitHelpers.CallClassConstructor(void*,void*,class System.Exception*)", HelperKind.RuntimeInitialization)]
-        [InlineData("System.Runtime.CompilerServices.InitHelpers.InitClassHelper(value class MethodTable*)", HelperKind.RuntimeInitialization)]
-        [InlineData("System.Runtime.CompilerServices.InitHelpers.InitClassSlow(value class MethodTable*)", HelperKind.RuntimeInitialization)]
-        [InlineData("System.Runtime.CompilerServices.StaticsHelpers.GetNonGCStaticBaseSlow(value class MethodTable*)", HelperKind.RuntimeInitialization)]
+        [InlineData("System.Runtime.CompilerServices.InitHelpers.CallClassConstructor(void*,void*,class System.Exception*)", RuntimeFrameKind.RuntimeInitialization)]
+        [InlineData("System.Runtime.CompilerServices.InitHelpers.InitClassHelper(value class MethodTable*)", RuntimeFrameKind.RuntimeInitialization)]
+        [InlineData("System.Runtime.CompilerServices.InitHelpers.InitClassSlow(value class MethodTable*)", RuntimeFrameKind.RuntimeInitialization)]
+        [InlineData("System.Runtime.CompilerServices.StaticsHelpers.GetNonGCStaticBaseSlow(value class MethodTable*)", RuntimeFrameKind.RuntimeInitialization)]
         [InlineData("System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1+AsyncStateMachineBox`1[System.Int64,Scenario+<ChildAsync>d__3].System.Runtime.CompilerServices.IAsyncStateMachineBox.GetDiagnosticData(unsigned int64&,int32&,class System.Object&)", AsyncProfilerStitchSyncFrameKind.ProfilerHelper)]
         [InlineData("System.Runtime.CompilerServices.AsyncProfiler+Other.EmitEvent()", AsyncProfilerStitchSyncFrameKind.ProfilerHelper)]
         [InlineData("System.Runtime.CompilerServices.AsyncProfiler+AsyncCallstack.EmitEventExtra()", AsyncProfilerStitchSyncFrameKind.ProfilerHelper)]
@@ -756,24 +760,24 @@ namespace TraceEventTests
             string method, object expectedValue)
         {
             FrameClassification expected = Classification(expectedValue);
-            Assert.Equal(expected, AsyncProfilerRuntimeRuleProfile.Common.ClassifySynchronousFrame("System.Private.CoreLib!" + method, isHostModule: true));
-            Assert.Equal(expected, AsyncProfilerRuntimeRuleProfile.Common.ClassifySynchronousFrame(method, isHostModule: true));
-            Assert.Equal(AsyncProfilerStitchSyncFrameKind.None, AsyncProfilerRuntimeRuleProfile.Common.ClassifySynchronousFrame(method, isHostModule: false));
+            Assert.Equal(expected, AsyncProfilerRuntimeSupport.Common.ClassifySynchronousFrame("System.Private.CoreLib!" + method, isHostModule: true));
+            Assert.Equal(expected, AsyncProfilerRuntimeSupport.Common.ClassifySynchronousFrame(method, isHostModule: true));
+            Assert.Equal(AsyncProfilerStitchSyncFrameKind.None, AsyncProfilerRuntimeSupport.Common.ClassifySynchronousFrame(method, isHostModule: false));
         }
 
         #region private
 
         private static FrameClassification Classification(object expected) =>
-            expected is HelperKind helper
-                ? new FrameClassification(helper)
+            expected is RuntimeFrameKind helper
+                ? (FrameClassification)helper
                 : new FrameClassification((AsyncProfilerStitchSyncFrameKind)expected);
 
-        private static AsyncProfilerRuntimeRuleProfile[] InitialProfiles() =>
-            new[] { AsyncProfilerRuntimeRuleProfile.Common, AsyncProfilerRuntimeRuleProfile.CoreClr11 };
+        private static AsyncProfilerRuntimeSupport[] InitialSupport() =>
+            new[] { AsyncProfilerRuntimeSupport.Common, AsyncProfilerRuntimeSupport.CoreClr11 };
 
-        private sealed class NoDispatcherInfrastructureProfile : AsyncProfilerRuntimeRuleProfile
+        private sealed class NoDispatcherInfrastructureSupport : AsyncProfilerRuntimeSupport
         {
-            public NoDispatcherInfrastructureProfile() : base("Test profile")
+            public NoDispatcherInfrastructureSupport() : base("Test profile")
             {
             }
 

@@ -595,18 +595,18 @@ Without a wrapper, optional machinery cleanup can group contiguous
 immediately above a verified V2 dispatch pair into the same
 `[Async dispatcher frames]` marker. The pair may remain physical or be recorded
 by structural stitching behind its marker. Helpers must resolve to the same
-captured CoreLib and runtime profile and belong to the same context. Native or
+captured CoreLib and runtime support and belong to the same context. Native or
 unresolved callees, application callbacks, other CoreLib helpers, and context
 boundaries stop the span and remain visible. Method-completion events are not
 required; existing structural targets and completion counts are unchanged.
 
-For a Yield resumption, the common profile instead matches a contiguous span of
+For a Yield resumption, common runtime support instead matches a contiguous span of
 `System.Runtime.CompilerServices.YieldAwaitable` or nested-type methods between
 the consumed `InstrumentedDispatchContinuations` / `DispatchContinuations` pair
 and retained `ThreadPoolWorkQueue.Dispatch`. It does not depend on a particular
 lambda name. Structural stitching carries the pair's identity per activation;
 an inner activation's pair cannot authorize cleanup of the root's bridge.
-The profile supplies the removable helper count, while shared cleanup verifies
+Runtime support supplies the removable helper count, while shared cleanup verifies
 the async anchor, captured CoreLib ownership, and complete span. Interrupted or
 unverified spans remain intact. Structural/default views and leaf-side
 application work retain Yield frames.
@@ -628,7 +628,7 @@ segment queries and `AsyncProfilerCallStackSourceBuilder` for standalone
 stitching into a caller-owned stack source. Both existing stack computers
 retain their async controls. `AsyncCallStackTransforms` exposes presentation
 settings and narrow custom callbacks. The parser, persisted index,
-reconstruction core, runtime profiles, diagnostics, and emitted provenance
+reconstruction core, runtime support implementations, diagnostics, and emitted provenance
 hooks remain **internal implementation APIs**. See sections 6 and 10 for
 public usage.
 
@@ -749,7 +749,7 @@ using Microsoft.Diagnostics.Tracing.Stacks;
 | Logical-event schema | Per-event version and payload-length-prefix width advertised in `Manifest`. |
 | ETLX serialization | `TraceLog` currently requires ETLX version 78 for both reader and writer compatibility. |
 | Async-index serialization | Internal `AsyncProfilerCallStacksIndex` serialization version, currently 1; not a separately promised interchange format. |
-| Captured runtime profile | Implementation-dependent layout rules selected from captured CoreLib/module information, not the analyzer's runtime version. |
+| Captured runtime support | Implementation-dependent layout rules selected from captured CoreLib/module information, not the analyzer's runtime version. |
 
 `InstructionPointerAt(i)` and `AsyncCallstackEvent.MethodIds[i]` are native code IPs for
 **both** families. V2 captures continuation IPs; V1 captures state-machine
@@ -1138,7 +1138,7 @@ concatenation of the entire async stack beneath every physical sample.
 V2 wrappers (`Continuation_Wrapper_0` through `_31`) supply the structural
 splice boundary and wrapper position. Dispatch-continuation infrastructure without
 a wrapper is classified but is not itself permission to splice a V2 segment.
-Runtime profiles also recognize `dynamicClass.IL_STUB_AsyncResume`, including
+Runtime support implementations also recognize `dynamicClass.IL_STUB_AsyncResume`, including
 stubs in application modules. A single recognized stub immediately leafward
 of a verified wrapper is transparent to current-method identity matching.
 When the body matches, structural stitching consumes that stub with the wrapper;
@@ -1147,7 +1147,7 @@ When the stub itself is sampled, an identifiable indexed target replaces the
 stub/wrapper as `AsyncDispatchTarget`, never `AsyncCurrent`. Missing async data,
 an unavailable target, or an unverified body alignment retains the uncertain
 physical frames. This implementation-dependent name belongs to the runtime
-profile, not the shared boundary-name contract.
+support, not the shared boundary-name contract.
 
 When the frame immediately leafward of a verified V2 wrapper (skipping one
 recognized resume stub) belongs to a captured native CoreCLR/JIT image, stitching
@@ -1278,8 +1278,8 @@ ownership, so they are the supported application-facing integration.
 
 `AsyncProfilerStitchSyncFrame` contains `CodeAddress`, `Method`, cached
 `Classification`, and optional `BoxedStateMachineMethod`. Its `Kind` exposes
-only the shared `AsyncProfilerStitchSyncFrameKind` role. Runtime profiles keep
-finer helper identities in their own `HelperKind`; sequence matching uses those
+only the shared `AsyncProfilerStitchSyncFrameKind` kind. `FrameClassification.RuntimeKind`
+holds the finer `RuntimeFrameKind`; sequence matching uses those
 details without exposing runtime method names to shared rules. Classification
 is cached once per code address and retained through stitching and presentation.
 Approved box identity associates a physical runtime helper with its application state
@@ -1287,17 +1287,17 @@ machine; it does not turn that helper IP into evidence of body execution.
 `AsyncProfilerStitchResult` contains leaf-to-root `Frames` and `Diagnostics`.
 
 `AsyncProfilerCallStackStitchBoundary.ClassifyContractBoundary(...)` and `TryGetWrapperIndex(...)`
-recognize shared dispatcher contracts and wrapper slots. Runtime profiles combine
+recognize shared dispatcher contracts and wrapper slots. Runtime support implementations combine
 those contracts with dispatcher-helper rules in `ClassifyBoundary(...)` and own
 `ClassifySynchronousFrame(...)` for generated async methods and runtime helpers.
-Metadata-free classification uses common rules; production selects profiles from
+Metadata-free classification uses common rules; production selects runtime support from
 captured runtime metadata.
 
 `AsyncProfilerMethodNames` owns shared symbol normalization, method/type and
 generic-argument parsing, and generated state-machine name decoding/formatting.
 It does not classify runtime helpers or verify module ownership.
 A per-trace `AsyncProfilerCallStackStitchBoundaryCache`, constructed with the
-code-address table and runtime-profile cache, classifies code addresses using
+code-address table and runtime resolver, classifies code addresses using
 captured CoreLib ownership and caches the result.
 
 ## 9. Frame provenance and presentation policy
@@ -1406,7 +1406,7 @@ CoreLib awaiter/bridge helpers, can become one `[Async dispatcher frames]` marke
 ending strictly before that resolved callback. This bounded prefix requires the
 root activation's verified dispatcher/current-or-target evidence (or a verified
 V1 completion owner, including a normalized, fully completed return unwind),
-matching captured CoreLib/profile ownership throughout,
+matching captured CoreLib/runtime-support ownership throughout,
 and a resolved same-runtime scheduler anchor. The callback and its entire
 scheduler/thread host tail remain physical and protected, even if unrelated host
 work is unresolved. Unknown, unresolved, foreign, interrupted, or incomplete
@@ -1451,10 +1451,10 @@ The span becomes `[Async dispatcher frames]`, retaining its leafmost physical
 code address, method, and activation context. Optional cleanup uses this rule
 for individual builder/awaiter/Task/execution-context helpers and matched
 completion chains, not just dispatcher and box frames. Adjacent markers merge
-only for the same activation, runtime profile, and captured CoreLib owner;
+only for the same activation, runtime support, and captured CoreLib owner;
 they never merge across application/unknown frames or protected spans.
 Standalone transforms without a TraceLog rely on supplied classifications
-and profile identity rather than unavailable captured-module metadata.
+and runtime-support identity rather than unavailable captured-module metadata.
 
 Verified application-identity projections and causal folds remain distinct:
 startup `MoveNext + Start` normalization and exact activation/handoff
@@ -1475,11 +1475,11 @@ keeps its current/completing/dispatch-target provenance.
 
 A failed whole-prefix proof does not veto an independently verified managed
 registration run. A resolved `CreateDispatcher` followed by one or more
-profile-matched await-registration helpers before a resolved physical non-CoreLib
+runtime-matched await-registration helpers before a resolved physical non-CoreLib
 caller can become one marker. The helper count and supported layouts come from
-the runtime profile, not a particular sample. Every grouped frame must be eligible,
-resolved, contiguous, and share the captured CoreLib owner, runtime profile, and
-active context. Entry/registration profile vetoes still preserve the candidate.
+the runtime support, not a particular sample. Every grouped frame must be eligible,
+resolved, contiguous, and share the captured CoreLib owner, runtime support, and
+active context. Rejected entry/registration matches still preserve the candidate.
 The marker retains the entry's physical identity; the caller remains synchronous,
 including a child state machine started inside the active async method. The marker
 and all leaf-side callees remain protected, without claiming native-prefix
@@ -1496,10 +1496,10 @@ families and remain visible.
 
 Optional machinery cleanup also accepts a resolved await-registration spine
 immediately leafward of a physically matched current V1 body as an entry anchor.
-It reuses the runtime profile's await-registration matcher and grows through the
+It reuses the runtime support's await-registration matcher and grows through the
 same helper families, without requiring a visible `CreateDispatcher`, `Resume`,
 or callstack-emission method. Native, unknown, foreign, or unrelated frames stop
-growth; eligible helpers above a break do not restart it. Ownership, profile
+growth; eligible helpers above a break do not restart it. Ownership, runtime-support
 rejections, structural-evidence checks, and splice boundaries remain enforced.
 The physical current body retains its sampled address and inferred `-1` display
 state, with captured state/IP unchanged. Indexed targets and historical parent
@@ -1517,7 +1517,7 @@ same registration classification; the interface qualification is not mistaken
 for their declaring type. This includes generic and configured ValueTask awaiters,
 without treating their other methods or foreign implementations as machinery.
 
-The runtime profile centrally classifies AsyncProfiler, its EventSource,
+The runtime support centrally classifies AsyncProfiler, its EventSource,
 state-machine diagnostics, and box helper families as profiler infrastructure.
 Capture, emission, resume, box-callback, and await-registration anchors retain
 their specialized classifications. Generic runtime initialization has a separate
@@ -1525,7 +1525,7 @@ kind and cannot extend a dispatcher span. Dispatcher cleanup consumes these
 classifications rather than repeating implementation-dependent name checks.
 A resolved capture helper directly above a verified V1 dispatcher can form the
 pending target's entry spine even when `Resume` is absent from the physical stack.
-The same context, runtime/profile, boundary, and contiguity guards still apply;
+The same context, runtime support, boundary, and contiguity guards still apply;
 native callees remain physical and the target is not promoted to executing.
 Capture alone before a physical application body does not establish this ownership.
 
@@ -1547,16 +1547,16 @@ unique ordered captured methods, matching box/body evidence, and resolved
 same-runtime helpers. Unknown, foreign, or unresolved intervening frames reject
 that normalization rather than being skipped.
 A physically matched V1 completion body can also anchor
-the runtime profile's completion pair and adjacent builder-completion helper.
+the runtime support's completion pair and adjacent builder-completion helper.
 The completing frame must agree with the recorded completion count and captured
 canonical managed-method identity, and retain its verified same-runtime dispatcher
 placement. Cleanup reuses the stitcher's method resolver so different native/JIT
 versions do not fail a raw method-index comparison.
 Independent helper groups above a contiguity break remain eligible for their
 existing cleanup; profiler-prefix protection remains unchanged.
-An independent profile-matched completion pair can also own its contiguous
+An independent runtime-matched completion pair can also own its contiguous
 awaiter/box prefix when the activation has a verified physical V1 completion
-anchor. Profile rejections remain protected, and this grouping stops at callers
+anchor. Rejected runtime matches remain protected, and this grouping stops at callers
 such as `WhenAllPromise.Invoke` rather than hiding their aggregation work.
 
 Optional cleanup can additionally recognize wider runtime-owned interiors
@@ -1586,12 +1586,12 @@ Every widened span also requires a structurally consumed, verified dispatcher
 entry for that activation, complete segment processing, and no missing boundary,
 adjacency mismatch, or ambiguous V1 completion alignment. All interior frames
 must be resolved, synchronous, and belong to that same active context, canonical
-captured CoreLib owner, and runtime-profile instance. Linked native/IL module
+captured CoreLib owner, and runtime-support instance. Linked native/IL module
 aliases use the shared ownership table; matching module names alone are
 insufficient. The inter-activation handoff rule uses this same captured-owner
-and profile invariant rather than module-name-only membership.
+and runtime-support invariant rather than module-name-only membership.
 
-Application frames, native or unresolved work, foreign owners/profiles, logical
+Application frames, native or unresolved work, foreign owners/runtime support, logical
 frames, state-machine bodies/carriers, and profiler boundaries stop widening.
 Callees above the leaf anchor and callers below the root anchor are not included
 by the bounded proof; existing independently justified helper cleanup can still
@@ -1610,7 +1610,7 @@ This identifies only captured frame zero as completing; the next frame stays a
 pending dispatch target, never a physically running body. Its owned completion
 prefix can then use ordinary machinery grouping, including TaskAwaiter callbacks.
 Additional completions, another physical body, missing entry/return evidence,
-unresolved or foreign helpers, and profile vetoes retain the ambiguous layout.
+unresolved or foreign helpers, and rejected runtime matches retain the ambiguous layout.
 Native/JIT callees remain physical. The original structural recursion guard and
 normalization-disabled behavior are unchanged.
 
@@ -1619,7 +1619,7 @@ every captured frame has a recorded normal completion and there is no exception
 progress. At least two physical bodies must match that method, each with matching
 box-entry evidence and an owned completion pair immediately before its builder
 completion. Every intervening/root-side helper must be resolved, contiguous,
-same-runtime infrastructure; profile vetoes still apply. This can normalize a physical
+same-runtime infrastructure; runtime matchers can still reject it. This can normalize a physical
 stack truncated before its dispatcher into a logical-root `V1CompletionReturn`,
 without assigning individual recursive copies or inventing pending/executing
 methods. Native leaf work and the `BROKEN` physical-root marker remain visible.
@@ -1640,7 +1640,7 @@ still use the existing conservative fallback.
 That completion proof can also authorize a bounded YieldAwaitable-family bridge
 before the scheduler anchor. A normalized `V1CompletionReturn` root can supply
 this ownership too, provided recorded completion covers the entire activation
-and its consumed dispatcher belongs to the bridge's captured runtime/profile.
+and its consumed dispatcher belongs to the bridge's captured runtime support.
 This additional proof applies only to the bounded Yield bridge, not general
 completion-prefix or profiler-envelope cleanup. It does not weaken the shared
 executing-anchor guard used by reentrant handoff rules, or promote a completing
@@ -1655,7 +1655,7 @@ exact normal-completion count, and verified same-runtime outer/inner dispatchers
 The nested placement must be nonempty and immediately enclosed by the omitted
 outer placement. This does not restore completed ancestry or promote a pending
 nested target to executing. Missing, interrupted, foreign, ambiguous, or
-profile-rejected evidence retains the bridge; native/JIT work is unchanged.
+runtime-rejected evidence retains the bridge; native/JIT work is unchanged.
 
 Historical parent blocks use `[Async resumed parent context]` markers and
 ordinary `[Async V1]` / `[Async V2]` frame annotations. Each block replays the
@@ -1705,18 +1705,26 @@ not cloned. This API does not insert historical parent contexts or emit annotati
 
 ### Runtime-specific rules are internal, not a public plug-in API
 
-`AsyncProfilerRuntimeRuleProfile`, `AsyncProfilerRuntimeRuleProfileCache`, and sequence
+`AsyncProfilerRuntimeSupport`, `AsyncProfilerRuntimeResolver`, and sequence
 matchers centralize implementation-specific helper recognition, ownership
 evidence, layout matching, and complete presentation-stage replacements.
 They are selected from **captured** CoreLib versions and loaded engine modules,
 never the analysis machine's runtime or an application's target framework.
 Selection happens before structural removal can erase runtime evidence.
 
-The current explicit profile is CoreCLR 11.0; it presently shares common
-implementations. Missing, conflicting, or unsupported metadata selects the
-evidence-checked `Common` rules, not an arbitrary "latest runtime." Sequence
+CoreCLR 11.0 and later select the CoreCLR 11 support baseline, which presently
+shares common implementations. When a newer baseline is added, selection should
+prefer the newest baseline not newer than the captured runtime.
+Missing or conflicting metadata, older versions, and unsupported runtime flavors
+select the evidence-checked `Common` rules. Sequence
 matching still checks frame identity, boundaries, same-module ownership, and
 context. A version match alone never authorizes removal.
+
+Implementation-specific names live in `AsyncProfilerRuntimeNames`, grouped by
+declaring type or runtime family. Each group keeps its members and generic symbol
+variants together. Classification and sequence matching refer to that catalog;
+stable profiler boundary contracts remain in `AsyncProfilerCallStackStitchBoundary`.
+
 CoreLib membership and ownership use one shared module-indexed table during
 stack generation. Non-CoreLib entries map to an invalid owner; native images
 map through their recorded managed-module link. Separate unload/rundown entries
@@ -1724,14 +1732,14 @@ share an owner only when their captured full paths and nonempty PDB signatures
 and ages match. Path comparison is ordinal and does not consult local files.
 The metadata comparisons happen when the table is built, not per sampled frame;
 subsequent ownership checks use array lookups and integer comparisons.
-The table refreshes if module entries are added. Runtime profiles remain
+The table refreshes if module entries are added. Runtime support remains
 independently selected and checked, so an alias does not hide conflicting
 runtime-version evidence.
 Compiler-generated application-name decoding is a separate convention; the
 captured runtime version does not identify the application's compiler.
 Public presentation callbacks use the narrow frame/context views described
-below; runtime profile replacement is not a public extension point. Adding a
-runtime profile is a library implementation change with regression coverage.
+below; runtime support replacement is not a public extension point. Adding support
+for a runtime is a library implementation change with regression coverage.
 
 ## 10. Stack-source hosts, emitted metadata, and diagnostics
 
@@ -1864,7 +1872,7 @@ affect presentation after structural reconstruction; disabling normalization
 does not disable stitching. Parent contexts replay recorded resume/append
 snapshots, not creation-time execution locations. Their
 `AsyncCallStackTransforms` settings also support the same public callbacks.
-No general stack-depth limit, diagnostics, or runtime-profile configuration
+No general stack-depth limit, diagnostics, or runtime-support configuration
 is exposed.
 
 The explicit failure is a caller policy for a run that requires async data;
@@ -1935,7 +1943,7 @@ members are internal diagnostic hooks, not public configuration.
 | Public standalone reconstruction and callbacks | `AsyncProfiler\AsyncProfilerCallStackSourceBuilder.cs`, `AsyncProfiler\AsyncProfilerCallStackTransformContext.cs` | `AsyncProfilerStitchIntegrationTests.cs` |
 | Structural reconstruction and boundary contracts | `AsyncProfiler\AsyncProfilerCallStackStitcher.cs`, `AsyncProfiler\AsyncProfilerCallStackStitchBoundary.cs` | `AsyncProfilerCallStackStitcherTests.cs`, `AsyncProfilerCallStackStitchBoundaryTests.cs` |
 | Shared symbol and generated-name parsing | `AsyncProfiler\AsyncProfilerMethodNames.cs` | `AsyncProfilerMethodNamesTests.cs` |
-| Runtime ownership and implementation layouts | `AsyncProfiler\AsyncProfilerRuntimeRuleProfile.cs`, `AsyncProfiler\AsyncProfilerRuntimeRuleProfileCache.cs`, `AsyncProfiler\AsyncProfilerRuntimeSequenceMatch.cs` | `AsyncProfilerRuntimeRuleProfileTests.cs`, `AsyncProfilerRuntimeSequenceTests.cs`, `AsyncProfilerRuntimeProfileExtensibilityTests.cs` |
+| Runtime ownership and implementation layouts | `AsyncProfiler\AsyncProfilerRuntimeSupport.cs`, `AsyncProfiler\AsyncProfilerRuntimeResolver.cs`, `AsyncProfiler\AsyncProfilerRuntimeSequenceMatch.cs` | `AsyncProfilerRuntimeSupportTests.cs`, `AsyncProfilerRuntimeSequenceTests.cs`, `AsyncProfilerRuntimeSupportExtensibilityTests.cs` |
 | Historical parent contexts | `AsyncProfiler\AsyncProfilerParentContextBuilder.cs` | `AsyncProfilerCallStackStitcherTests.cs`, `AsyncProfilerStitchIntegrationTests.cs` |
 | Public presentation settings | `AsyncProfiler\AsyncCallStackTransforms.cs` | `AsyncProfilerStitchIntegrationTests.cs` |
 | Internal presentation and callbacks | `AsyncProfiler\AsyncProfilerCallStackTransformPipeline.cs`, `AsyncProfiler\AsyncProfilerCallStackTransformPasses.cs` | `AsyncProfilerCallStackTransformPipelineTests.cs` |

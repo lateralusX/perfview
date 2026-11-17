@@ -19,7 +19,7 @@ using Microsoft.Diagnostics.Tracing.Stacks;
 
 using Xunit;
 
-using static Microsoft.Diagnostics.Tracing.Computers.AsyncProfilerRuntimeRuleProfile;
+using static Microsoft.Diagnostics.Tracing.Computers.AsyncProfilerRuntimeSupport;
 
 namespace TraceEventTests
 {
@@ -362,7 +362,7 @@ namespace TraceEventTests
                     var state = new AsyncProfilerCallStackTransformState(
                         log, segments, 0, _ => AsyncProfilerCallStackStitchBoundaryInfo.None,
                         new AsyncProfilerCallStackStitchingState(), new AsyncProfilerCallStackDiagnostics(), new List<AsyncProfilerStitchedFrame>(),
-                        runtimeProfile: AsyncProfilerRuntimeRuleProfile.Common);
+                        runtimeSupport: AsyncProfilerRuntimeSupport.Common);
                     segments.ReadCount = 0;
                     pipeline.ApplyInPlace(state);
                     Assert.Equal(0, segments.ReadCount);
@@ -525,23 +525,23 @@ namespace TraceEventTests
                 stateMachine ? "Scenario+<ParentAsync>d__2::MoveNext()" : "AsyncDemo.ClockScenario::ParentAAsync(int32)",
                 "Captured parent");
             Frame native = Frame.Library("NativeHelpers", "NativeHelper::Run()", "NativeHelper::Run");
-            Frame dispatcher = Frame.PerfMap(AsyncProfilerRuntimeRuleProfile.HostModuleName,
+            Frame dispatcher = Frame.PerfMap(AsyncProfilerRuntimeSupport.HostModuleName,
                 "System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1+AsyncProfilerAsyncStateMachineBox`1[" +
                 "System.Int64,Scenario+<ChildAsync>d__1]::MoveNextAsDispatcher(class System.Threading.Thread," +
                 "valuetype System.Runtime.CompilerServices.AsyncInstrumentation/Flags)", "V1 dispatcher");
-            Frame wrapper = Frame.PerfMap(AsyncProfilerRuntimeRuleProfile.HostModuleName,
+            Frame wrapper = Frame.PerfMap(AsyncProfilerRuntimeSupport.HostModuleName,
                 "System.Runtime.CompilerServices.AsyncProfiler+ContinuationWrapper::Continuation_Wrapper_1(" +
                 "class System.Runtime.CompilerServices.Continuation,uint8&)", "V2 wrapper");
             const string runtimeTask = "System.Runtime.CompilerServices.AsyncHelpers+RuntimeAsyncTask`1[" +
                 "System.Threading.Tasks.VoidTaskResult]";
-            Frame instrumented = Frame.PerfMap(AsyncProfilerRuntimeRuleProfile.HostModuleName,
+            Frame instrumented = Frame.PerfMap(AsyncProfilerRuntimeSupport.HostModuleName,
                 runtimeTask + "::InstrumentedDispatchContinuations(valuetype System.Runtime.CompilerServices.AsyncInstrumentation/Flags)",
                 "V2 instrumented dispatch");
-            Frame dispatch = Frame.PerfMap(AsyncProfilerRuntimeRuleProfile.HostModuleName,
+            Frame dispatch = Frame.PerfMap(AsyncProfilerRuntimeSupport.HostModuleName,
                 runtimeTask + "::DispatchContinuations()", "V2 dispatch");
-            Frame threadPool = Frame.PerfMap(AsyncProfilerRuntimeRuleProfile.HostModuleName,
+            Frame threadPool = Frame.PerfMap(AsyncProfilerRuntimeSupport.HostModuleName,
                 "System.Threading.ThreadPoolWorkQueue::Dispatch()", "ThreadPoolWorkQueue.Dispatch");
-            Frame worker = Frame.PerfMap(AsyncProfilerRuntimeRuleProfile.HostModuleName,
+            Frame worker = Frame.PerfMap(AsyncProfilerRuntimeSupport.HostModuleName,
                 "System.Threading.PortableThreadPool+WorkerThread::WorkerThreadStart()", "WorkerThreadStart");
             Frame logicalCurrent = stateMachine ? current.Logical("Scenario.ChildAsync") : current;
             Frame logicalParent = stateMachine ? parent.Logical("Scenario.ParentAsync") : parent;
@@ -594,15 +594,15 @@ namespace TraceEventTests
             Frame logicalInner = inner.Logical("Scenario.InnerAsync");
             Frame logicalOuter = outer.Logical("Scenario.OuterAsync");
             Frame kickoff = Frame.PerfMap(Frame.ApplicationModule, "Scenario::InnerAsync(int32)", "Kickoff");
-            Frame dispatcher = Frame.PerfMap(AsyncProfilerRuntimeRuleProfile.HostModuleName,
+            Frame dispatcher = Frame.PerfMap(AsyncProfilerRuntimeSupport.HostModuleName,
                 "System.Runtime.CompilerServices.AsyncStateMachineDispatcher::MoveNext()", "AsyncStateMachineDispatcher.MoveNext");
-            Frame box = Frame.PerfMap(AsyncProfilerRuntimeRuleProfile.HostModuleName,
+            Frame box = Frame.PerfMap(AsyncProfilerRuntimeSupport.HostModuleName,
                 "System.Runtime.CompilerServices.AsyncTaskMethodBuilder+AsyncProfilerAsyncStateMachineBox::InstrumentedMoveNext()",
                 "Box.InstrumentedMoveNext");
-            Frame await = Frame.PerfMap(AsyncProfilerRuntimeRuleProfile.HostModuleName,
+            Frame await = Frame.PerfMap(AsyncProfilerRuntimeSupport.HostModuleName,
                 "System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1[System.Int64]::AwaitUnsafeOnCompleted(!!0&,!!1&)",
                 "Builder.AwaitUnsafeOnCompleted");
-            Frame start = Frame.PerfMap(AsyncProfilerRuntimeRuleProfile.HostModuleName,
+            Frame start = Frame.PerfMap(AsyncProfilerRuntimeSupport.HostModuleName,
                 "System.Runtime.CompilerServices.AsyncMethodBuilderCore::Start(!!0&)", "AsyncMethodBuilderCore.Start");
             var scenario = new StitchScenario
             {
@@ -680,9 +680,9 @@ namespace TraceEventTests
         {
             var kind = (AsyncCallstackKind)kindValue;
             StitchScenario scenario = CreateRuntimeResumptionBridgeScenario(kind);
-            var profile = new AsyncProfilerRejectRuntimeBridgeProfile();
-            scenario.RuntimeProfileForModule = module => AsyncProfilerRuntimeRuleProfileCache.IsHostModule(module)
-                ? profile : AsyncProfilerRuntimeRuleProfile.Common;
+            var support = new AsyncProfilerRejectRuntimeBridgeSupport();
+            scenario.RuntimeSupportForModule = module => AsyncProfilerRuntimeResolver.IsHostModule(module)
+                ? support : AsyncProfilerRuntimeSupport.Common;
             scenario.ExpectedStitched = scenario.ExpectedWithoutInfrastructureCleanup;
             scenario.ExpectedWithoutInfrastructureCleanup = null;
             scenario.ExpectedDiagnostics.AsyncInfrastructureFramesCollapsed = 0;
@@ -702,7 +702,7 @@ namespace TraceEventTests
         {
             StitchScenario scenario = CreateProfilerEnvelopeScenario(physicalCurrent);
             UseExtendedRuntimeLayouts(scenario);
-            Frame helper = Frame.CoreLib(AsyncProfilerExtendedRuntimeLayoutProfile.HelperName, "LayoutHelper");
+            Frame helper = Frame.CoreLib(AsyncProfilerExtendedRuntimeLayoutSupport.HelperName, "LayoutHelper");
             scenario.Sync = InsertEntryHelper(scenario.Sync, helper);
             scenario.ExpectedWithoutInfrastructureCleanup =
                 InsertEntryHelper(scenario.ExpectedWithoutInfrastructureCleanup, helper);
@@ -724,9 +724,11 @@ namespace TraceEventTests
         }
 
         [Theory]
-        [InlineData(false)]
-        [InlineData(true)]
-        public void RuntimeProfiles_WholeStageSelectionUsesCapturedProcessEvenWithoutRetainedRuntimeFrames(bool conflicting)
+        [InlineData("11.0.0", false)]
+        [InlineData("12.0.0", false)]
+        [InlineData("11.0.0", true)]
+        public void RuntimeResolver_WholeStageSelectionUsesCapturedProcessEvenWithoutRetainedRuntimeFrames(
+            string productVersion, bool conflicting)
         {
             var scenario = new StitchScenario
             {
@@ -734,27 +736,27 @@ namespace TraceEventTests
                 Async = new[] { Frame.App("Scenario.Current"), Frame.App("Scenario.Parent") },
                 ExpectedStitched = new[] { Frame.App("Scenario.Current"), Frame.App("Scenario.Parent"), Frame.App("Scenario.Caller") },
                 ExpectedDiagnostics = new CallStackDiagnosticsExpectation { SegmentsProcessed = 2, V2InfrastructureFramesCollapsed = 2 },
-                ExpectedRuntimeProfile = conflicting ? AsyncProfilerRuntimeRuleProfile.Common : AsyncProfilerRuntimeRuleProfile.CoreClr11,
+                ExpectedRuntimeSupport = conflicting ? AsyncProfilerRuntimeSupport.Common : AsyncProfilerRuntimeSupport.CoreClr11,
                 VerifyThreadTimeComputer = true,
                 IncludeEventSourceEvents = false,
                 AllowSupplementalSamples = true,
                 ConfigureTraceLog = log =>
                 {
-                    TraceModuleFile host = ConfigureCapturedRuntime(log, "11.0.0");
+                    TraceModuleFile host = ConfigureCapturedRuntime(log, productVersion);
                     TraceProcess process = log.Processes.First(p => p.ProcessID == 1234);
                     if (conflicting)
                     {
                         TraceModuleFile other = process.LoadedModules.UniversalMapping(
                             @"C:\other\System.Private.CoreLib.dll", 0x220000, 0x221000, 100_001, null);
-                        other.productVersion = "12.0.0";
+                        other.productVersion = "10.0.0";
                     }
-                    var profiles = new AsyncProfilerRuntimeRuleProfileCache(log.ModuleFiles);
-                    Assert.Same(AsyncProfilerRuntimeRuleProfile.CoreClr11, profiles.GetProfile(host.ModuleFileIndex));
-                    AsyncProfilerRuntimeRuleProfile expected = conflicting
-                        ? AsyncProfilerRuntimeRuleProfile.Common : AsyncProfilerRuntimeRuleProfile.CoreClr11;
-                    Assert.Same(expected, profiles.GetProcessProfile(process.ProcessIndex));
-                    Assert.Same(expected, profiles.GetProcessProfile(process.ProcessIndex));
-                    Assert.Same(AsyncProfilerRuntimeRuleProfile.Common, profiles.GetProcessProfile(ProcessIndex.Invalid));
+                    var runtimeResolver = new AsyncProfilerRuntimeResolver(log.ModuleFiles);
+                    Assert.Same(AsyncProfilerRuntimeSupport.CoreClr11, runtimeResolver.ResolveModuleSupport(host.ModuleFileIndex));
+                    AsyncProfilerRuntimeSupport expected = conflicting
+                        ? AsyncProfilerRuntimeSupport.Common : AsyncProfilerRuntimeSupport.CoreClr11;
+                    Assert.Same(expected, runtimeResolver.ResolveProcessSupport(process.ProcessIndex));
+                    Assert.Same(expected, runtimeResolver.ResolveProcessSupport(process.ProcessIndex));
+                    Assert.Same(AsyncProfilerRuntimeSupport.Common, runtimeResolver.ResolveProcessSupport(ProcessIndex.Invalid));
                 },
             };
             scenario.AssertProductionStitch();
@@ -781,7 +783,7 @@ namespace TraceEventTests
                 AsyncProfilerStitchedFrame unwind = Assert.Single(context.Frames.Where(frame =>
                     frame.Origin == AsyncProfilerStitchedFrameOrigin.V1CompletionReturn));
                 CodeAddressIndex bridge = context.Frames.Single(frame =>
-                    frame.SyncClassification.Helper == HelperKind.SchedulerEntry).CodeAddress;
+                    frame.SyncClassification.RuntimeKind == RuntimeFrameKind.SchedulerEntry).CodeAddress;
                 Assert.False(context.HasVerifiedDispatchEntry(unwind.Context, bridge));
                 Assert.False(context.HasVerifiedV1CompletionAnchor(unwind.Context, bridge));
                 Assert.True(context.HasVerifiedV1CompletionAnchor(unwind.Context, bridge, allowCompletionUnwind: true));
@@ -825,11 +827,11 @@ namespace TraceEventTests
                     HasConsistentPhysicalAlignment = obstruction != "missing-boundary",
                     UnresolvedV1CompletionCount = obstruction == "ambiguous" ? 1 : 0,
                 };
-                var profile = new AsyncProfilerRejectRuntimeBridgeProfile();
+                var support = new AsyncProfilerRejectRuntimeBridgeSupport();
                 var state = new AsyncProfilerCallStackTransformState(
                     context.TraceLog, context.Segments, context.TimestampQpc, context.ClassifyBoundary, stitchingState, diagnostics, frames,
-                    runtimeProfileResolver: obstruction == "profile-veto"
-                        ? (Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile>)(ca => profile) : null,
+                    runtimeSupportResolver: obstruction == "profile-veto"
+                        ? (Func<CodeAddressIndex, AsyncProfilerRuntimeSupport>)(ca => support) : null,
                     segmentPlacements: obstruction == "missing-placement" ? null : placements);
                 CodeAddressIndex bridge = frames.First(frame => frame.Context == null).CodeAddress;
                 Assert.Equal(obstruction == "profile-veto",
@@ -917,7 +919,7 @@ namespace TraceEventTests
         {
             StitchScenario scenario = CreateV1AfterV2CompletionScenario();
             UseExtendedCompletionLayout(scenario);
-            Frame helper = scenario.Sync.Single(frame => frame.SymbolName == AsyncProfilerExtendedCompletionRuntimeProfile.InjectedHelperName);
+            Frame helper = scenario.Sync.Single(frame => frame.SymbolName == AsyncProfilerExtendedCompletionRuntimeSupport.InjectedHelperName);
             if (obstruction == "unresolved")
             {
                 scenario.OmitSymbolFor = helper;
@@ -949,7 +951,7 @@ namespace TraceEventTests
             UseExtendedCompletionLayout(scenario);
             Frame alias = Frame.Library(
                 @"C:\runtime\System.Private.CoreLib.ni.dll",
-                AsyncProfilerExtendedCompletionRuntimeProfile.InjectedHelperName, "NativeCompletionHelper");
+                AsyncProfilerExtendedCompletionRuntimeSupport.InjectedHelperName, "NativeCompletionHelper");
             scenario.Sync = scenario.Sync.Select(frame =>
                 frame.SymbolName == alias.SymbolName ? alias : frame).ToArray();
             scenario.ExpectedWithoutNormalization = scenario.ExpectedWithoutNormalization
@@ -983,7 +985,7 @@ namespace TraceEventTests
             scenario.ConfigureTraceLog = log =>
             {
                 TraceModuleFile[] modules = log.ModuleFiles.Where(module =>
-                    module.Name == AsyncProfilerRuntimeRuleProfile.HostModuleName).ToArray();
+                    module.Name == AsyncProfilerRuntimeSupport.HostModuleName).ToArray();
                 Assert.Equal(2, modules.Length);
                 Assert.NotEqual(modules[0].ModuleFileIndex, modules[1].ModuleFileIndex);
                 Assert.Equal(modules[0].FilePath, modules[1].FilePath);
@@ -1015,7 +1017,7 @@ namespace TraceEventTests
             scenario.ConfigureTraceLog = log =>
             {
                 TraceModuleFile alias = log.ModuleFiles.Last(module =>
-                    module.Name == AsyncProfilerRuntimeRuleProfile.HostModuleName);
+                    module.Name == AsyncProfilerRuntimeSupport.HostModuleName);
                 if (obstruction == "path")
                 {
                     alias.fileName = @"C:\other\System.Private.CoreLib.dll";
@@ -1035,16 +1037,18 @@ namespace TraceEventTests
                 else
                 {
                     ConfigureCapturedRuntime(log, "11.0.0");
-                    alias.productVersion = "12.0.0";
+                    alias.productVersion = "10.0.0";
                 }
             };
             scenario.AssertProductionStitch();
         }
 
         [Theory]
-        [InlineData(false)]
-        [InlineData(true)]
-        public void CoreLibUnloadRundownAliases_CompletionProjectionRequiresCompatibleProfiles(bool conflictingProfile)
+        [InlineData("11.0.0", false)]
+        [InlineData("12.0.0", false)]
+        [InlineData("10.0.0", true)]
+        public void CoreLibUnloadRundownAliases_CompletionProjectionRequiresCompatibleSupports(
+            string aliasProductVersion, bool conflictingSupport)
         {
             Frame target = Frame.App("Scenario.TargetAsync");
             Frame[] sync = { Frame.V2InstrumentedDispatch, Frame.V2Dispatch, Frame.ThreadPoolDispatch, Frame.WorkerThreadStart };
@@ -1059,22 +1063,22 @@ namespace TraceEventTests
                 EnableNormalization = false,
                 IncludeEventSourceEvents = false,
                 VerifySampleWeights = true,
-                ExpectedStitched = conflictingProfile ? sync : new[]
+                ExpectedStitched = conflictingSupport ? sync : new[]
                 {
                     Frame.V2InstrumentedDispatch.DispatcherFrames(), target, Frame.ThreadPoolDispatch, Frame.WorkerThreadStart,
                 },
                 ExpectedDiagnostics = new CallStackDiagnosticsExpectation
                 {
-                    SegmentsProcessed = conflictingProfile ? 0 : 2,
-                    V2SyncLayoutUsed = conflictingProfile ? 2 : 0,
-                    V2InfrastructureFramesCollapsed = conflictingProfile ? 0 : 4,
+                    SegmentsProcessed = conflictingSupport ? 0 : 2,
+                    V2SyncLayoutUsed = conflictingSupport ? 2 : 0,
+                    V2InfrastructureFramesCollapsed = conflictingSupport ? 0 : 4,
                 },
                 ConfigureTraceLog = log =>
                 {
                     ConfigureCapturedRuntime(log, "11.0.0");
                     TraceModuleFile alias = log.ModuleFiles.Last(module =>
-                        module.Name == AsyncProfilerRuntimeRuleProfile.HostModuleName);
-                    alias.productVersion = conflictingProfile ? "12.0.0" : "11.0.0";
+                        module.Name == AsyncProfilerRuntimeSupport.HostModuleName);
+                    alias.productVersion = aliasProductVersion;
                 },
             };
             scenario.AssertProductionStitch();
@@ -1084,11 +1088,13 @@ namespace TraceEventTests
         [InlineData("11.0.0", "coreclr.dll", true)]
         [InlineData("11.0.0-preview.1+abcdef", "libcoreclr.so", true)]
         [InlineData("11.0.0", "libcoreclr.dylib", true)]
-        [InlineData("12.0.0", "coreclr.dll", false)]
+        [InlineData("11.1.0", "coreclr.dll", true)]
+        [InlineData("12.0.0", "coreclr.dll", true)]
+        [InlineData("10.0.0", "coreclr.dll", false)]
         [InlineData(null, "coreclr.dll", false)]
         [InlineData("11.0.0", "libmonosgen-2.0.so", false)]
         [InlineData("11.0.0", null, false)]
-        public void RuntimeProfiles_AreCachedPerCapturedModuleAcrossMixedRuntimes(
+        public void RuntimeResolver_CachesSupportPerCapturedModuleAcrossMixedRuntimes(
             string productVersion, string engineModule, bool supported)
         {
             var scenario = new StitchScenario
@@ -1119,34 +1125,36 @@ namespace TraceEventTests
                     otherProcess.LoadedModules.UniversalMapping(
                         @"C:\other\coreclr.dll", 0x210000, 0x211000, 100_001, null);
 
-                    var profiles = new AsyncProfilerRuntimeRuleProfileCache(log.ModuleFiles);
-                    AsyncProfilerRuntimeRuleProfile expected = supported
-                        ? AsyncProfilerRuntimeRuleProfile.CoreClr11
-                        : AsyncProfilerRuntimeRuleProfile.Common;
-                    Assert.Same(expected, profiles.GetProfile(host.ModuleFileIndex));
-                    Assert.Same(AsyncProfilerRuntimeRuleProfile.Common, profiles.GetProfile(other.ModuleFileIndex));
-                    Assert.Same(expected, profiles.GetProcessProfile(
+                    var runtimeResolver = new AsyncProfilerRuntimeResolver(log.ModuleFiles);
+                    AsyncProfilerRuntimeSupport expected = supported
+                        ? AsyncProfilerRuntimeSupport.CoreClr11
+                        : AsyncProfilerRuntimeSupport.Common;
+                    Assert.Same(expected, runtimeResolver.ResolveModuleSupport(host.ModuleFileIndex));
+                    Assert.Same(AsyncProfilerRuntimeSupport.CoreClr11,
+                        runtimeResolver.ResolveModuleSupport(other.ModuleFileIndex));
+                    Assert.Same(expected, runtimeResolver.ResolveProcessSupport(
                         log.Processes.First(p => p.ProcessID == 1234).ProcessIndex));
-                    Assert.Same(AsyncProfilerRuntimeRuleProfile.Common, profiles.GetProcessProfile(otherProcess.ProcessIndex));
-                    Assert.Same(expected, profiles.GetProfile(host.ModuleFileIndex));
-                    Assert.Same(AsyncProfilerRuntimeRuleProfile.Common, profiles.GetProfile(ModuleFileIndex.Invalid));
+                    Assert.Same(AsyncProfilerRuntimeSupport.CoreClr11,
+                        runtimeResolver.ResolveProcessSupport(otherProcess.ProcessIndex));
+                    Assert.Same(expected, runtimeResolver.ResolveModuleSupport(host.ModuleFileIndex));
+                    Assert.Same(AsyncProfilerRuntimeSupport.Common, runtimeResolver.ResolveModuleSupport(ModuleFileIndex.Invalid));
 
                     TraceModuleFile native = log.ModuleFiles.GetOrCreateModuleFile(
                         @"C:\runtime\System.Private.CoreLib.ni.dll", 0x220000);
                     native.managedModule = host;
-                    Assert.True(profiles.IsHostModule(native.ModuleFileIndex));
-                    Assert.Same(expected, profiles.GetProfile(native.ModuleFileIndex));
-                    Assert.Same(expected, profiles.GetProfile(native.ModuleFileIndex));
-                    var nativeFirstProfiles = new AsyncProfilerRuntimeRuleProfileCache(log.ModuleFiles);
-                    Assert.Same(expected, nativeFirstProfiles.GetProfile(native.ModuleFileIndex));
-                    Assert.Same(expected, nativeFirstProfiles.GetProfile(host.ModuleFileIndex));
-                    Assert.Same(expected, nativeFirstProfiles.GetProfile(native.ModuleFileIndex));
+                    Assert.True(runtimeResolver.IsHostModule(native.ModuleFileIndex));
+                    Assert.Same(expected, runtimeResolver.ResolveModuleSupport(native.ModuleFileIndex));
+                    Assert.Same(expected, runtimeResolver.ResolveModuleSupport(native.ModuleFileIndex));
+                    var nativeFirstSupports = new AsyncProfilerRuntimeResolver(log.ModuleFiles);
+                    Assert.Same(expected, nativeFirstSupports.ResolveModuleSupport(native.ModuleFileIndex));
+                    Assert.Same(expected, nativeFirstSupports.ResolveModuleSupport(host.ModuleFileIndex));
+                    Assert.Same(expected, nativeFirstSupports.ResolveModuleSupport(native.ModuleFileIndex));
 
                     ModuleFileIndex applicationModule = log.ModuleFiles.GetOrCreateModuleFile(
                         @"C:\app\NotCoreLib.dll", 0).ModuleFileIndex;
-                    Assert.Same(AsyncProfilerRuntimeRuleProfile.Common, profiles.GetProfile(applicationModule));
-                    Assert.Same(AsyncProfilerRuntimeRuleProfile.Common, profiles.GetProfile(applicationModule));
-                    Assert.Same(AsyncProfilerRuntimeRuleProfile.Common, profiles.GetProfile(ModuleFileIndex.Invalid));
+                    Assert.Same(AsyncProfilerRuntimeSupport.Common, runtimeResolver.ResolveModuleSupport(applicationModule));
+                    Assert.Same(AsyncProfilerRuntimeSupport.Common, runtimeResolver.ResolveModuleSupport(applicationModule));
+                    Assert.Same(AsyncProfilerRuntimeSupport.Common, runtimeResolver.ResolveModuleSupport(ModuleFileIndex.Invalid));
                 },
             };
             scenario.AssertProductionStitch();
@@ -1157,7 +1165,7 @@ namespace TraceEventTests
         [InlineData(true, false)]
         [InlineData(false, true)]
         [InlineData(true, true)]
-        public void RuntimeProfiles_ConflictingOrUnknownModuleOwnersUseCommonRules(
+        public void RuntimeResolver_ConflictingOrUnknownModuleOwnersUseCommonRules(
             bool sharedWithAnotherProcess, bool unknownFlavor)
         {
             var scenario = new StitchScenario
@@ -1183,8 +1191,8 @@ namespace TraceEventTests
                             unknownFlavor ? @"C:\runtime\clr.dll" : @"C:\runtime\libmonosgen-2.0.so",
                             0x210000, 0x211000, 100_001, null);
                     }
-                    Assert.Same(AsyncProfilerRuntimeRuleProfile.Common,
-                        new AsyncProfilerRuntimeRuleProfileCache(log.ModuleFiles).GetProfile(host.ModuleFileIndex));
+                    Assert.Same(AsyncProfilerRuntimeSupport.Common,
+                        new AsyncProfilerRuntimeResolver(log.ModuleFiles).ResolveModuleSupport(host.ModuleFileIndex));
                 },
             };
             scenario.AssertProductionStitch();
@@ -4073,7 +4081,7 @@ namespace TraceEventTests
                         original.SyncClassification, obstruction == "wrong-box" ? frames[0].Method : original.BoxedStateMachineMethod),
                         obstruction == "wrong-context" ? null : original.Context);
                 }
-                var veto = new RejectingCompletionChainProfile();
+                var veto = new RejectingCompletionChainSupport();
                 var diagnostics = new AsyncProfilerCallStackDiagnostics();
                 var stitchingState = new AsyncProfilerCallStackStitchingState { ProcessedCallStackCount = 1 };
                 AsyncProfilerStitchedFrame[] originalFrames = frames.ToArray();
@@ -4081,7 +4089,7 @@ namespace TraceEventTests
                     context.TraceLog, context.Segments,
                     context.TimestampQpc - (obstruction == "future-completions" ? 10 : 0),
                     context.ClassifyBoundary, stitchingState, diagnostics, frames, methodOf: context.GetMethod,
-                    runtimeProfileResolver: address => obstruction == "profile-veto" ? veto : context.GetRuntimeProfile(address)));
+                    runtimeSupportResolver: address => obstruction == "profile-veto" ? veto : context.GetRuntimeSupport(address)));
                 Assert.Equal(
                     originalFrames.Select(frame => (frame.CodeAddress, frame.Method, frame.Context, frame.SegmentFrameIndex)),
                     frames.Select(frame => (frame.CodeAddress, frame.Method, frame.Context, frame.SegmentFrameIndex)));
@@ -4238,7 +4246,7 @@ namespace TraceEventTests
                         original.SyncClassification, obstruction == "wrong-box" ? frames[0].Method : original.BoxedStateMachineMethod),
                         obstruction == "wrong-context" ? null : original.Context);
                 }
-                var veto = new RejectingCompletionChainProfile();
+                var veto = new RejectingCompletionChainSupport();
                 var diagnostics = new AsyncProfilerCallStackDiagnostics();
                 var stitchingState = new AsyncProfilerCallStackStitchingState { ProcessedCallStackCount = 1 };
                 AsyncProfilerStitchedFrame[] originalFrames = frames.ToArray();
@@ -4248,7 +4256,7 @@ namespace TraceEventTests
                     context.TraceLog, context.Segments,
                     context.TimestampQpc - (obstruction == "future-completions" ? 10 : 0),
                     context.ClassifyBoundary, stitchingState, diagnostics, frames, methodOf: context.GetMethod,
-                    runtimeProfileResolver: address => obstruction == "profile-veto" ? veto : context.GetRuntimeProfile(address)));
+                    runtimeSupportResolver: address => obstruction == "profile-veto" ? veto : context.GetRuntimeSupport(address)));
                 Assert.Equal(
                     originalFrames.Select(frame => (frame.CodeAddress, frame.Method, frame.Context, frame.SegmentFrameIndex)),
                     frames.Select(frame => (frame.CodeAddress, frame.Method, frame.Context, frame.SegmentFrameIndex)));
@@ -4323,7 +4331,7 @@ namespace TraceEventTests
                     frame.Origin == AsyncProfilerStitchedFrameOrigin.V1CompletedBody ||
                     frame.Origin == AsyncProfilerStitchedFrameOrigin.V1CompletionReturn);
                 CodeAddressIndex anchor = context.Frames.Single(frame =>
-                    frame.SyncClassification.Helper == HelperKind.SchedulerEntry).CodeAddress;
+                    frame.SyncClassification.RuntimeKind == RuntimeFrameKind.SchedulerEntry).CodeAddress;
                 Assert.False(context.HasVerifiedDispatchEntry(outer, anchor));
                 Assert.False(context.HasVerifiedV1CompletionAnchor(outer, anchor, allowCompletionUnwind: true));
                 Assert.Equal(enableNormalization || enableInfrastructureCleanup,
@@ -4422,13 +4430,13 @@ namespace TraceEventTests
                     HasConsistentPhysicalAlignment = obstruction != "missing-boundary" && obstruction != "adjacency",
                     UnresolvedV1CompletionCount = obstruction == "ambiguous" ? 1 : 0,
                 };
-                var profile = new AsyncProfilerRejectRuntimeBridgeProfile();
+                var support = new AsyncProfilerRejectRuntimeBridgeSupport();
                 var state = new AsyncProfilerCallStackTransformState(
                     context.TraceLog, context.Segments,
                     obstruction == "future-completion" ? context.Segments[1].StartQpc - 1 : context.TimestampQpc,
                     context.ClassifyBoundary, stitchingState, diagnostics, frames,
-                    runtimeProfileResolver: obstruction == "profile-veto"
-                        ? (Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile>)(ca => profile) : null,
+                    runtimeSupportResolver: obstruction == "profile-veto"
+                        ? (Func<CodeAddressIndex, AsyncProfilerRuntimeSupport>)(ca => support) : null,
                     segmentPlacements: obstruction == "missing-placement" ? null : placements);
                 CodeAddressIndex bridge = frames[bridgeStart].CodeAddress;
                 Assert.Equal(obstruction == "profile-veto",
@@ -4471,7 +4479,7 @@ namespace TraceEventTests
                 AsyncProfilerStitchedFrame unwind = Assert.Single(context.Frames.Where(
                     frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.V1CompletionReturn));
                 CodeAddressIndex bridge = context.Frames.Single(frame =>
-                    frame.SyncClassification.Helper == HelperKind.SchedulerEntry).CodeAddress;
+                    frame.SyncClassification.RuntimeKind == RuntimeFrameKind.SchedulerEntry).CodeAddress;
                 Assert.False(context.HasVerifiedDispatchEntry(unwind.Context, bridge));
                 Assert.False(context.HasVerifiedV1CompletionAnchor(unwind.Context, bridge));
                 Assert.True(context.HasVerifiedV1CompletionAnchor(unwind.Context, bridge, allowCompletionUnwind: true));
@@ -4555,11 +4563,11 @@ namespace TraceEventTests
                     HasConsistentPhysicalAlignment = obstruction != "missing-boundary" && obstruction != "adjacency",
                     UnresolvedV1CompletionCount = obstruction == "ambiguous" ? 1 : 0,
                 };
-                var profile = new AsyncProfilerRejectRuntimeBridgeProfile();
+                var support = new AsyncProfilerRejectRuntimeBridgeSupport();
                 var state = new AsyncProfilerCallStackTransformState(
                     context.TraceLog, context.Segments, context.TimestampQpc, context.ClassifyBoundary, stitchingState, diagnostics, frames,
-                    runtimeProfileResolver: obstruction == "profile-veto"
-                        ? (Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile>)(ca => profile) : null,
+                    runtimeSupportResolver: obstruction == "profile-veto"
+                        ? (Func<CodeAddressIndex, AsyncProfilerRuntimeSupport>)(ca => support) : null,
                     segmentPlacements: obstruction == "missing-placement" ? null : placements);
                 CodeAddressIndex bridge = frames.First(frame => frame.Context == null).CodeAddress;
                 Assert.Equal(obstruction == "profile-veto",
@@ -5549,7 +5557,7 @@ namespace TraceEventTests
                     Assert.Equal(first.SymbolName, context.TraceLog.CodeAddresses[actual[0].CodeAddress].FullMethodName);
                     if (!nativeAlias)
                     {
-                        Assert.Same(context.GetRuntimeProfile(actual[0].CodeAddress), context.GetRuntimeProfile(actual[1].CodeAddress));
+                        Assert.Same(context.GetRuntimeSupport(actual[0].CodeAddress), context.GetRuntimeSupport(actual[1].CodeAddress));
                         Assert.NotEqual(context.GetHostModuleOwner(actual[0].CodeAddress), context.GetHostModuleOwner(actual[1].CodeAddress));
                     }
                 },
@@ -5713,7 +5721,7 @@ namespace TraceEventTests
             if (changedLayout)
             {
                 UseExtendedRuntimeLayouts(scenario);
-                Frame helper = Frame.CoreLib(AsyncProfilerExtendedRuntimeLayoutProfile.HelperName, "LayoutHelper");
+                Frame helper = Frame.CoreLib(AsyncProfilerExtendedRuntimeLayoutSupport.HelperName, "LayoutHelper");
                 Func<Frame[], Frame[]> extend = frames => frames.SelectMany(frame =>
                     frame.Key == awaitBox.Key ? new[] { frame, helper } :
                     frame.Key == builderStart.Key ? new[] { helper, frame } : new[] { frame }).ToArray();
@@ -5807,7 +5815,7 @@ namespace TraceEventTests
             if (layout == "extended")
             {
                 UseExtendedRuntimeLayouts(scenario);
-                Frame helper = Frame.CoreLib(AsyncProfilerExtendedRuntimeLayoutProfile.HelperName, "LayoutHelper");
+                Frame helper = Frame.CoreLib(AsyncProfilerExtendedRuntimeLayoutSupport.HelperName, "LayoutHelper");
                 Func<Frame[], Frame[]> extend = frames => frames.SelectMany(frame =>
                     frame.Label == "AwaitUnsafeOnCompleted(generic)" ? new[] { frame, helper } :
                     frame.Label == "AsyncMethodBuilderCore.Start" ? new[] { helper, frame } : new[] { frame }).ToArray();
@@ -6500,7 +6508,7 @@ namespace TraceEventTests
             string boxedType = guard == "unknown-type" ? "OtherScenario+<ParentAsync>d__12" : "Scenario+<ParentAsync>d__12";
             string member = guard == "unknown-member" ? "UnknownMoveNext" : "InstrumentedMoveNext";
             Frame leaf = Frame.Library(
-                guard == "foreign-module" ? "OtherLib" : AsyncProfilerRuntimeRuleProfile.HostModuleName,
+                guard == "foreign-module" ? "OtherLib" : AsyncProfilerRuntimeSupport.HostModuleName,
                 "System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1+AsyncStateMachineBox`1[System.Int64," + boxedType + "]." + member + "()",
                 "ParentBoxLeaf");
             Frame[] prefix = { leaf };
@@ -6886,8 +6894,8 @@ namespace TraceEventTests
         [InlineData(false, false)]
         [InlineData(true, false)]
         [InlineData(true, true)]
-        public void NestedAsync_ReentrantHandoff_RequiresSameCapturedRuntimeOwnerAndProfile(
-            bool nativeAlias, bool differentProfile)
+        public void NestedAsync_ReentrantHandoff_RequiresSameCapturedRuntimeOwnerAndSupport(
+            bool nativeAlias, bool differentSupport)
         {
             Frame inner = Frame.App("Scenario.InnerAsync");
             Frame outer = Frame.App("Scenario.OuterAsync");
@@ -6898,7 +6906,7 @@ namespace TraceEventTests
                 "System.Threading.Tasks.Task.TrySetResult", "RuntimeB.TrySetResult");
             Frame[] bridge = { first, second };
             Frame[] root = { Frame.ThreadPoolDispatch, Frame.WorkerThreadStart };
-            bool fold = nativeAlias && !differentProfile;
+            bool fold = nativeAlias && !differentSupport;
             var scenario = new StitchScenario
             {
                 Sync = new[]
@@ -6932,11 +6940,11 @@ namespace TraceEventTests
                     }
                 },
             };
-            if (differentProfile)
+            if (differentSupport)
             {
-                scenario.RuntimeProfileForModule = module =>
+                scenario.RuntimeSupportForModule = module =>
                     string.Equals(module?.FilePath, second.ModuleName, StringComparison.OrdinalIgnoreCase)
-                        ? AsyncProfilerRuntimeRuleProfile.Common : AsyncProfilerRuntimeRuleProfile.CoreClr11;
+                        ? AsyncProfilerRuntimeSupport.Common : AsyncProfilerRuntimeSupport.CoreClr11;
             }
 
             scenario.AssertProductionStitch();
@@ -7346,16 +7354,16 @@ namespace TraceEventTests
         [InlineData("entry")]
         [InlineData("registration")]
         [InlineData("cleanup-policy")]
-        public void DispatcherCreation_BoundedRegistrationRespectsProfileVetoes(string rejection)
+        public void DispatcherCreation_BoundedRegistrationRespectsSupportVetoes(string rejection)
         {
             StitchScenario scenario = CreateBoundedDispatcherCreationScenario(true, 4, 1, false);
-            AsyncProfilerRuntimeRuleProfile profile = rejection == "entry"
-                ? (AsyncProfilerRuntimeRuleProfile)new RejectingProfilerEntryProfile()
+            AsyncProfilerRuntimeSupport support = rejection == "entry"
+                ? (AsyncProfilerRuntimeSupport)new RejectingProfilerEntrySupport()
                 : rejection == "registration"
-                    ? (AsyncProfilerRuntimeRuleProfile)new RejectingAwaitRegistrationProfile()
-                    : new DisabledDispatcherCreationCleanupProfile();
-            scenario.RuntimeProfileForModule = module => AsyncProfilerRuntimeRuleProfileCache.IsHostModule(module)
-                ? profile : AsyncProfilerRuntimeRuleProfile.Common;
+                    ? (AsyncProfilerRuntimeSupport)new RejectingAwaitRegistrationSupport()
+                    : new DisabledDispatcherCreationCleanupSupport();
+            scenario.RuntimeSupportForModule = module => AsyncProfilerRuntimeResolver.IsHostModule(module)
+                ? support : AsyncProfilerRuntimeSupport.Common;
             scenario.ExpectedStitched = scenario.ExpectedWithoutInfrastructureCleanup.Take(7)
                 .Concat(scenario.ExpectedStitched.Skip(3)).ToArray();
             scenario.ExpectedDiagnostics.AsyncInfrastructureFramesCollapsed = 10;
@@ -7807,12 +7815,12 @@ namespace TraceEventTests
         }
 
         [Fact]
-        public void V1AwaitRegistrationOwnership_RespectsProfileRejection()
+        public void V1AwaitRegistrationOwnership_RespectsSupportRejection()
         {
             StitchScenario scenario = CreateV1AwaitRegistrationScenario();
-            var profile = new RejectingAwaitRegistrationProfile();
-            scenario.RuntimeProfileForModule = module => AsyncProfilerRuntimeRuleProfileCache.IsHostModule(module)
-                ? profile : AsyncProfilerRuntimeRuleProfile.Common;
+            var support = new RejectingAwaitRegistrationSupport();
+            scenario.RuntimeSupportForModule = module => AsyncProfilerRuntimeResolver.IsHostModule(module)
+                ? support : AsyncProfilerRuntimeSupport.Common;
             scenario.ExpectedStitched = scenario.Sync.Take(6).Concat(scenario.ExpectedStitched.Skip(1)).ToArray();
             scenario.ExpectedDiagnostics.AsyncInfrastructureFramesCollapsed = 10;
             scenario.ExpectedDiagnostics.ProfilerEnvelopeFramesCollapsed = 0;
@@ -8046,15 +8054,15 @@ namespace TraceEventTests
                     UnresolvedV1CompletionCount = 1,
                     HasConsistentPhysicalAlignment = obstruction != "adjacency",
                 };
-                var veto = new RejectingCompletionChainProfile();
+                var veto = new RejectingCompletionChainSupport();
                 AsyncProfilerStitchedFrame[] originalFrames = frames.ToArray();
                 new AsyncProfilerV1PresentationTransformPass().Apply(new AsyncProfilerCallStackTransformState(
                     context.TraceLog, context.Segments, context.TimestampQpc, context.ClassifyBoundary,
                     stitchingState, diagnostics, frames, methodOf: context.GetMethod,
-                    runtimeProfileResolver: address =>
+                    runtimeSupportResolver: address =>
                         obstruction == "profile-veto" ? veto :
                         obstruction == "cross-profile" && address == context.Frames[builder].CodeAddress
-                            ? AsyncProfilerRuntimeRuleProfile.Common : context.GetRuntimeProfile(address)));
+                            ? AsyncProfilerRuntimeSupport.Common : context.GetRuntimeSupport(address)));
                 Assert.Equal(1, diagnostics.V1CompletionAlignmentAmbiguous);
                 Assert.Equal(
                     originalFrames.Select(frame => (frame.CodeAddress, frame.Method, frame.Context, frame.SegmentFrameIndex)),
@@ -8182,7 +8190,7 @@ namespace TraceEventTests
                     end--;
                 }
                 AsyncProfilerStitchedFrame root = frames[end - 1];
-                Assert.True(state.GetRuntimeProfile(root.CodeAddress).TryGetOptionalSequenceKind(
+                Assert.True(state.GetRuntimeSupport(root.CodeAddress).TryGetOptionalSequenceKind(
                     AsyncProfilerMethodNames.NormalizeMethodName(
                         context.TraceLog.CodeAddresses[root.CodeAddress].FullMethodName),
                     root.SyncClassification, out var sequence));
@@ -8277,10 +8285,10 @@ namespace TraceEventTests
                 AsyncProfilerStitchedFrame interior = frames[obstruction == "missing-anchor" ? 1 : 2];
                 var state = CreateOptionalInfrastructureTransformState(context, frames,
                     includePlacement: obstruction != "missing-placement",
-                    profileResolver: obstruction == "profile"
-                        ? (Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile>)(ca =>
+                    supportResolver: obstruction == "profile"
+                        ? (Func<CodeAddressIndex, AsyncProfilerRuntimeSupport>)(ca =>
                             ca == interior.CodeAddress
-                                ? AsyncProfilerRuntimeRuleProfile.CoreClr11 : AsyncProfilerRuntimeRuleProfile.Common) : null);
+                                ? AsyncProfilerRuntimeSupport.CoreClr11 : AsyncProfilerRuntimeSupport.Common) : null);
                 if (obstruction == "missing-boundary")
                 {
                     state.StitchingState.HasConsistentPhysicalAlignment = false;
@@ -8311,7 +8319,7 @@ namespace TraceEventTests
         [InlineData("value-result")]
         [InlineData("task-registration")]
         [InlineData("pooled-registration")]
-        public void OptionalAsyncInfrastructure_DoesNotChangeStrictMatchingAndHonorsProfileVetoes(string layout)
+        public void OptionalAsyncInfrastructure_DoesNotChangeStrictMatchingAndHonorsSupportVetoes(string layout)
         {
             StitchScenario scenario = CreateOptionalAsyncInfrastructureScenario(layout, false, cleanup: false);
             scenario.AssertTransformContext = context =>
@@ -8327,15 +8335,15 @@ namespace TraceEventTests
                     root = frames[end - 1];
                     rootName = context.TraceLog.CodeAddresses[root.CodeAddress].FullMethodName;
                 }
-                Assert.True(state.GetRuntimeProfile(root.CodeAddress).TryGetOptionalSequenceKind(
+                Assert.True(state.GetRuntimeSupport(root.CodeAddress).TryGetOptionalSequenceKind(
                     AsyncProfilerMethodNames.NormalizeMethodName(rootName), root.SyncClassification, out var sequence));
                 Assert.False(state.MatchRuntimeSequence(sequence, 1, end).IsMatch);
                 AsyncProfilerRuntimeSequenceMatch match = state.MatchRuntimeSequence(
                     sequence, 1, end, allowRuntimeInteriors: true);
                 Assert.True(match.IsMatch);
                 Assert.Equal(end - 1, match.Length);
-                var profile = new RejectingOptionalInfrastructureProfile();
-                state = CreateOptionalInfrastructureTransformState(context, frames, profileResolver: ca => profile);
+                var support = new RejectingOptionalInfrastructureSupport();
+                state = CreateOptionalInfrastructureTransformState(context, frames, supportResolver: ca => support);
                 Assert.True(state.MatchRuntimeSequence(sequence, 1, end, allowRuntimeInteriors: true).IsRejected);
                 new AsyncProfilerInfrastructureCleanupTransformPass().Apply(state);
                 Assert.Equal(context.Frames, frames);
@@ -8368,7 +8376,7 @@ namespace TraceEventTests
                     end--;
                 }
                 AsyncProfilerStitchedFrame root = frames[end - 1];
-                Assert.True(state.GetRuntimeProfile(root.CodeAddress).TryGetOptionalSequenceKind(
+                Assert.True(state.GetRuntimeSupport(root.CodeAddress).TryGetOptionalSequenceKind(
                     AsyncProfilerMethodNames.NormalizeMethodName(
                         context.TraceLog.CodeAddresses[root.CodeAddress].FullMethodName),
                     root.SyncClassification, out var sequence));
@@ -8554,7 +8562,7 @@ namespace TraceEventTests
         }
 
         [Fact]
-        public void V1CompletionMachinery_RespectsCompletionChainProfileRejection()
+        public void V1CompletionMachinery_RespectsCompletionChainSupportRejection()
         {
             StitchScenario scenario = CreateV1CompletionMachineryScenario();
             scenario.EnableInfrastructureCleanup = false;
@@ -8562,7 +8570,7 @@ namespace TraceEventTests
             scenario.ExpectedDiagnostics.AsyncInfrastructureFramesCollapsed = 0;
             scenario.ExpectedDiagnostics.ProfilerEnvelopeFramesCollapsed = 0;
             scenario.ExpectedDiagnostics.RuntimeResumptionBridgeFramesCollapsed = 0;
-            var profile = new RejectingCompletionChainProfile();
+            var support = new RejectingCompletionChainSupport();
             scenario.AssertTransformContext = context =>
             {
                 var frames = context.Frames.ToList();
@@ -8574,8 +8582,8 @@ namespace TraceEventTests
                 var diagnostics = new AsyncProfilerCallStackDiagnostics { SegmentsProcessed = 1 };
                 var state = new AsyncProfilerCallStackTransformState(
                     context.TraceLog, context.Segments, context.TimestampQpc, context.ClassifyBoundary, context.StitchingState.Copy(), diagnostics, frames,
-                    runtimeProfileResolver: ca => context.GetHostModuleOwner(ca) != ModuleFileIndex.Invalid
-                        ? profile : AsyncProfilerRuntimeRuleProfile.Common,
+                    runtimeSupportResolver: ca => context.GetHostModuleOwner(ca) != ModuleFileIndex.Invalid
+                        ? support : AsyncProfilerRuntimeSupport.Common,
                     segmentPlacements: placements);
                 CodeAddressIndex helper = frames.Single(frame =>
                     frame.SyncFrameKind == AsyncProfilerStitchSyncFrameKind.V1MethodCompletion).CodeAddress;
@@ -8586,8 +8594,8 @@ namespace TraceEventTests
                 Assert.Equal(1, diagnostics.RuntimeResumptionBridgeFramesCollapsed);
                 foreach (FrameClassification kind in new FrameClassification[]
                 {
-                    HelperKind.TaskContinuations,
-                    HelperKind.TaskResult,
+                    RuntimeFrameKind.TaskContinuations,
+                    RuntimeFrameKind.TaskResult,
                     AsyncProfilerStitchSyncFrameKind.V1MethodCompletion,
                 })
                 {
@@ -9446,9 +9454,9 @@ namespace TraceEventTests
             scenario.ExpectedDiagnostics.ProfilerEnvelopeFramesCollapsed = 0;
             if (obstruction == "profile-veto")
             {
-                var profile = new RejectingProfilerEntryProfile();
-                scenario.RuntimeProfileForModule = module => AsyncProfilerRuntimeRuleProfileCache.IsHostModule(module)
-                    ? profile : AsyncProfilerRuntimeRuleProfile.Common;
+                var support = new RejectingProfilerEntrySupport();
+                scenario.RuntimeSupportForModule = module => AsyncProfilerRuntimeResolver.IsHostModule(module)
+                    ? support : AsyncProfilerRuntimeSupport.Common;
             }
 
             scenario.AssertProductionStitch();
@@ -10316,7 +10324,7 @@ namespace TraceEventTests
                     frame.Context == null &&
                     frame.Presentation == AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames));
                 Assert.Equal(AsyncProfilerStitchedFrameOrigin.Sync, marker.Origin);
-                Assert.Equal(HelperKind.TaskContinuations, marker.SyncClassification);
+                Assert.Equal(RuntimeFrameKind.TaskContinuations, marker.SyncClassification);
                 Assert.Equal("System.Threading.Tasks.Task.RunContinuations",
                     context.TraceLog.CodeAddresses[marker.CodeAddress].FullMethodName);
                 Assert.True(context.Diagnostics.RuntimeResumptionBridgeFramesCollapsed > 0);
@@ -10391,9 +10399,9 @@ namespace TraceEventTests
             }
             else if (obstruction == "profile-veto")
             {
-                var profile = new AsyncProfilerRejectRuntimeBridgeProfile();
-                scenario.RuntimeProfileForModule = module => AsyncProfilerRuntimeRuleProfileCache.IsHostModule(module)
-                    ? profile : AsyncProfilerRuntimeRuleProfile.Common;
+                var support = new AsyncProfilerRejectRuntimeBridgeSupport();
+                scenario.RuntimeSupportForModule = module => AsyncProfilerRuntimeResolver.IsHostModule(module)
+                    ? support : AsyncProfilerRuntimeSupport.Common;
             }
             else
             {
@@ -10845,8 +10853,8 @@ namespace TraceEventTests
                     data.ProviderGuid == SampleProfilerTraceEventParser.ProviderGuid &&
                     data.TryGetCallStackIndex(out _, out long timestampQpc) && timestampQpc == context.TimestampQpc);
                 Assert.True(sample.TryGetCallStackIndex(out CallStackIndex physicalStack, out _));
-                var profiles = new AsyncProfilerRuntimeRuleProfileCache(log.ModuleFiles);
-                var boundaries = new AsyncProfilerCallStackStitchBoundaryCache(log.CodeAddresses, profiles);
+                var runtimeResolver = new AsyncProfilerRuntimeResolver(log.ModuleFiles);
+                var boundaries = new AsyncProfilerCallStackStitchBoundaryCache(log.CodeAddresses, runtimeResolver);
                 var sync = new List<AsyncProfilerStitchSyncFrame>
                 {
                     new AsyncProfilerStitchSyncFrame(target, canonical),
@@ -10854,9 +10862,9 @@ namespace TraceEventTests
                 for (CallStackIndex stack = physicalStack; stack != CallStackIndex.Invalid; stack = log.CallStacks.Caller(stack))
                 {
                     CodeAddressIndex address = log.CallStacks.CodeAddressIndex(stack);
-                    FrameClassification kind = boundaries.GetRuntimeProfile(address).ClassifySynchronousFrame(
+                    FrameClassification kind = boundaries.GetRuntimeSupport(address).ClassifySynchronousFrame(
                         AsyncProfilerMethodNames.NormalizeMethodName(log.CodeAddresses[address].FullMethodName),
-                        profiles.IsHostModule(log.CodeAddresses.ModuleFileIndex(address)));
+                        runtimeResolver.IsHostModule(log.CodeAddresses.ModuleFileIndex(address)));
                     sync.Add(new AsyncProfilerStitchSyncFrame(address, methodOf(address), kind));
                 }
 
@@ -10866,8 +10874,8 @@ namespace TraceEventTests
                     sync, context.Segments, context.TimestampQpc, boundaries.Classify,
                     (process, kind, timestampQpc) => false, callStack.ProcessIndex, methodOf, false, frames, diagnostics,
                     stitchingState: new AsyncProfilerCallStackStitchingState(),
-                    placements: null, runtimeProfileResolver: boundaries.GetRuntimeProfile,
-                    runtimeTraceLog: log, runtimeProfiles: profiles);
+                    placements: null, runtimeSupportResolver: boundaries.GetRuntimeSupport,
+                    runtimeTraceLog: log, runtimeResolver: runtimeResolver);
                 Assert.DoesNotContain(frames, frame =>
                     frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget ||
                     frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncCurrent);
@@ -10932,7 +10940,7 @@ namespace TraceEventTests
                 else if (obstruction == "managed-image")
                 {
                     native.managedModule = log.ModuleFiles.First(module => string.Equals(
-                        module.Name, AsyncProfilerRuntimeRuleProfile.HostModuleName, StringComparison.OrdinalIgnoreCase));
+                        module.Name, AsyncProfilerRuntimeSupport.HostModuleName, StringComparison.OrdinalIgnoreCase));
                 }
                 else if (obstruction == "missing-image")
                 {
@@ -12331,7 +12339,7 @@ namespace TraceEventTests
 
         private static AsyncProfilerCallStackTransformState CreateOptionalInfrastructureTransformState(
             AsyncProfilerCallStackTransformState context, List<AsyncProfilerStitchedFrame> frames,
-            bool includePlacement = true, Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile> profileResolver = null)
+            bool includePlacement = true, Func<CodeAddressIndex, AsyncProfilerRuntimeSupport> supportResolver = null)
         {
             AsyncProfilerCallStack activation = Assert.Single(context.Segments);
             CodeAddressIndex dispatch = Enumerable.Range(0, context.TraceLog.CodeAddresses.Count)
@@ -12340,7 +12348,7 @@ namespace TraceEventTests
             return new AsyncProfilerCallStackTransformState(
                 context.TraceLog, context.Segments, context.TimestampQpc, context.ClassifyBoundary,
                 context.StitchingState.Copy(),                 new AsyncProfilerCallStackDiagnostics(), frames,
-                runtimeProfileResolver: profileResolver,
+                runtimeSupportResolver: supportResolver,
                 segmentPlacements: includePlacement
                     ? new[] { new AsyncProfilerCallStackPlacement(activation, 0, frames.Count, dispatch: dispatch) } : null);
         }
@@ -12663,7 +12671,7 @@ namespace TraceEventTests
                 foreach (TraceModuleFile module in log.ModuleFiles)
                 {
                     if (module.Name == "coreclr" || module.Name == "clrjit" ||
-                        string.Equals(module.Name, AsyncProfilerRuntimeRuleProfile.HostModuleName, StringComparison.OrdinalIgnoreCase))
+                        string.Equals(module.Name, AsyncProfilerRuntimeSupport.HostModuleName, StringComparison.OrdinalIgnoreCase))
                     {
                         module.fileName = @"C:\runtime\" + module.Name + ".dll";
                     }
@@ -12733,9 +12741,9 @@ namespace TraceEventTests
 
         private static void UseExtendedCompletionLayout(StitchScenario scenario)
         {
-            var profile = new AsyncProfilerExtendedCompletionRuntimeProfile();
-            scenario.RuntimeProfileForModule = module => AsyncProfilerRuntimeRuleProfileCache.IsHostModule(module)
-                ? profile : AsyncProfilerRuntimeRuleProfile.Common;
+            var support = new AsyncProfilerExtendedCompletionRuntimeSupport();
+            scenario.RuntimeSupportForModule = module => AsyncProfilerRuntimeResolver.IsHostModule(module)
+                ? support : AsyncProfilerRuntimeSupport.Common;
             scenario.Sync = ExpandCompletionPair(scenario.Sync);
             if (scenario.ExpectedWithoutInfrastructureCleanup != null)
             {
@@ -12763,10 +12771,10 @@ namespace TraceEventTests
 
         private static void UseExtendedRuntimeLayouts(StitchScenario scenario)
         {
-            var profile = new AsyncProfilerExtendedRuntimeLayoutProfile();
-            scenario.RuntimeProfileForModule = module => AsyncProfilerRuntimeRuleProfileCache.IsHostModule(module)
-                ? profile : AsyncProfilerRuntimeRuleProfile.Common;
-            Frame anchor = Frame.CoreLib(AsyncProfilerExtendedRuntimeLayoutProfile.AnchorName, "ChangedDispatch");
+            var support = new AsyncProfilerExtendedRuntimeLayoutSupport();
+            scenario.RuntimeSupportForModule = module => AsyncProfilerRuntimeResolver.IsHostModule(module)
+                ? support : AsyncProfilerRuntimeSupport.Common;
+            Frame anchor = Frame.CoreLib(AsyncProfilerExtendedRuntimeLayoutSupport.AnchorName, "ChangedDispatch");
             Func<Frame[], Frame[]> replace = frames => frames?.Select(frame =>
                 frame.Key == Frame.ThreadPoolDispatch.Key ? anchor : frame).ToArray();
             scenario.Sync = replace(scenario.Sync);
@@ -12785,12 +12793,12 @@ namespace TraceEventTests
                     ? new[]
                     {
                         frame,
-                        Frame.CoreLib(AsyncProfilerExtendedCompletionRuntimeProfile.InjectedHelperName, "CompletionHelper"),
+                        Frame.CoreLib(AsyncProfilerExtendedCompletionRuntimeSupport.InjectedHelperName, "CompletionHelper"),
                     }
                     : new[]
                     {
                         frame.Label == "Task.TrySetResult"
-                            ? Frame.CoreLib(AsyncProfilerExtendedCompletionRuntimeProfile.RenamedCompletionName, "Task.TryComplete")
+                            ? Frame.CoreLib(AsyncProfilerExtendedCompletionRuntimeSupport.RenamedCompletionName, "Task.TryComplete")
                             : frame,
                     }).ToArray();
 
@@ -12799,7 +12807,7 @@ namespace TraceEventTests
         {
             TraceProcess process = log.Processes.First(p => p.ProcessID == 1234);
             TraceModuleFile host = log.ModuleFiles.FirstOrDefault(module =>
-                string.Equals(module.Name, AsyncProfilerRuntimeRuleProfile.HostModuleName, StringComparison.OrdinalIgnoreCase));
+                string.Equals(module.Name, AsyncProfilerRuntimeSupport.HostModuleName, StringComparison.OrdinalIgnoreCase));
             if (host == null)
             {
                 return null;
@@ -12845,9 +12853,9 @@ namespace TraceEventTests
             #endregion
         }
 
-        private sealed class RejectingOptionalInfrastructureProfile : AsyncProfilerRuntimeRuleProfile
+        private sealed class RejectingOptionalInfrastructureSupport : AsyncProfilerRuntimeSupport
         {
-            public RejectingOptionalInfrastructureProfile() : base("Rejected optional infrastructure") { }
+            public RejectingOptionalInfrastructureSupport() : base("Rejected optional infrastructure") { }
 
             protected override AsyncProfilerRuntimeSequenceMatch MatchOptionalTaskCompletion(
                 AsyncProfilerCallStackTransformState context, int start, int end)
@@ -12878,9 +12886,9 @@ namespace TraceEventTests
             }
         }
 
-        private sealed class RejectingCompletionChainProfile : AsyncProfilerRuntimeRuleProfile
+        private sealed class RejectingCompletionChainSupport : AsyncProfilerRuntimeSupport
         {
-            public RejectingCompletionChainProfile() : base("Rejected completion chain") { }
+            public RejectingCompletionChainSupport() : base("Rejected completion chain") { }
 
             protected override AsyncProfilerRuntimeSequenceMatch MatchTaskCompletionChain(
                 AsyncProfilerCallStackTransformState context, int start, int end)
@@ -12891,27 +12899,27 @@ namespace TraceEventTests
             }
         }
 
-        private sealed class RejectingAwaitRegistrationProfile : AsyncProfilerRuntimeRuleProfile
+        private sealed class RejectingAwaitRegistrationSupport : AsyncProfilerRuntimeSupport
         {
-            public RejectingAwaitRegistrationProfile() : base("Rejected await registration") { }
+            public RejectingAwaitRegistrationSupport() : base("Rejected await registration") { }
 
             protected override AsyncProfilerRuntimeSequenceMatch MatchV1AwaitRegistration(
                 AsyncProfilerCallStackTransformState context, int start, int end) =>
                 start < end ? AsyncProfilerRuntimeSequenceMatch.Reject(end - start) : default;
         }
 
-        private sealed class RejectingProfilerEntryProfile : AsyncProfilerRuntimeRuleProfile
+        private sealed class RejectingProfilerEntrySupport : AsyncProfilerRuntimeSupport
         {
-            public RejectingProfilerEntryProfile() : base("Rejected profiler entry") { }
+            public RejectingProfilerEntrySupport() : base("Rejected profiler entry") { }
 
             protected override AsyncProfilerRuntimeSequenceMatch MatchProfilerEntry(
                 AsyncProfilerCallStackTransformState context, int start, int end) =>
                 AsyncProfilerRuntimeSequenceMatch.Reject(end - start);
         }
 
-        private sealed class DisabledDispatcherCreationCleanupProfile : AsyncProfilerRuntimeRuleProfile
+        private sealed class DisabledDispatcherCreationCleanupSupport : AsyncProfilerRuntimeSupport
         {
-            public DisabledDispatcherCreationCleanupProfile() : base("Disabled dispatcher creation cleanup") { }
+            public DisabledDispatcherCreationCleanupSupport() : base("Disabled dispatcher creation cleanup") { }
 
             public override bool IsOptionalInfrastructureFrame(
                 AsyncProfilerStitchedFrame frame, AsyncProfilerCallStackStitchBoundaryKind boundary) =>
@@ -12970,8 +12978,8 @@ namespace TraceEventTests
             public bool VerifyPublicBuilder { get; set; } = true;
             public Action<TraceLog> ConfigureTraceLog { get; set; } =
                 log => ConfigureCapturedRuntime(log, "11.0.0");
-            public Func<TraceModuleFile, AsyncProfilerRuntimeRuleProfile> RuntimeProfileForModule { get; set; }
-            public AsyncProfilerRuntimeRuleProfile ExpectedRuntimeProfile { get; set; }
+            public Func<TraceModuleFile, AsyncProfilerRuntimeSupport> RuntimeSupportForModule { get; set; }
+            public AsyncProfilerRuntimeSupport ExpectedRuntimeSupport { get; set; }
 
             public void AssertProductionStitch()
             {
@@ -13074,7 +13082,7 @@ namespace TraceEventTests
                         AssertStitchedStackSource?.Invoke(stitchedStackSource);
                         AssertOutputs?.Invoke(syncOutput, stitchedOutput);
                         AssertPublicApi?.Invoke(traceLog, etlxPath);
-                        if (RuntimeProfileForModule == null && VerifyPublicBuilder)
+                        if (RuntimeSupportForModule == null && VerifyPublicBuilder)
                         {
                             AssertPublicBuilderEquivalence(traceLog);
                         }
@@ -13589,7 +13597,7 @@ namespace TraceEventTests
                     foreach (ModuleMapping mapping in mappings.Values)
                     {
                         if (IncludeCoreLibUnloadRundown &&
-                            mapping.Name == AsyncProfilerRuntimeRuleProfile.HostModuleName)
+                            mapping.Name == AsyncProfilerRuntimeSupport.HostModuleName)
                         {
                             continue;
                         }
@@ -13605,7 +13613,7 @@ namespace TraceEventTests
                             continue;
                         }
                         if (IncludeCoreLibUnloadRundown &&
-                            frame.ModuleName == AsyncProfilerRuntimeRuleProfile.HostModuleName)
+                            frame.ModuleName == AsyncProfilerRuntimeSupport.HostModuleName)
                         {
                             continue;
                         }
@@ -13673,7 +13681,7 @@ namespace TraceEventTests
                     if (IncludeCoreLibUnloadRundown)
                     {
                         Frame[] coreLib = InputFrames().Where(frame =>
-                            frame.ModuleName == AsyncProfilerRuntimeRuleProfile.HostModuleName).ToArray();
+                            frame.ModuleName == AsyncProfilerRuntimeSupport.HostModuleName).ToArray();
                         foreach (Frame frame in coreLib.Where(ResolvedBeforeCoreLibUnload))
                         {
                             w.WriteEventBlob(EventOptions(10, ++sequence, StartQpc + 60),
@@ -13960,25 +13968,25 @@ namespace TraceEventTests
                 AsyncCallStackTransforms transforms, AsyncProfilerCallStackTransformPipeline pipeline,
                 bool enableNormalization, bool enableInfrastructureCleanup)
             {
-                if (ExpectedRuntimeProfile != null)
+                if (ExpectedRuntimeSupport != null)
                 {
                     pipeline.AddCustomTransform(context =>
                     {
-                        Assert.Same(ExpectedRuntimeProfile, context.RuntimeProfile);
+                        Assert.Same(ExpectedRuntimeSupport, context.RuntimeSupport);
                         var standalone = new AsyncProfilerCallStackTransformState(context.TraceLog, context.Segments,
                             context.TimestampQpc, context.ClassifyBoundary, context.StitchingState.Copy(), new AsyncProfilerCallStackDiagnostics(),
                             new List<AsyncProfilerStitchedFrame>(context.Frames));
-                        Assert.Same(ExpectedRuntimeProfile, standalone.RuntimeProfile);
+                        Assert.Same(ExpectedRuntimeSupport, standalone.RuntimeSupport);
                     });
                 }
-                transforms.EnableNormalization = RuntimeProfileForModule == null && enableNormalization;
-                transforms.EnableInfrastructureCleanup = RuntimeProfileForModule == null && enableInfrastructureCleanup;
-                if (RuntimeProfileForModule == null)
+                transforms.EnableNormalization = RuntimeSupportForModule == null && enableNormalization;
+                transforms.EnableInfrastructureCleanup = RuntimeSupportForModule == null && enableInfrastructureCleanup;
+                if (RuntimeSupportForModule == null)
                 {
                     return;
                 }
 
-                // Install a hypothetical test profile after stitching, without adding fake production versions.
+                // Install a hypothetical test support after stitching, without adding fake production versions.
                 var presentation = new AsyncProfilerCallStackTransformPipeline
                 {
                     EnableNormalization = enableNormalization,
@@ -13986,8 +13994,8 @@ namespace TraceEventTests
                 };
                 pipeline.AddCustomTransform(context =>
                 {
-                    Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile> runtimeProfileResolver = ca =>
-                        RuntimeProfileForModule(ca == CodeAddressIndex.Invalid
+                    Func<CodeAddressIndex, AsyncProfilerRuntimeSupport> runtimeSupportResolver = ca =>
+                        RuntimeSupportForModule(ca == CodeAddressIndex.Invalid
                             ? null : context.TraceLog.CodeAddresses.ModuleFile(ca));
                     for (int i = 0; i < context.Frames.Count; i++)
                     {
@@ -13998,14 +14006,14 @@ namespace TraceEventTests
                         }
                         string name = frame.CodeAddress == CodeAddressIndex.Invalid
                             ? null : context.TraceLog.CodeAddresses[frame.CodeAddress].FullMethodName;
-                        FrameClassification kind = runtimeProfileResolver(frame.CodeAddress).ClassifySynchronousFrame(
+                        FrameClassification kind = runtimeSupportResolver(frame.CodeAddress).ClassifySynchronousFrame(
                             name, context.GetHostModuleOwner(frame.CodeAddress) != ModuleFileIndex.Invalid);
                         context.Frames[i] = AsyncProfilerStitchedFrame.CreateSync(
                             new AsyncProfilerStitchSyncFrame(frame.CodeAddress, frame.Method, kind, frame.BoxedStateMachineMethod),
                             frame.Context);
                     }
                     presentation.ApplyInPlace(new AsyncProfilerCallStackTransformState(context.TraceLog, context.Segments,
-                        context.TimestampQpc, context.ClassifyBoundary, context.StitchingState, context.Diagnostics, context.Frames, runtimeProfileResolver));
+                        context.TimestampQpc, context.ClassifyBoundary, context.StitchingState, context.Diagnostics, context.Frames, runtimeSupportResolver));
                 });
             }
 
@@ -14160,7 +14168,7 @@ namespace TraceEventTests
                 new Frame(moduleName, symbolName, label);
 
             public static Frame CoreLib(string symbolName, string label) =>
-                new Frame(AsyncProfilerRuntimeRuleProfile.HostModuleName, symbolName, label);
+                new Frame(AsyncProfilerRuntimeSupport.HostModuleName, symbolName, label);
 
             public static Frame PerfMap(string moduleName, string methodSignature, string label) =>
                 new Frame(moduleName, methodSignature, label,
@@ -14191,10 +14199,10 @@ namespace TraceEventTests
             }
 
             public static Frame V1InlineInfrastructure(string level, string name) =>
-                new Frame(AsyncProfilerRuntimeRuleProfile.HostModuleName, level + "." + name, level + "." + name);
+                new Frame(AsyncProfilerRuntimeSupport.HostModuleName, level + "." + name, level + "." + name);
 
             public static Frame V2Wrapper(int index) =>
-                new Frame(AsyncProfilerRuntimeRuleProfile.HostModuleName,
+                new Frame(AsyncProfilerRuntimeSupport.HostModuleName,
                     "System.Runtime.CompilerServices.AsyncProfiler.ContinuationWrapper." +
                     AsyncProfilerCallStackStitchBoundary.ContinuationWrapperPrefix + index,
                     AsyncProfilerCallStackStitchBoundary.ContinuationWrapperPrefix + index,
@@ -14204,28 +14212,28 @@ namespace TraceEventTests
             public static readonly Frame Zero = new Frame(null, null, "?? (0x0)");
 
             public static readonly Frame V2InstrumentedDispatch =
-                new Frame(AsyncProfilerRuntimeRuleProfile.HostModuleName,
+                new Frame(AsyncProfilerRuntimeSupport.HostModuleName,
                     "System.Threading.Tasks.RuntimeAsyncTask." + AsyncProfilerCallStackStitchBoundary.InstrumentedDispatchContinuationsName,
                     AsyncProfilerCallStackStitchBoundary.InstrumentedDispatchContinuationsName);
 
             public static readonly Frame V2Dispatch =
-                new Frame(AsyncProfilerRuntimeRuleProfile.HostModuleName,
+                new Frame(AsyncProfilerRuntimeSupport.HostModuleName,
                     "System.Threading.Tasks.RuntimeAsyncTask." + AsyncProfilerCallStackStitchBoundary.DispatchContinuationsName,
                     AsyncProfilerCallStackStitchBoundary.DispatchContinuationsName);
 
             public static readonly Frame V1MoveNextAsDispatcher =
-                new Frame(AsyncProfilerRuntimeRuleProfile.HostModuleName,
+                new Frame(AsyncProfilerRuntimeSupport.HostModuleName,
                     "System.Runtime.CompilerServices.AsyncTaskMethodBuilder+AsyncProfilerAsyncStateMachineBox." +
                     AsyncProfilerCallStackStitchBoundary.MoveNextAsDispatcherName + "(Thread,Flags)",
                     AsyncProfilerCallStackStitchBoundary.MoveNextAsDispatcherName);
 
             public static readonly Frame ThreadPoolDispatch =
-                new Frame(AsyncProfilerRuntimeRuleProfile.HostModuleName,
+                new Frame(AsyncProfilerRuntimeSupport.HostModuleName,
                     "System.Threading.ThreadPoolWorkQueue.Dispatch",
                     "ThreadPoolWorkQueue.Dispatch");
 
             public static readonly Frame WorkerThreadStart =
-                new Frame(AsyncProfilerRuntimeRuleProfile.HostModuleName,
+                new Frame(AsyncProfilerRuntimeSupport.HostModuleName,
                     "System.Threading.PortableThreadPool.WorkerThread.WorkerThreadStart",
                     "WorkerThreadStart");
 

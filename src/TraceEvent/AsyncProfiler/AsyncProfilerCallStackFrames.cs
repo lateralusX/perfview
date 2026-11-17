@@ -146,7 +146,6 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             if (stateCount >= 0)
             {
                 frameStates = new int[stateCount];
-
                 for (int i = 0; i < stateCount; i++)
                 {
                     frameStates[i] = deserializer.ReadInt();

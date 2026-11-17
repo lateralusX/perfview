@@ -534,7 +534,7 @@ namespace TraceEventBenchmarks
                 block.WriteEventBlob(EventOptions(3, sequence++, StartQpc - 2), w =>
                     WriteProcessMappingPayload(
                         w, RuntimeMappingId, RuntimeMappingStart,
-                        RuntimeMappingStart + (4 * AddressStride), AsyncProfilerRuntimeRuleProfile.HostModuleName));
+                        RuntimeMappingStart + (4 * AddressStride), AsyncProfilerRuntimeSupport.HostModuleName));
 
                 ulong symbolId = 1;
                 for (int methodIndex = 0; methodIndex < ManagedMethodCount; methodIndex++)

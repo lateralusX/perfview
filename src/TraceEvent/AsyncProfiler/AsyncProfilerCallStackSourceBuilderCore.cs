@@ -8,7 +8,7 @@ using Microsoft.Diagnostics.Tracing.Etlx;
 using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
 using Microsoft.Diagnostics.Tracing.Stacks;
 
-using static Microsoft.Diagnostics.Tracing.Computers.AsyncProfilerRuntimeRuleProfile;
+using static Microsoft.Diagnostics.Tracing.Computers.AsyncProfilerRuntimeSupport;
 
 namespace Microsoft.Diagnostics.Tracing.Computers
 {
@@ -108,7 +108,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             CallStackIndex physicalRoot = MaterializeSyncLeafToRoot(callStackIndex);
-            AsyncProfilerRuntimeRuleProfile runtimeProfile = m_runtimeProfiles.GetProcessProfile(processIndex);
+            AsyncProfilerRuntimeSupport runtimeSupport = m_runtimeResolver.ResolveProcessSupport(processIndex);
 
             m_sampleDiagnostics.MessageLimit = m_diagnostics.RemainingMessageCapacity;
             bool parentContextsAvailable = false;
@@ -148,11 +148,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 m_sampleDiagnostics,
                 m_stitchingState,
                 segmentPlacements,
-                m_runtimeProfileResolver,
-                runtimeProfile,
+                m_runtimeSupportResolver,
+                runtimeSupport,
                 m_eventLog,
                 m_index,
-                m_runtimeProfiles);
+                m_runtimeResolver);
 
             if (parentContextsAvailable)
             {
@@ -167,9 +167,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 m_stitchingState,
                 m_sampleDiagnostics,
                 m_stitchedFrames,
-                m_runtimeProfileResolver,
-                runtimeProfile,
-                m_runtimeProfiles,
+                m_runtimeSupportResolver,
+                runtimeSupport,
+                m_runtimeResolver,
                 segmentPlacements,
                 methodOf: m_methodOf);
 
@@ -193,8 +193,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         {
             m_index = null;
             m_boundaries = null;
-            m_runtimeProfiles = null;
-            m_runtimeProfileResolver = null;
+            m_runtimeResolver = null;
+            m_runtimeSupportResolver = null;
             m_classify = null;
             m_methodCompletionObserved = null;
             m_methodOf = null;
@@ -234,16 +234,15 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             m_transforms = transforms;
             m_rootFactory = rootFactory;
 
-            m_runtimeProfiles = new AsyncProfilerRuntimeRuleProfileCache(eventLog.ModuleFiles);
-            m_runtimeProfileResolver = GetRuntimeProfile;
-            m_boundaries = new AsyncProfilerCallStackStitchBoundaryCache(eventLog.CodeAddresses, m_runtimeProfiles);
+            m_runtimeResolver = new AsyncProfilerRuntimeResolver(eventLog.ModuleFiles);
+            m_runtimeSupportResolver = GetRuntimeSupport;
+            m_boundaries = new AsyncProfilerCallStackStitchBoundaryCache(eventLog.CodeAddresses, m_runtimeResolver);
             m_classify = m_boundaries.Classify;
             m_methodCompletionObserved = index.MethodCompletionObserved;
 
             m_canonicalMethodByMethodIndex = new Dictionary<MethodIndex, MethodIndex>();
             m_canonicalMethodByIdentity = new Dictionary<ManagedMethodIdentity, MethodIndex>();
-            m_methodOf = codeAddressIndex =>
-                codeAddressIndex == CodeAddressIndex.Invalid ? MethodIndex.Invalid : NormalizeMethod(eventLog.CodeAddresses.MethodIndex(codeAddressIndex));
+            m_methodOf = codeAddressIndex => codeAddressIndex == CodeAddressIndex.Invalid ? MethodIndex.Invalid : NormalizeMethod(eventLog.CodeAddresses.MethodIndex(codeAddressIndex));
 
             m_diagnostics = new AsyncProfilerCallStackDiagnostics();
             m_sampleDiagnostics = new AsyncProfilerCallStackDiagnostics();
@@ -252,7 +251,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             m_segments = new List<AsyncProfilerCallStack>();
             m_syncFrames = new List<AsyncProfilerStitchSyncFrame>();
             m_stitchedFrames = new List<AsyncProfilerStitchedFrame>();
-            m_syncFrameMetadata = new Dictionary<CodeAddressIndex, (FrameClassification Classification, AsyncProfilerRuntimeRuleProfile Profile)>();
+            m_syncFrameMetadata = new Dictionary<CodeAddressIndex, (FrameClassification Classification, AsyncProfilerRuntimeSupport Support)>();
             m_boxedStateMachineMethods = new Dictionary<CodeAddressIndex, MethodIndex>();
             m_logicalSyncFrameByCodeAddress = new Dictionary<CodeAddressIndex, StackSourceFrameIndex>();
             m_frameByIdentity = new Dictionary<CallStackSourceFrameIdentity, StackSourceFrameIndex>();
@@ -277,14 +276,15 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     string frameName = AsyncProfilerMethodNames.NormalizeMethodName(codeAddress?.FullMethodName);
 
                     TraceModuleFile module = codeAddressIndex == CodeAddressIndex.Invalid ? null : codeAddresses.ModuleFile(codeAddressIndex);
-                    bool isHostModule = module != null && m_runtimeProfiles.IsHostModule(module.ModuleFileIndex);
-                    AsyncProfilerRuntimeRuleProfile profile = module == null ? AsyncProfilerRuntimeRuleProfile.Common : m_runtimeProfiles.GetProfile(module.ModuleFileIndex);
+                    bool isHostModule = module != null && m_runtimeResolver.IsHostModule(module.ModuleFileIndex);
+                    AsyncProfilerRuntimeSupport support = module == null ? AsyncProfilerRuntimeSupport.Common : m_runtimeResolver.ResolveModuleSupport(module.ModuleFileIndex);
 
-                    metadata = (profile.ClassifySynchronousFrame(frameName, isHostModule), profile);
+                    metadata = (support.ClassifySynchronousFrame(frameName, isHostModule), support);
                     m_syncFrameMetadata.Add(codeAddressIndex, metadata);
                 }
 
-                MethodIndex boxedMethod = method != MethodIndex.Invalid &&
+                MethodIndex boxedMethod =
+                    method != MethodIndex.Invalid &&
                     m_classify(codeAddressIndex).Kind == AsyncProfilerCallStackStitchBoundaryKind.V1DispatcherInfrastructure
                     ? GetBoxedStateMachineMethod(codeAddressIndex)
                     : MethodIndex.Invalid;
@@ -304,14 +304,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
             TraceCodeAddress codeAddress = m_eventLog.CodeAddresses[codeAddressIndex];
             TraceModuleFile module = m_eventLog.CodeAddresses.ModuleFile(codeAddressIndex);
-            bool isHostModule = module != null && m_runtimeProfiles.IsHostModule(module.ModuleFileIndex);
-            AsyncProfilerRuntimeRuleProfile profile = module == null ? AsyncProfilerRuntimeRuleProfile.Common : m_runtimeProfiles.GetProfile(module.ModuleFileIndex);
+            bool isHostModule = module != null && m_runtimeResolver.IsHostModule(module.ModuleFileIndex);
+            AsyncProfilerRuntimeSupport support = module == null ? AsyncProfilerRuntimeSupport.Common : m_runtimeResolver.ResolveModuleSupport(module.ModuleFileIndex);
 
             MethodIndex method = MethodIndex.Invalid;
-            if (profile.TryGetBoxedStateMachineTypeName(
-                AsyncProfilerMethodNames.NormalizeMethodName(codeAddress.FullMethodName),
-                isHostModule,
-                out string stateMachineType))
+            if (support.TryGetBoxedStateMachineTypeName(AsyncProfilerMethodNames.NormalizeMethodName(codeAddress.FullMethodName), isHostModule, out string stateMachineType))
             {
                 if (m_stateMachineMethodByTypeName == null)
                 {
@@ -320,8 +317,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
                     for (int i = 0; i < methods.Count; i++)
                     {
-                        string typeName = AsyncProfilerMethodNames.GetStateMachineTypeName(
-                            AsyncProfilerMethodNames.NormalizeMethodName(methods.FullMethodName((MethodIndex)i)));
+                        string typeName = AsyncProfilerMethodNames.GetStateMachineTypeName(AsyncProfilerMethodNames.NormalizeMethodName(methods.FullMethodName((MethodIndex)i)));
 
                         if (typeName == null)
                         {
@@ -349,19 +345,19 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             return method;
         }
 
-        private AsyncProfilerRuntimeRuleProfile GetRuntimeProfile(CodeAddressIndex codeAddressIndex)
+        private AsyncProfilerRuntimeSupport GetRuntimeSupport(CodeAddressIndex codeAddressIndex)
         {
             if (codeAddressIndex == CodeAddressIndex.Invalid)
             {
-                return AsyncProfilerRuntimeRuleProfile.Common;
+                return AsyncProfilerRuntimeSupport.Common;
             }
 
             if (m_syncFrameMetadata.TryGetValue(codeAddressIndex, out var metadata))
             {
-                return metadata.Profile;
+                return metadata.Support;
             }
 
-            return m_runtimeProfiles.GetProfile(m_eventLog.CodeAddresses.ModuleFileIndex(codeAddressIndex));
+            return m_runtimeResolver.ResolveModuleSupport(m_eventLog.CodeAddresses.ModuleFileIndex(codeAddressIndex));
         }
 
         private MethodIndex NormalizeMethod(MethodIndex method)
@@ -466,10 +462,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 }
 
                 TraceCodeAddress codeAddress = m_eventLog.CodeAddresses[frame.CodeAddress];
-                if (AsyncProfilerMethodNames.TryGetLogicalStateMachineMethodName(
-                    AsyncProfilerMethodNames.NormalizeMethodName(codeAddress.FullMethodName),
-                    out string logicalName,
-                    out string stateMachineSuffix))
+                if (AsyncProfilerMethodNames.TryGetLogicalStateMachineMethodName(AsyncProfilerMethodNames.NormalizeMethodName(codeAddress.FullMethodName), out string logicalName, out string stateMachineSuffix))
                 {
                     StackSourceModuleIndex module = m_outputStackSource.Interner.ModuleIntern(codeAddress.ModuleName);
                     StackSourceFrameIndex logicalFrame = m_outputStackSource.Interner.FrameIntern(
@@ -479,6 +472,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
                     m_outputStackSource.SetFrameCodeAddress(logicalFrame, frame.CodeAddress);
                     m_logicalSyncFrameByCodeAddress.Add(frame.CodeAddress, logicalFrame);
+
                     return logicalFrame;
                 }
 
@@ -546,10 +540,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             {
                 TraceCodeAddress codeAddress = m_eventLog.CodeAddresses[frame.IsStateMachineBoxCarrier ? segment.CodeAddressAt(segmentFrameIndex) : frame.CodeAddress];
 
-                if (AsyncProfilerMethodNames.TryGetLogicalStateMachineMethodName(
-                    AsyncProfilerMethodNames.NormalizeMethodName(codeAddress.FullMethodName),
-                    out string logicalName,
-                    out string stateMachineSuffix))
+                if (AsyncProfilerMethodNames.TryGetLogicalStateMachineMethodName(AsyncProfilerMethodNames.NormalizeMethodName(codeAddress.FullMethodName), out string logicalName, out string stateMachineSuffix))
                 {
                     StackSourceModuleIndex module = m_outputStackSource.Interner.ModuleIntern(codeAddress.ModuleName);
                     asyncFrame = m_outputStackSource.Interner.FrameIntern(
@@ -763,8 +754,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         private AsyncProfilerCallStacksIndex m_index;
         private AsyncProfilerCallStackStitchBoundaryCache m_boundaries;
-        private AsyncProfilerRuntimeRuleProfileCache m_runtimeProfiles;
-        private Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile> m_runtimeProfileResolver;
+        private AsyncProfilerRuntimeResolver m_runtimeResolver;
+        private Func<CodeAddressIndex, AsyncProfilerRuntimeSupport> m_runtimeSupportResolver;
         private Func<CodeAddressIndex, AsyncProfilerCallStackStitchBoundaryInfo> m_classify;
         private Func<ProcessIndex, AsyncCallstackKind, long, bool> m_methodCompletionObserved;
         private Func<CodeAddressIndex, MethodIndex> m_methodOf;
@@ -782,7 +773,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         private List<AsyncProfilerCallStackPlacement> m_segmentPlacements;
         private AsyncProfilerParentContextBuilder m_parentContextBuilder;
 
-        private Dictionary<CodeAddressIndex, (FrameClassification Classification, AsyncProfilerRuntimeRuleProfile Profile)> m_syncFrameMetadata;
+        private Dictionary<CodeAddressIndex, (FrameClassification Classification, AsyncProfilerRuntimeSupport Support)> m_syncFrameMetadata;
         private Dictionary<CodeAddressIndex, MethodIndex> m_boxedStateMachineMethods;
         private Dictionary<string, MethodIndex> m_stateMachineMethodByTypeName;
         private Dictionary<CodeAddressIndex, StackSourceFrameIndex> m_logicalSyncFrameByCodeAddress;

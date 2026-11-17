@@ -30,9 +30,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         public ulong OsThreadId => Thread.OsThreadId;
 
         /// <summary>The instrumentation family that emitted this activation.</summary>
-        public AsyncProfilerCallStackKind Kind => Frames.Kind == AsyncCallstackKind.StateMachineAsync
-            ? AsyncProfilerCallStackKind.StateMachineAsync
-            : AsyncProfilerCallStackKind.RuntimeAsync;
+        public AsyncProfilerCallStackKind Kind =>
+            Frames.Kind == AsyncCallstackKind.StateMachineAsync ? AsyncProfilerCallStackKind.StateMachineAsync : AsyncProfilerCallStackKind.RuntimeAsync;
 
         /// <summary>The captured frames, leaf-to-root, including later V1 appends.
         /// Completion progress and presentation transforms are not applied; these frames do not identify
@@ -327,6 +326,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     {
                         throw new ArgumentOutOfRangeException(nameof(index));
                     }
+
                     return new AsyncProfilerCallStackFrame(AsyncProfilerStitchedFrame.CreateAsync(m_activation, index));
                 }
             }

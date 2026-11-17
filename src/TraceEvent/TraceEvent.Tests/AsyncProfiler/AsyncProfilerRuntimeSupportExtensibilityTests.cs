@@ -11,12 +11,12 @@ using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
 
 using Xunit;
 
-using static Microsoft.Diagnostics.Tracing.Computers.AsyncProfilerRuntimeRuleProfile;
+using static Microsoft.Diagnostics.Tracing.Computers.AsyncProfilerRuntimeSupport;
 
 namespace TraceEventTests
 {
-    /// <summary>Exercises runtime-profile overrides and the ownership checks that keep their layouts separate.</summary>
-    public class AsyncProfilerRuntimeProfileExtensibilityTests
+    /// <summary>Exercises runtime-support overrides and the ownership checks that keep their layouts separate.</summary>
+    public class AsyncProfilerRuntimeSupportExtensibilityTests
     {
         [Theory]
         [InlineData(false, false)]
@@ -26,8 +26,8 @@ namespace TraceEventTests
         public void ReplacedStages_PreserveFlagsOrderAndPerSampleSelection(bool enableNormalization, bool enableInfrastructureCleanup)
         {
             var calls = new List<string>();
-            var first = new StageProfile("First", calls);
-            var second = new StageProfile("Second", calls);
+            var first = new StageSupport("First", calls);
+            var second = new StageSupport("Second", calls);
             var pipeline = new AsyncProfilerCallStackTransformPipeline
             {
                 EnableNormalization = enableNormalization,
@@ -35,9 +35,9 @@ namespace TraceEventTests
             };
             pipeline.AddCustomTransform(context => calls.Add("Custom"));
 
-            foreach (StageProfile profile in new[] { first, second })
+            foreach (StageSupport support in new[] { first, second })
             {
-                pipeline.ApplyInPlace(Context(new List<AsyncProfilerStitchedFrame> { Sync(1) }, profile));
+                pipeline.ApplyInPlace(Context(new List<AsyncProfilerStitchedFrame> { Sync(1) }, support));
             }
 
             var expected = new List<string>();
@@ -66,16 +66,16 @@ namespace TraceEventTests
         }
 
         [Fact]
-        public void MixedProfiles_DoNotSelectAnArbitraryReplacement()
+        public void MixedRuntimeSupport_DoNotSelectAnArbitraryReplacement()
         {
             var calls = new List<string>();
-            var first = new StageProfile("First", calls);
-            var second = new StageProfile("Second", calls);
+            var first = new StageSupport("First", calls);
+            var second = new StageSupport("Second", calls);
             var frames = new List<AsyncProfilerStitchedFrame> { Sync(1), Sync(2) };
             var context = new AsyncProfilerCallStackTransformState(null, new List<AsyncProfilerCallStack>(), 1,
                 _ => AsyncProfilerCallStackStitchBoundaryInfo.None, new AsyncProfilerCallStackStitchingState(), new AsyncProfilerCallStackDiagnostics(), frames,
                 ca => (int)ca == 1 ? first : second);
-            Assert.Same(AsyncProfilerRuntimeRuleProfile.Common, context.RuntimeProfile);
+            Assert.Same(AsyncProfilerRuntimeSupport.Common, context.RuntimeSupport);
             new AsyncProfilerCallStackTransformPipeline().ApplyInPlace(context);
             Assert.Empty(calls);
             Assert.Equal(2, frames.Count);
@@ -85,10 +85,10 @@ namespace TraceEventTests
         public void ReplacementSelection_SurvivesRemovalOfAllRuntimeEvidence()
         {
             var calls = new List<string>();
-            var profile = new StageProfile("Selected", calls);
+            var support = new StageSupport("Selected", calls);
             var frames = new List<AsyncProfilerStitchedFrame> { Sync(1) };
             new AsyncProfilerCallStackTransformPipeline { EnableInfrastructureCleanup = true }
-                .ApplyInPlace(Context(frames, profile));
+                .ApplyInPlace(Context(frames, support));
             Assert.Empty(frames);
             Assert.Equal(4, calls.Count);
         }
@@ -96,7 +96,7 @@ namespace TraceEventTests
         [Fact]
         public void InvalidReplacement_FailsExplicitly()
         {
-            var context = Context(new List<AsyncProfilerStitchedFrame> { Sync(1) }, new NullStageProfile());
+            var context = Context(new List<AsyncProfilerStitchedFrame> { Sync(1) }, new NullStageSupport());
             Assert.Throws<InvalidOperationException>(() => new AsyncProfilerCallStackTransformPipeline().ApplyInPlace(context));
         }
 
@@ -105,19 +105,19 @@ namespace TraceEventTests
         [InlineData(true)]
         public void StartupLayout_UsesOwningRuntimeRatherThanApplicationModule(bool foreignHelper)
         {
-            var profile = new AsyncProfilerExtendedRuntimeLayoutProfile();
+            var support = new AsyncProfilerExtendedRuntimeLayoutSupport();
             var frames = new List<AsyncProfilerStitchedFrame>
             {
                 Sync(1, AsyncProfilerStitchSyncFrameKind.V1StateMachineBody),
                 Sync(2, AsyncProfilerStitchSyncFrameKind.V1MethodHelper),
-                Sync(3, HelperKind.V1Startup),
+                Sync(3, RuntimeFrameKind.V1Startup),
                 Sync(4),
             };
             var context = new AsyncProfilerCallStackTransformState(null, new List<AsyncProfilerCallStack>(), 1,
                 _ => AsyncProfilerCallStackStitchBoundaryInfo.None, new AsyncProfilerCallStackStitchingState(), new AsyncProfilerCallStackDiagnostics(), frames,
                 ca => (int)ca == 1 || (int)ca == 4 || (foreignHelper && (int)ca == 2)
-                    ? AsyncProfilerRuntimeRuleProfile.Common : profile,
-                profile);
+                    ? AsyncProfilerRuntimeSupport.Common : support,
+                support);
             new AsyncProfilerCallStackTransformPipeline().ApplyInPlace(context);
             Assert.Equal(foreignHelper ? new[] { 1, 2, 3, 4 } : new[] { 1, 4 },
                 frames.Select(frame => (int)frame.CodeAddress));
@@ -126,49 +126,49 @@ namespace TraceEventTests
         }
 
         [Fact]
-        public void ExtendedRegistrationAndEntrySpines_UseProfileLayouts()
+        public void ExtendedRegistrationAndEntrySpines_UseSupportLayouts()
         {
-            var profile = new AsyncProfilerExtendedRuntimeLayoutProfile();
+            var support = new AsyncProfilerExtendedRuntimeLayoutSupport();
             var registration = new List<AsyncProfilerStitchedFrame>
             {
-                Sync(1, HelperKind.V1AwaiterRegistration),
+                Sync(1, RuntimeFrameKind.V1AwaiterRegistration),
                 Sync(2, AsyncProfilerStitchSyncFrameKind.V1MethodHelper),
                 Sync(3, AsyncProfilerStitchSyncFrameKind.V1StateMachineBody),
             };
-            Assert.Equal(2, Context(registration, profile).MatchRuntimeSequence(
+            Assert.Equal(2, Context(registration, support).MatchRuntimeSequence(
                 AsyncProfilerRuntimeSequenceKind.V1AwaitRegistration, 0, 3).Length);
-            Assert.Equal(1, Context(registration, AsyncProfilerRuntimeRuleProfile.Common).MatchRuntimeSequence(
+            Assert.Equal(1, Context(registration, AsyncProfilerRuntimeSupport.Common).MatchRuntimeSequence(
                 AsyncProfilerRuntimeSequenceKind.V1AwaitRegistration, 0, 3).Length);
 
             var segment = Segment();
             var entry = new List<AsyncProfilerStitchedFrame>
             {
-                Sync(1, HelperKind.ProfilerResume),
+                Sync(1, RuntimeFrameKind.ProfilerResume),
                 Sync(2, AsyncProfilerStitchSyncFrameKind.V1MethodHelper),
                 AsyncProfilerStitchedFrame.CreateAsyncCurrent((CodeAddressIndex)3, (MethodIndex)3, segment, 0),
             };
-            Assert.True(Context(entry, profile).MatchRuntimeSequence(
+            Assert.True(Context(entry, support).MatchRuntimeSequence(
                 AsyncProfilerRuntimeSequenceKind.ProfilerEntry, 0, 2).IsMatch);
-            Assert.False(Context(entry, AsyncProfilerRuntimeRuleProfile.Common).MatchRuntimeSequence(
+            Assert.False(Context(entry, AsyncProfilerRuntimeSupport.Common).MatchRuntimeSequence(
                 AsyncProfilerRuntimeSequenceKind.ProfilerEntry, 0, 2).IsMatch);
         }
 
         [Fact]
         public void WholeBridgeAndAnchor_CanChangeWithoutChangingTheCleanupPass()
         {
-            var profile = new AsyncProfilerExtendedRuntimeLayoutProfile();
+            var support = new AsyncProfilerExtendedRuntimeLayoutSupport();
             var frames = new List<AsyncProfilerStitchedFrame>
             {
-                Sync(1, HelperKind.TaskContinuations),
-                Sync(2, HelperKind.TaskResult),
+                Sync(1, RuntimeFrameKind.TaskContinuations),
+                Sync(2, RuntimeFrameKind.TaskResult),
                 Sync(3, AsyncProfilerStitchSyncFrameKind.V1DispatchSetup),
             };
-            Assert.True(profile.IsRuntimeResumptionAnchor(frames[2]));
-            Assert.True(Context(frames, profile).MatchRuntimeSequence(
+            Assert.True(support.IsRuntimeResumptionAnchor(frames[2]));
+            Assert.True(Context(frames, support).MatchRuntimeSequence(
                 AsyncProfilerRuntimeSequenceKind.RuntimeResumptionBridge, 0, 3).IsMatch);
-            Assert.True(Context(frames, AsyncProfilerRuntimeRuleProfile.Common).MatchRuntimeSequence(
+            Assert.True(Context(frames, AsyncProfilerRuntimeSupport.Common).MatchRuntimeSequence(
                 AsyncProfilerRuntimeSequenceKind.RuntimeResumptionBridge, 0, 3).IsRejected);
-            Assert.False(profile.IsOptionalInfrastructureFrame(frames[2], AsyncProfilerCallStackStitchBoundaryKind.None));
+            Assert.False(support.IsOptionalInfrastructureFrame(frames[2], AsyncProfilerCallStackStitchBoundaryKind.None));
         }
 
         [Fact]
@@ -177,13 +177,13 @@ namespace TraceEventTests
             var frames = new List<AsyncProfilerStitchedFrame>
             {
                 Sync(1, AsyncProfilerStitchSyncFrameKind.V1StateMachineBody),
-                Sync(2, HelperKind.V1Startup),
-                Sync(3, HelperKind.V1AwaiterRegistration),
+                Sync(2, RuntimeFrameKind.V1Startup),
+                Sync(3, RuntimeFrameKind.V1AwaiterRegistration),
                 Sync(4, AsyncProfilerStitchSyncFrameKind.V1MethodHelper),
             };
-            var profile = new RejectingLayoutProfile();
+            var support = new RejectingLayoutSupport();
             new AsyncProfilerCallStackTransformPipeline { EnableInfrastructureCleanup = true }
-                .ApplyInPlace(Context(frames, profile));
+                .ApplyInPlace(Context(frames, support));
             Assert.Equal(new[] { 1, 2, 3, 4 }, frames.Select(frame => (int)frame.CodeAddress));
         }
 
@@ -192,15 +192,15 @@ namespace TraceEventTests
         {
             var frames = new List<AsyncProfilerStitchedFrame>
             {
-                Sync(1, HelperKind.V1BuilderAwaitRegistration),
-                Sync(2, HelperKind.V1AwaiterRegistration)
+                Sync(1, RuntimeFrameKind.V1BuilderAwaitRegistration),
+                Sync(2, RuntimeFrameKind.V1AwaiterRegistration)
                     .WithPresentation(AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames),
                 Sync(3, AsyncProfilerStitchSyncFrameKind.V1MethodHelper),
-                Sync(4, HelperKind.V1BuilderAwaitRegistration),
-                Sync(5, HelperKind.V1BuilderAwaitRegistration),
+                Sync(4, RuntimeFrameKind.V1BuilderAwaitRegistration),
+                Sync(5, RuntimeFrameKind.V1BuilderAwaitRegistration),
             };
             AsyncProfilerStitchedFrame[] protectedSpan = frames.Skip(1).Take(2).ToArray();
-            var context = Context(frames, new RejectingLayoutProfile());
+            var context = Context(frames, new RejectingLayoutSupport());
             var pipeline = new AsyncProfilerCallStackTransformPipeline
             {
                 EnableNormalization = false,
@@ -221,10 +221,10 @@ namespace TraceEventTests
         [Theory]
         [InlineData(false)]
         [InlineData(true)]
-        public void OptionalCleanup_MergesOnlyMatchingRuntimeProfiles(bool sameProfile)
+        public void OptionalCleanup_MergesOnlyMatchingRuntimeSupport(bool sameSupport)
         {
-            var first = new AsyncProfilerExtendedRuntimeLayoutProfile();
-            AsyncProfilerRuntimeRuleProfile second = sameProfile ? first : AsyncProfilerRuntimeRuleProfile.Common;
+            var first = new AsyncProfilerExtendedRuntimeLayoutSupport();
+            AsyncProfilerRuntimeSupport second = sameSupport ? first : AsyncProfilerRuntimeSupport.Common;
             var frames = new List<AsyncProfilerStitchedFrame>
             {
                 Sync(1), Sync(2),
@@ -240,7 +240,7 @@ namespace TraceEventTests
                 EnableInfrastructureCleanup = true,
             }.ApplyInPlace(context);
 
-            Assert.Equal(sameProfile ? new[] { 1 } : new[] { 1, 2 }, frames.Select(frame => (int)frame.CodeAddress));
+            Assert.Equal(sameSupport ? new[] { 1 } : new[] { 1, 2 }, frames.Select(frame => (int)frame.CodeAddress));
             Assert.All(frames, frame =>
                 Assert.Equal(AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames, frame.Presentation));
             Assert.Equal(2, context.Diagnostics.AsyncInfrastructureFramesCollapsed);
@@ -256,7 +256,7 @@ namespace TraceEventTests
             var context = new AsyncProfilerCallStackTransformState(null, new List<AsyncProfilerCallStack>(), 1,
                 _ => AsyncProfilerCallStackStitchBoundaryInfo.None, new AsyncProfilerCallStackStitchingState(), new AsyncProfilerCallStackDiagnostics(), frames,
                 _ => throw new InvalidOperationException("Logical frames cannot start synchronous cleanup layouts."),
-                AsyncProfilerRuntimeRuleProfile.Common);
+                AsyncProfilerRuntimeSupport.Common);
 
             new AsyncProfilerCallStackTransformPipeline
             {
@@ -268,12 +268,12 @@ namespace TraceEventTests
         }
 
         [Fact]
-        public void InitialProfiles_ShareCachedCommonStages()
+        public void InitialSupports_ShareCachedCommonStages()
         {
             foreach (AsyncProfilerRuntimeTransformKind kind in Enum.GetValues(typeof(AsyncProfilerRuntimeTransformKind)))
             {
-                Assert.Same(AsyncProfilerRuntimeRuleProfile.Common.GetTransform(kind),
-                    AsyncProfilerRuntimeRuleProfile.CoreClr11.GetTransform(kind));
+                Assert.Same(AsyncProfilerRuntimeSupport.Common.GetTransform(kind),
+                    AsyncProfilerRuntimeSupport.CoreClr11.GetTransform(kind));
             }
         }
 
@@ -281,41 +281,41 @@ namespace TraceEventTests
         public void OneStageReplacement_InheritsOtherCommonStagesRatherThanAppendingToTheDefault()
         {
             int calls = 0;
-            var profile = new SingleStageProfile(context => calls++);
+            var support = new SingleStageSupport(context => calls++);
             var frames = new List<AsyncProfilerStitchedFrame>
             {
                 Sync(1), Sync(2, AsyncProfilerStitchSyncFrameKind.V1StateMachineBody),
-                Sync(3, HelperKind.V1Startup), Sync(4),
+                Sync(3, RuntimeFrameKind.V1Startup), Sync(4),
             };
             var context = new AsyncProfilerCallStackTransformState(null, new List<AsyncProfilerCallStack>(), 1,
                 ca => (int)ca == 1 ? new AsyncProfilerCallStackStitchBoundaryInfo(AsyncProfilerCallStackStitchBoundaryKind.V2Dispatcher, 0) :
                     AsyncProfilerCallStackStitchBoundaryInfo.None,
                 new AsyncProfilerCallStackStitchingState { UsesV2SynchronousLayout = true },
-                new AsyncProfilerCallStackDiagnostics(), frames, _ => profile);
+                new AsyncProfilerCallStackDiagnostics(), frames, _ => support);
             new AsyncProfilerCallStackTransformPipeline().ApplyInPlace(context);
             Assert.Equal(1, calls);
             Assert.Equal(new[] { 2, 3, 4 }, frames.Select(frame => (int)frame.CodeAddress));
             Assert.Equal(AsyncProfilerStitchedFramePresentation.Native, frames[0].Presentation);
-            Assert.Same(AsyncProfilerRuntimeRuleProfile.Common.GetTransform(AsyncProfilerRuntimeTransformKind.SampledV2Wrapper),
-                profile.GetTransform(AsyncProfilerRuntimeTransformKind.SampledV2Wrapper));
+            Assert.Same(AsyncProfilerRuntimeSupport.Common.GetTransform(AsyncProfilerRuntimeTransformKind.SampledV2Wrapper),
+                support.GetTransform(AsyncProfilerRuntimeTransformKind.SampledV2Wrapper));
         }
 
         [Fact]
         public void ReplacementExceptions_AreNotSwallowed()
         {
             var error = new InvalidOperationException("Replacement failed");
-            var profile = new SingleStageProfile(context => throw error);
+            var support = new SingleStageSupport(context => throw error);
             Assert.Same(error, Assert.Throws<InvalidOperationException>(() =>
                 new AsyncProfilerCallStackTransformPipeline().ApplyInPlace(
-                    Context(new List<AsyncProfilerStitchedFrame> { Sync(1) }, profile))));
+                    Context(new List<AsyncProfilerStitchedFrame> { Sync(1) }, support))));
         }
 
         #region private
 
         private static AsyncProfilerCallStackTransformState Context(
-            List<AsyncProfilerStitchedFrame> frames, AsyncProfilerRuntimeRuleProfile profile) =>
+            List<AsyncProfilerStitchedFrame> frames, AsyncProfilerRuntimeSupport support) =>
             new AsyncProfilerCallStackTransformState(null, new List<AsyncProfilerCallStack>(), 1,
-                _ => AsyncProfilerCallStackStitchBoundaryInfo.None, new AsyncProfilerCallStackStitchingState(), new AsyncProfilerCallStackDiagnostics(), frames, _ => profile);
+                _ => AsyncProfilerCallStackStitchBoundaryInfo.None, new AsyncProfilerCallStackStitchingState(), new AsyncProfilerCallStackDiagnostics(), frames, _ => support);
 
         private static AsyncProfilerStitchedFrame Sync(int ca, FrameClassification kind = default) =>
             AsyncProfilerStitchedFrame.CreateSync(new AsyncProfilerStitchSyncFrame((CodeAddressIndex)ca, (MethodIndex)ca, kind), null);
@@ -326,9 +326,9 @@ namespace TraceEventTests
                 0, 32, 0, long.MaxValue, Array.Empty<AsyncProfilerCallStack.CompletionDelta>(),
                 Array.Empty<AsyncProfilerCallStack.CompletionDelta>(), Array.Empty<long>());
 
-        private sealed class StageProfile : AsyncProfilerRuntimeRuleProfile
+        private sealed class StageSupport : AsyncProfilerRuntimeSupport
         {
-            public StageProfile(string name, List<string> calls) : base(name)
+            public StageSupport(string name, List<string> calls) : base(name)
             {
                 m_stages = new AsyncProfilerCallStackTransform[4];
                 for (int i = 0; i < m_stages.Length; i++)
@@ -351,18 +351,18 @@ namespace TraceEventTests
             #endregion
         }
 
-        private sealed class NullStageProfile : AsyncProfilerRuntimeRuleProfile
+        private sealed class NullStageSupport : AsyncProfilerRuntimeSupport
         {
-            public NullStageProfile() : base("Invalid test profile")
+            public NullStageSupport() : base("Invalid test profile")
             {
             }
 
             public override AsyncProfilerCallStackTransform GetTransform(AsyncProfilerRuntimeTransformKind kind) => null;
         }
 
-        private sealed class SingleStageProfile : AsyncProfilerRuntimeRuleProfile
+        private sealed class SingleStageSupport : AsyncProfilerRuntimeSupport
         {
-            public SingleStageProfile(AsyncProfilerCallStackTransform transform) : base("Single-stage test profile")
+            public SingleStageSupport(AsyncProfilerCallStackTransform transform) : base("Single-stage test profile")
             {
                 m_transform = transform;
             }
@@ -377,9 +377,9 @@ namespace TraceEventTests
             #endregion
         }
 
-        private sealed class RejectingLayoutProfile : AsyncProfilerRuntimeRuleProfile
+        private sealed class RejectingLayoutSupport : AsyncProfilerRuntimeSupport
         {
-            public RejectingLayoutProfile() : base("Rejected test layouts")
+            public RejectingLayoutSupport() : base("Rejected test layouts")
             {
             }
 
@@ -390,16 +390,16 @@ namespace TraceEventTests
 
             protected override AsyncProfilerRuntimeSequenceMatch MatchV1AwaitRegistration(
                 AsyncProfilerCallStackTransformState context, int start, int end) =>
-                context.Frames[start].SyncClassification.Helper == HelperKind.V1AwaiterRegistration
+                context.Frames[start].SyncClassification.RuntimeKind == RuntimeFrameKind.V1AwaiterRegistration
                     ? AsyncProfilerRuntimeSequenceMatch.Reject(Math.Min(2, end - start)) : default;
         }
 
         #endregion
     }
 
-    internal sealed class AsyncProfilerRejectRuntimeBridgeProfile : AsyncProfilerRuntimeRuleProfile
+    internal sealed class AsyncProfilerRejectRuntimeBridgeSupport : AsyncProfilerRuntimeSupport
     {
-        public AsyncProfilerRejectRuntimeBridgeProfile() : base("Test-only rejected bridge layout")
+        public AsyncProfilerRejectRuntimeBridgeSupport() : base("Test-only rejected bridge layout")
         {
         }
 
@@ -409,9 +409,9 @@ namespace TraceEventTests
     }
 
     // Hypothetical implementation layouts, never selected by production version detection.
-    internal sealed class AsyncProfilerExtendedRuntimeLayoutProfile : AsyncProfilerRuntimeRuleProfile
+    internal sealed class AsyncProfilerExtendedRuntimeLayoutSupport : AsyncProfilerRuntimeSupport
     {
-        public AsyncProfilerExtendedRuntimeLayoutProfile() : base("Test-only extended runtime layouts")
+        public AsyncProfilerExtendedRuntimeLayoutSupport() : base("Test-only extended runtime layouts")
         {
         }
 
@@ -448,12 +448,12 @@ namespace TraceEventTests
             AsyncProfilerRuntimeSequenceMatch common = base.MatchV1Startup(context, start, end);
             if (!common.IsMatch || end - start < 3 ||
                 context.Frames[start + 1].SyncFrameKind != AsyncProfilerStitchSyncFrameKind.V1MethodHelper ||
-                context.Frames[start + 2].SyncClassification.Helper != HelperKind.V1Startup)
+                context.Frames[start + 2].SyncClassification.RuntimeKind != RuntimeFrameKind.V1Startup)
             {
                 return common;
             }
             int next = start + 3;
-            while (next < end && context.Frames[next].SyncClassification.Helper == HelperKind.V1Startup)
+            while (next < end && context.Frames[next].SyncClassification.RuntimeKind == RuntimeFrameKind.V1Startup)
             {
                 next++;
             }
@@ -473,7 +473,7 @@ namespace TraceEventTests
             AsyncProfilerCallStackTransformState context, int start, int end)
         {
             if (end - start >= 2 && end < context.Frames.Count &&
-                context.Frames[start].SyncClassification.Helper == HelperKind.ProfilerResume &&
+                context.Frames[start].SyncClassification.RuntimeKind == RuntimeFrameKind.ProfilerResume &&
                 context.Frames[start + 1].SyncFrameKind == AsyncProfilerStitchSyncFrameKind.V1MethodHelper)
             {
                 bool dispatcher = context.Frames[end].Origin == AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget &&

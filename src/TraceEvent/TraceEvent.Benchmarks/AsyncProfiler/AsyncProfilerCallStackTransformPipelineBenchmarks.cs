@@ -7,7 +7,7 @@ using Microsoft.Diagnostics.Tracing.Computers;
 using Microsoft.Diagnostics.Tracing.Etlx;
 using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
 
-using static Microsoft.Diagnostics.Tracing.Computers.AsyncProfilerRuntimeRuleProfile;
+using static Microsoft.Diagnostics.Tracing.Computers.AsyncProfilerRuntimeSupport;
 
 namespace TraceEventBenchmarks
 {
@@ -30,12 +30,12 @@ namespace TraceEventBenchmarks
             {
                 Sync(10),
                 Sync(11, AsyncProfilerStitchSyncFrameKind.V1StateMachineBody),
-                Sync(12, HelperKind.V1Startup),
-                Sync(13, HelperKind.V1Startup),
+                Sync(12, RuntimeFrameKind.V1Startup),
+                Sync(13, RuntimeFrameKind.V1Startup),
                 Sync(14),
-                Sync(15, HelperKind.TaskContinuations),
-                Sync(16, HelperKind.TaskResult),
-                Sync(17, HelperKind.TaskCompletionSourceResult),
+                Sync(15, RuntimeFrameKind.TaskContinuations),
+                Sync(16, RuntimeFrameKind.TaskResult),
+                Sync(17, RuntimeFrameKind.TaskCompletionSourceResult),
                 Sync(18),
                 AsyncProfilerStitchedFrame.CreateAsync(m_segment, 0),
             };

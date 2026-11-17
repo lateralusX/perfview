@@ -91,11 +91,11 @@ namespace TraceEventTests
                 "System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1+AsyncProfilerAsyncStateMachineBox`1[" +
                 "System.Int64," + stateMachineType + "]::InstrumentedMoveNext(class System.Threading.Thread)");
             string moveNext = AsyncProfilerMethodNames.NormalizeMethodName(stateMachineType + "::MoveNext()");
-            foreach (AsyncProfilerRuntimeRuleProfile profile in new[] { AsyncProfilerRuntimeRuleProfile.Common, AsyncProfilerRuntimeRuleProfile.CoreClr11 })
+            foreach (AsyncProfilerRuntimeSupport support in new[] { AsyncProfilerRuntimeSupport.Common, AsyncProfilerRuntimeSupport.CoreClr11 })
             {
-                Assert.True(profile.TryGetBoxedStateMachineTypeName(box, true, out string boxedType));
+                Assert.True(support.TryGetBoxedStateMachineTypeName(box, true, out string boxedType));
                 Assert.Equal(AsyncProfilerMethodNames.GetStateMachineTypeName(moveNext), boxedType);
-                Assert.False(profile.TryGetBoxedStateMachineTypeName(box, false, out _));
+                Assert.False(support.TryGetBoxedStateMachineTypeName(box, false, out _));
             }
         }
 

@@ -56,10 +56,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <summary>Removes verified handoff spans while preserving the async frames on both sides.</summary>
         public void Apply(AsyncProfilerCallStackTransformState context)
         {
-            bool canVerifyHandoff =
-                context.TraceLog != null &&
-                context.StitchingState.HasConsistentPhysicalAlignment &&
-                context.StitchingState.UnresolvedV1CompletionCount == 0;
+            bool canVerifyHandoff = context.TraceLog != null && context.StitchingState.HasConsistentPhysicalAlignment && context.StitchingState.UnresolvedV1CompletionCount == 0;
             if (!canVerifyHandoff)
             {
                 return;
@@ -97,15 +94,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
                 // Require a directly nested call stack with a verified method or dispatch target.
                 AsyncProfilerCallStack nestedCallStack = frames[handoffStart - 1].Context;
-                bool hasDirectNestedCallStack =
-                    nestedCallStack != null &&
-                    nestedCallStack.Depth == enclosingCurrent.Context.Depth + 1;
-                bool hasVerifiedNestedAnchor =
-                    hasDirectNestedCallStack &&
-                    HasVerifiedAsyncAnchor(context, handoffStart - 1, nestedCallStack);
-                bool canRemoveHandoff =
-                    hasVerifiedNestedAnchor &&
-                    IsResolvedRuntimeSpan(context, frames, handoffStart, handoffFrameCount);
+                bool hasDirectNestedCallStack = nestedCallStack != null && nestedCallStack.Depth == enclosingCurrent.Context.Depth + 1;
+                bool hasVerifiedNestedAnchor = hasDirectNestedCallStack && HasVerifiedAsyncAnchor(context, handoffStart - 1, nestedCallStack);
+                bool canRemoveHandoff = hasVerifiedNestedAnchor && IsResolvedRuntimeSpan(context, frames, handoffStart, handoffFrameCount);
                 if (!canRemoveHandoff)
                 {
                     continue;
@@ -113,9 +104,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
                 frames.RemoveRange(handoffStart, handoffFrameCount);
                 context.Diagnostics.AsyncReentrantHandoffFramesCollapsed += handoffFrameCount;
-                bool isV2ToV2Handoff =
-                    nestedCallStack.Frames.Kind == AsyncCallstackKind.RuntimeAsync &&
-                    enclosingCurrent.Context.Frames.Kind == AsyncCallstackKind.RuntimeAsync;
+                bool isV2ToV2Handoff = nestedCallStack.Frames.Kind == AsyncCallstackKind.RuntimeAsync && enclosingCurrent.Context.Frames.Kind == AsyncCallstackKind.RuntimeAsync;
                 if (isV2ToV2Handoff)
                 {
                     context.Diagnostics.V2ReentrantHandoffFramesCollapsed += handoffFrameCount;
@@ -259,9 +248,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             ModuleFileIndex owner = context.GetHostModuleOwner(frames[target - 1].CodeAddress);
-            AsyncProfilerRuntimeRuleProfile profile = context.GetRuntimeProfile(frames[target - 1].CodeAddress);
+            AsyncProfilerRuntimeSupport support = context.GetRuntimeSupport(frames[target - 1].CodeAddress);
 
-            if (!IsOwnedPhysicalFrame(context, frames[target - 1], callStack, owner, profile))
+            if (!IsOwnedPhysicalFrame(context, frames[target - 1], callStack, owner, support))
             {
                 return;
             }
@@ -273,8 +262,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             {
                 AsyncProfilerStitchedFrame frame = frames[body];
                 bool isOwnedReturnHelper =
-                    IsOwnedPhysicalFrame(context, frame, callStack, owner, profile) &&
-                    (profile.IsV1CompletionUnwindInfrastructure(frame, context.ClassifyBoundary(frame.CodeAddress).Kind) || frame.SyncFrameKind == AsyncProfilerStitchSyncFrameKind.V1BoxCallback);
+                    IsOwnedPhysicalFrame(context, frame, callStack, owner, support) &&
+                    (support.IsV1CompletionUnwindInfrastructure(frame, context.ClassifyBoundary(frame.CodeAddress).Kind) || frame.SyncFrameKind == AsyncProfilerStitchSyncFrameKind.V1BoxCallback);
                 bool isMatchingReturnHelper =
                     isOwnedReturnHelper &&
                     (frame.BoxedStateMachineMethod == MethodIndex.Invalid || frame.BoxedStateMachineMethod == recursiveMethod);
@@ -298,7 +287,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 frames[body].CodeAddress != CodeAddressIndex.Invalid && frames[body].Method == recursiveMethod;
             bool hasOwnedCompletionHelper =
                 isMatchingRecursiveBody &&
-                IsOwnedPhysicalFrame(context, frames[body - 1], callStack, owner, profile) &&
+                IsOwnedPhysicalFrame(context, frames[body - 1], callStack, owner, support) &&
                 frames[body - 1].SyncFrameKind == AsyncProfilerStitchSyncFrameKind.V1MethodCompletion;
             if (!hasOwnedCompletionHelper)
             {
@@ -315,7 +304,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             // Require every helper in the completion span to belong to this call stack and runtime.
             for (int i = entry; i < body - 1; i++)
             {
-                if (!IsOwnedPhysicalFrame(context, frames[i], callStack, owner, profile))
+                if (!IsOwnedPhysicalFrame(context, frames[i], callStack, owner, support))
                 {
                     return;
                 }
@@ -326,7 +315,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 (frames[entry - 1].SyncFrameKind == AsyncProfilerStitchSyncFrameKind.AwaiterHelper ||
                  frames[entry - 1].SyncFrameKind == AsyncProfilerStitchSyncFrameKind.ContinuationBridge))
             {
-                if (!IsOwnedPhysicalFrame(context, frames[--entry], callStack, owner, profile))
+                if (!IsOwnedPhysicalFrame(context, frames[--entry], callStack, owner, support))
                 {
                     return;
                 }
@@ -338,10 +327,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             {
                 AsyncProfilerStitchedFrame box = frames[--entry];
                 bool isMatchingEntryBox =
-                    IsOwnedPhysicalFrame(context, box, callStack, owner, profile) &&
+                    IsOwnedPhysicalFrame(context, box, callStack, owner, support) &&
                     box.BoxedStateMachineMethod == recursiveMethod &&
                     box.SyncFrameKind == AsyncProfilerStitchSyncFrameKind.ProfilerHelper &&
-                    profile.IsProfilerDispatchInfrastructure(box.SyncClassification);
+                    support.IsProfilerDispatchInfrastructure(box.SyncClassification);
                 if (!isMatchingEntryBox)
                 {
                     return;
@@ -376,7 +365,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <summary>Checks that a resolved physical frame belongs to the call stack and captured runtime.</summary>
         private static bool IsOwnedPhysicalFrame(AsyncProfilerCallStackTransformState context,
             AsyncProfilerStitchedFrame frame, AsyncProfilerCallStack callStack,
-            ModuleFileIndex owner, AsyncProfilerRuntimeRuleProfile profile)
+            ModuleFileIndex owner, AsyncProfilerRuntimeSupport support)
         {
             bool belongsToCallStack =
                 frame.Origin == AsyncProfilerStitchedFrameOrigin.Sync &&
@@ -391,11 +380,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 hasResolvedIdentity &&
                 owner != ModuleFileIndex.Invalid && context.GetHostModuleOwner(frame.CodeAddress) == owner;
 
-            bool hasMatchingRuntimeProfile =
+            bool hasMatchingRuntimeSupport =
                 hasMatchingRuntimeOwner &&
-                ReferenceEquals(context.GetRuntimeProfile(frame.CodeAddress), profile);
+                ReferenceEquals(context.GetRuntimeSupport(frame.CodeAddress), support);
 
-            return hasMatchingRuntimeProfile;
+            return hasMatchingRuntimeSupport;
         }
 
         /// <summary>
@@ -442,7 +431,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 }
 
                 bool hasObservedV1MethodCompletions =
-                    callStack != null && callStack.Frames.Kind == AsyncCallstackKind.StateMachineAsync &&
+                    callStack != null &&
+                    callStack.Frames.Kind == AsyncCallstackKind.StateMachineAsync &&
                     context.TraceLog.AsyncProfilerCallStacks?.MethodCompletionObserved(callStack) == true &&
                     callStack.GetMethodCompletedFrameCount(context.TimestampQpc) > 0;
 
@@ -459,15 +449,19 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
                     // Match the physical prefix before replacing it. Pending logical callers must survive the edit.
                     bool partialReturn =
-                        incompleteRoot && completed > 0 && completed < callStack.Frames.FrameCount &&
+                        incompleteRoot &&
+                        completed > 0 &&
+                        completed < callStack.Frames.FrameCount &&
                         HasRemainingV1Callers(frames, physicalEnd, end, completed + 1, callStack.Frames.FrameCount);
+
                     int unwindStart = start;
                     int completingPos = -1;
                     bool hasMatchingDispatcherTail = fullyCompleted && physicalEnd == end && TryMatchFullyCompletedV1DispatcherTail(context, start, end, callStack, out unwindStart);
                     bool hasMatchingRecursiveUnwind = partialReturn && TryMatchRecursiveV1Unwind(context, start, physicalEnd, callStack, completed, preserveLeaf: true, out unwindStart);
                     bool canMatchCompletedUnwind = (fullyCompleted && physicalEnd == end) || partialReturn;
                     bool hasMatchingCompletionUnwind =
-                        hasMatchingDispatcherTail || hasMatchingRecursiveUnwind ||
+                        hasMatchingDispatcherTail ||
+                        hasMatchingRecursiveUnwind ||
                         (canMatchCompletedUnwind && TryMatchCompletedV1Unwind(context, start, physicalEnd, callStack, completed, out unwindStart, out completingPos));
 
                     if (hasMatchingCompletionUnwind)
@@ -574,7 +568,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 MethodIndex method = address == CodeAddressIndex.Invalid ? MethodIndex.Invalid : log.CodeAddresses.MethodIndex(address);
                 bool hasResolvedMethod = method != MethodIndex.Invalid;
                 bool isUnrecognizedRootMethod =
-                    hasResolvedMethod && i == capturedMethods.Length - 1 &&
+                    hasResolvedMethod &&
+                    i == capturedMethods.Length - 1 &&
                     !AsyncProfilerMethodNames.TryGetLogicalStateMachineMethodName(AsyncProfilerMethodNames.NormalizeMethodName(log.CodeAddresses[address].FullMethodName), out _);
                 if (!hasResolvedMethod || isUnrecognizedRootMethod)
                 {
@@ -600,7 +595,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             bool hasBox = false;
             bool hasCompletion = false;
             ModuleFileIndex runtimeModule = ModuleFileIndex.Invalid;
-            AsyncProfilerRuntimeRuleProfile runtimeProfile = null;
+            AsyncProfilerRuntimeSupport runtimeSupport = null;
 
             // Match physical bodies and box-carried methods to the captured completed frames.
             for (int i = start; i < end; i++)
@@ -630,8 +625,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     return false;
                 }
 
-                AsyncProfilerRuntimeRuleProfile profile = context.GetRuntimeProfile(frame.CodeAddress);
-                bool isCompletionHelper = profile.IsV1CompletionUnwindInfrastructure(frame, context.ClassifyBoundary(frame.CodeAddress).Kind);
+                AsyncProfilerRuntimeSupport support = context.GetRuntimeSupport(frame.CodeAddress);
+                bool isCompletionHelper = support.IsV1CompletionUnwindInfrastructure(frame, context.ClassifyBoundary(frame.CodeAddress).Kind);
                 bool hasUnmatchedStateMachineMethod = (isStateMachineBody || isStateMachineBox) && capturedIndex < 0;
                 bool isUnexpectedHelper = !isStateMachineBody && !isCompletionHelper;
                 bool hasUnresolvedIdentity = frame.CodeAddress == CodeAddressIndex.Invalid || frame.Method == MethodIndex.Invalid;
@@ -646,12 +641,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     // Callees outside the verified completion-return sequence retain their physical identity and cost.
                     unwindStart = i + 1;
                     runtimeModule = ModuleFileIndex.Invalid;
-                    runtimeProfile = null;
+                    runtimeSupport = null;
                     hasCompletion = false;
                     continue;
                 }
 
-                // All return helpers must belong to the same runtime module and profile.
+                // All return helpers must belong to the same runtime module and support.
                 if (!isStateMachineBody)
                 {
                     ModuleFileIndex moduleIndex = context.GetHostModuleOwner(frame.CodeAddress);
@@ -660,14 +655,14 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                         return false;
                     }
 
-                    bool hasConflictingRuntime = runtimeModule != ModuleFileIndex.Invalid && (runtimeModule != moduleIndex || !ReferenceEquals(runtimeProfile, profile));
+                    bool hasConflictingRuntime = runtimeModule != ModuleFileIndex.Invalid && (runtimeModule != moduleIndex || !ReferenceEquals(runtimeSupport, support));
                     if (hasConflictingRuntime)
                     {
                         return false;
                     }
 
                     runtimeModule = moduleIndex;
-                    runtimeProfile = profile;
+                    runtimeSupport = support;
                     hasCompletion |= frame.SyncFrameKind == AsyncProfilerStitchSyncFrameKind.V1MethodCompletion;
                     hasBox |= isStateMachineBox;
                 }
@@ -765,7 +760,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             ModuleFileIndex owner = context.GetHostModuleOwner(tail.CodeAddress);
-            AsyncProfilerRuntimeRuleProfile profile = context.GetRuntimeProfile(tail.CodeAddress);
+            AsyncProfilerRuntimeSupport support = context.GetRuntimeSupport(tail.CodeAddress);
 
             // Match adjacent box helpers from this call stack, runtime, and completed leaf method.
             while (unwindStart > start && context.Frames[unwindStart - 1].BoxedStateMachineMethod != MethodIndex.Invalid)
@@ -779,9 +774,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     frame.SyncFrameKind == AsyncProfilerStitchSyncFrameKind.ProfilerHelper;
                 bool hasMatchingRuntime =
                     isMatchingBoxHelper && owner != ModuleFileIndex.Invalid && context.GetHostModuleOwner(frame.CodeAddress) == owner &&
-                    ReferenceEquals(context.GetRuntimeProfile(frame.CodeAddress), profile);
+                    ReferenceEquals(context.GetRuntimeSupport(frame.CodeAddress), support);
                 bool isVerifiedReturnHelper =
-                    hasMatchingRuntime && profile.IsV1CompletionUnwindInfrastructure(frame, context.ClassifyBoundary(frame.CodeAddress).Kind);
+                    hasMatchingRuntime && support.IsV1CompletionUnwindInfrastructure(frame, context.ClassifyBoundary(frame.CodeAddress).Kind);
                 if (!isVerifiedReturnHelper)
                 {
                     return false;
@@ -860,7 +855,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             int matchedBodyCount = 0;
             bool hasEntryBox = false;
             ModuleFileIndex runtimeModule = ModuleFileIndex.Invalid;
-            AsyncProfilerRuntimeRuleProfile runtimeProfile = null;
+            AsyncProfilerRuntimeSupport runtimeSupport = null;
 
             // Follow one contiguous return span belonging to this call stack.
             for (int i = start; i < end; i++)
@@ -876,8 +871,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 }
 
                 bool isStateMachineBody = frame.SyncFrameKind == AsyncProfilerStitchSyncFrameKind.V1StateMachineBody;
-                AsyncProfilerRuntimeRuleProfile profile = context.GetRuntimeProfile(frame.CodeAddress);
-                bool isCompletionHelper = profile.IsV1CompletionUnwindInfrastructure(frame, context.ClassifyBoundary(frame.CodeAddress).Kind);
+                AsyncProfilerRuntimeSupport support = context.GetRuntimeSupport(frame.CodeAddress);
+                bool isCompletionHelper = support.IsV1CompletionUnwindInfrastructure(frame, context.ClassifyBoundary(frame.CodeAddress).Kind);
                 bool isStateMachineBox = frame.BoxedStateMachineMethod != MethodIndex.Invalid;
                 bool hasUnresolvedIdentity = frame.CodeAddress == CodeAddressIndex.Invalid || frame.Method == MethodIndex.Invalid;
                 bool hasMismatchedStateMachineBody = isStateMachineBody && frame.Method != recursiveMethod;
@@ -892,7 +887,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     }
                     unwindStart = i + 1;
                     runtimeModule = ModuleFileIndex.Invalid;
-                    runtimeProfile = null;
+                    runtimeSupport = null;
                     hasEntryBox = false;
                     continue;
                 }
@@ -948,15 +943,15 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 bool hasResolvedRuntimeOwner = owner != ModuleFileIndex.Invalid;
                 bool hasConflictingRuntime =
                     hasResolvedRuntimeOwner && runtimeModule != ModuleFileIndex.Invalid &&
-                    (owner != runtimeModule || !ReferenceEquals(profile, runtimeProfile));
+                    (owner != runtimeModule || !ReferenceEquals(support, runtimeSupport));
                 if (!hasResolvedRuntimeOwner || hasConflictingRuntime)
                 {
                     return false;
                 }
 
-                // Helpers for every matched copy must share the same runtime owner and profile.
+                // Helpers for every matched copy must share the same runtime owner and support.
                 runtimeModule = owner;
-                runtimeProfile = profile;
+                runtimeSupport = support;
                 hasEntryBox |= isStateMachineBox && frame.SyncFrameKind == AsyncProfilerStitchSyncFrameKind.ProfilerHelper;
             }
 
@@ -1425,7 +1420,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
                 bool canGroupFrame =
                     isDispatcherMarker || boundedStart < i ||
-                    context.GetRuntimeProfile(frame.CodeAddress).IsOptionalInfrastructureFrame(frame, boundaryKind);
+                    context.GetRuntimeSupport(frame.CodeAddress).IsOptionalInfrastructureFrame(frame, boundaryKind);
                 if (!canGroupFrame)
                 {
                     continue;
@@ -1467,9 +1462,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 }
 
                 int precedingHelperCount = i - spanStart;
-                bool isFaultSpan =
-                    isFaultEntry || joinsFaultSpan ||
-                    frames[spanStart].SyncFrameKind == AsyncProfilerStitchSyncFrameKind.FaultHandling;
+                bool isFaultSpan = isFaultEntry || joinsFaultSpan || frames[spanStart].SyncFrameKind == AsyncProfilerStitchSyncFrameKind.FaultHandling;
                 faultSpanStart = isFaultSpan ? spanStart : -1;
                 int removed = CollapseMachinerySpan(frames, spanStart, precedingHelperCount + trailingFrameCount);
                 cleanupEnd -= removed;
@@ -1506,8 +1499,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     continue;
                 }
 
-                AsyncProfilerRuntimeSequenceMatch registration =
-                    context.MatchRuntimeSequence(AsyncProfilerRuntimeSequenceKind.V1AwaitRegistration, start + 1, protectedEnd);
+                AsyncProfilerRuntimeSequenceMatch registration = context.MatchRuntimeSequence(AsyncProfilerRuntimeSequenceKind.V1AwaitRegistration, start + 1, protectedEnd);
                 if (!registration.IsMatch)
                 {
                     continue;
@@ -1546,7 +1538,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     continue;
                 }
 
-                AsyncProfilerRuntimeRuleProfile profile = context.GetRuntimeProfile(entry.CodeAddress);
+                AsyncProfilerRuntimeSupport support = context.GetRuntimeSupport(entry.CodeAddress);
                 // Keep boundaries and already-grouped frames out of this optional helper sequence.
                 bool hasOnlyOptionalHelpers = true;
                 for (int i = start; i < end; i++)
@@ -1557,7 +1549,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                         helper.Presentation == AsyncProfilerStitchedFramePresentation.Native &&
                         helper.ContextKind == AsyncProfilerStitchedFrameContextKind.Active &&
                         boundary == AsyncProfilerCallStackStitchBoundaryKind.None &&
-                        profile.IsOptionalInfrastructureFrame(helper, boundary);
+                        support.IsOptionalInfrastructureFrame(helper, boundary);
                     if (!isOptionalHelper)
                     {
                         hasOnlyOptionalHelpers = false;
@@ -1608,6 +1600,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 {
                     return;
                 }
+
                 AsyncProfilerCallStackStitchBoundaryKind boundary = context.ClassifyBoundary(dispatcher.CodeAddress).Kind;
                 if (boundary == AsyncProfilerCallStackStitchBoundaryKind.None)
                 {
@@ -1655,9 +1648,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     }
                 }
 
-                AsyncProfilerRuntimeRuleProfile profile = context.GetRuntimeProfile(dispatcher.CodeAddress);
-                bool canGroupDispatcher = profile.IsOptionalInfrastructureFrame(dispatcher, boundary);
-                bool hasOnlyOptionalDispatchFrames = canGroupDispatcher && (isDispatcherMarker || profile.IsOptionalInfrastructureFrame(frames[i + 1], boundary));
+                AsyncProfilerRuntimeSupport support = context.GetRuntimeSupport(dispatcher.CodeAddress);
+                bool canGroupDispatcher = support.IsOptionalInfrastructureFrame(dispatcher, boundary);
+                bool hasOnlyOptionalDispatchFrames = canGroupDispatcher && (isDispatcherMarker || support.IsOptionalInfrastructureFrame(frames[i + 1], boundary));
                 if (!hasOnlyOptionalDispatchFrames)
                 {
                     return;
@@ -1688,7 +1681,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             out int rejectedStart, int minimumStart = 0)
         {
             rejectedStart = -1;
-            AsyncProfilerRuntimeRuleProfile profile = context.GetRuntimeProfile(entry.CodeAddress);
+            AsyncProfilerRuntimeSupport support = context.GetRuntimeSupport(entry.CodeAddress);
             ModuleFileIndex owner = context.GetHostModuleOwner(entry.CodeAddress);
             while (start > minimumStart)
             {
@@ -1714,11 +1707,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 bool hasMatchingRuntime =
                     isOwnedPhysicalHelper &&
                     owner != ModuleFileIndex.Invalid && owner == context.GetHostModuleOwner(helper.CodeAddress) &&
-                    ReferenceEquals(profile, context.GetRuntimeProfile(helper.CodeAddress));
+                    ReferenceEquals(support, context.GetRuntimeSupport(helper.CodeAddress));
                 bool isProfilerHelper =
                     hasMatchingRuntime &&
                     !context.ClassifyBoundary(helper.CodeAddress).IsDispatchMarker &&
-                    profile.IsProfilerDispatchInfrastructure(helper.SyncClassification);
+                    support.IsProfilerDispatchInfrastructure(helper.SyncClassification);
                 if (!isProfilerHelper)
                 {
                     break;
@@ -1761,9 +1754,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 return entryIndex;
             }
 
-            AsyncProfilerRuntimeRuleProfile profile = context.GetRuntimeProfile(entry.CodeAddress);
+            AsyncProfilerRuntimeSupport support = context.GetRuntimeSupport(entry.CodeAddress);
             string entryMethodName = AsyncProfilerMethodNames.NormalizeMethodName(context.TraceLog.CodeAddresses[entry.CodeAddress].FullMethodName);
-            bool hasSupportedSequence = profile.TryGetOptionalSequenceKind(entryMethodName, entry.SyncClassification, out AsyncProfilerRuntimeSequenceKind sequence);
+            bool hasSupportedSequence = support.TryGetOptionalSequenceKind(entryMethodName, entry.SyncClassification, out AsyncProfilerRuntimeSequenceKind sequence);
             bool hasVerifiedDispatchEntry = hasSupportedSequence && context.HasVerifiedDispatchEntry(entry.Context, entry.CodeAddress, requireAsyncAnchor: false);
             if (!hasVerifiedDispatchEntry)
             {
@@ -1786,7 +1779,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 bool hasMatchingRuntime =
                     belongsToCallStack &&
                     owner != ModuleFileIndex.Invalid && context.GetHostModuleOwner(helper.CodeAddress) == owner &&
-                    ReferenceEquals(context.GetRuntimeProfile(helper.CodeAddress), profile);
+                    ReferenceEquals(context.GetRuntimeSupport(helper.CodeAddress), support);
                 bool isNonBoundaryHelper = hasMatchingRuntime && !context.ClassifyBoundary(helper.CodeAddress).IsDispatchMarker;
                 bool canExtendSequence =
                     isNonBoundaryHelper &&
@@ -1801,8 +1794,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 // Leave individually recognized helpers on their usual cleanup paths.
                 // Match the whole sequence only after a helper needs that extra proof.
                 hasSequenceOnlyHelper |=
-                    !profile.IsOptionalInfrastructureFrame(helper, boundary) &&
-                    !profile.IsProfilerDispatchInfrastructure(helper.SyncClassification);
+                    !support.IsOptionalInfrastructureFrame(helper, boundary) &&
+                    !support.IsProfilerDispatchInfrastructure(helper.SyncClassification);
                 if (!hasSequenceOnlyHelper)
                 {
                     continue;
@@ -2111,7 +2104,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             int dispatchIndex = frames.Count;
             for (int i = bridgeStart; i < frames.Count; i++)
             {
-                if (context.GetRuntimeProfile(frames[i].CodeAddress).IsRuntimeResumptionAnchor(frames[i]))
+                if (context.GetRuntimeSupport(frames[i].CodeAddress).IsRuntimeResumptionAnchor(frames[i]))
                 {
                     dispatchIndex = i;
                     break;
@@ -2123,7 +2116,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             {
                 for (int i = 0; i <= rootIndex; i++)
                 {
-                    if (context.GetRuntimeProfile(frames[i].CodeAddress).IsRuntimeResumptionAnchor(frames[i]))
+                    if (context.GetRuntimeSupport(frames[i].CodeAddress).IsRuntimeResumptionAnchor(frames[i]))
                     {
                         dispatchIndex = i;
                         break;
@@ -2219,7 +2212,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 bool hasMatchingAnchorRuntime =
                     hasResolvedPhysicalAnchor &&
                     context.GetHostModuleOwner(anchor.CodeAddress) == context.GetHostModuleOwner(frames[bridgeStart].CodeAddress) &&
-                    ReferenceEquals(context.GetRuntimeProfile(anchor.CodeAddress), context.GetRuntimeProfile(frames[bridgeStart].CodeAddress));
+                    ReferenceEquals(context.GetRuntimeSupport(anchor.CodeAddress), context.GetRuntimeSupport(frames[bridgeStart].CodeAddress));
                 if (!hasMatchingAnchorRuntime)
                 {
                     return bridgeStart;
@@ -2292,13 +2285,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         /// <summary>
-        /// Checks that physical frames share a call-stack context and runtime profile.
+        /// Checks that physical frames share a call-stack context and runtime support.
         /// Also requires the same resolved runtime owner when trace metadata is available.
         /// </summary>
         internal static bool HasSameMachineryOwner(AsyncProfilerCallStackTransformState context, int start, int count)
         {
             AsyncProfilerStitchedFrame first = context.Frames[start];
-            AsyncProfilerRuntimeRuleProfile profile = context.GetRuntimeProfile(first.CodeAddress);
+            AsyncProfilerRuntimeSupport support = context.GetRuntimeSupport(first.CodeAddress);
             ModuleFileIndex owner = context.GetHostModuleOwner(first.CodeAddress);
             for (int i = start; i < start + count; i++)
             {
@@ -2306,15 +2299,15 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 bool hasMatchingPhysicalContext =
                     frame.Origin == AsyncProfilerStitchedFrameOrigin.Sync &&
                     ReferenceEquals(first.Context, frame.Context);
-                bool hasMatchingRuntimeProfile =
+                bool hasMatchingRuntimeSupport =
                     hasMatchingPhysicalContext &&
-                    ReferenceEquals(profile, context.GetRuntimeProfile(frame.CodeAddress));
-                if (!hasMatchingRuntimeProfile)
+                    ReferenceEquals(support, context.GetRuntimeSupport(frame.CodeAddress));
+                if (!hasMatchingRuntimeSupport)
                 {
                     return false;
                 }
 
-                // Without trace metadata, only the context and profile can be checked.
+                // Without trace metadata, only the context and support can be checked.
                 if (context.TraceLog != null)
                 {
                     bool hasMatchingRuntimeOwner =
@@ -2401,7 +2394,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         /// <summary>
-        /// Checks that every frame has a resolved method and the same runtime owner and profile.
+        /// Checks that every frame has a resolved method and the same runtime owner and support.
         /// </summary>
         internal static bool IsResolvedRuntimeSpan(AsyncProfilerCallStackTransformState context,
             List<AsyncProfilerStitchedFrame> frames, int start, int count)
@@ -2412,7 +2405,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             ModuleFileIndex owner = context.GetHostModuleOwner(frames[start].CodeAddress);
-            AsyncProfilerRuntimeRuleProfile profile = context.GetRuntimeProfile(frames[start].CodeAddress);
+            AsyncProfilerRuntimeSupport support = context.GetRuntimeSupport(frames[start].CodeAddress);
             int end = start + count;
             for (int i = start; i < end; i++)
             {
@@ -2424,7 +2417,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 bool hasMatchingRuntime =
                     hasResolvedRuntimeFrame &&
                     context.GetHostModuleOwner(codeAddressIndex) == owner &&
-                    ReferenceEquals(context.GetRuntimeProfile(codeAddressIndex), profile);
+                    ReferenceEquals(context.GetRuntimeSupport(codeAddressIndex), support);
                 if (!hasMatchingRuntime)
                 {
                     return false;

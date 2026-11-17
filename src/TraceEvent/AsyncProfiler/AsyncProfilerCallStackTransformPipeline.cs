@@ -17,7 +17,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// </summary>
     internal readonly struct AsyncProfilerCallStackTransformState
     {
-        /// <summary>Creates the sample's shared state and selects its runtime profile.</summary>
+        /// <summary>Creates the sample's shared state and selects its runtime support.</summary>
         internal AsyncProfilerCallStackTransformState(
             TraceLog traceLog,
             IReadOnlyList<AsyncProfilerCallStack> segments,
@@ -26,9 +26,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             AsyncProfilerCallStackStitchingState stitchingState,
             AsyncProfilerCallStackDiagnostics diagnostics,
             List<AsyncProfilerStitchedFrame> frames,
-            Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile> runtimeProfileResolver = null,
-            AsyncProfilerRuntimeRuleProfile runtimeProfile = null,
-            AsyncProfilerRuntimeRuleProfileCache runtimeProfiles = null,
+            Func<CodeAddressIndex, AsyncProfilerRuntimeSupport> runtimeSupportResolver = null,
+            AsyncProfilerRuntimeSupport runtimeSupport = null,
+            AsyncProfilerRuntimeResolver runtimeResolver = null,
             IReadOnlyList<AsyncProfilerCallStackPlacement> segmentPlacements = null,
             Func<CodeAddressIndex, MethodIndex> methodOf = null)
         {
@@ -41,13 +41,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             Frames = frames;
             m_segmentPlacements = segmentPlacements;
             m_methodOf = methodOf;
-            m_runtimeProfiles = runtimeProfiles ??
-                (traceLog == null ? null : new AsyncProfilerRuntimeRuleProfileCache(traceLog.ModuleFiles));
-            m_runtimeProfileResolver = runtimeProfileResolver ??
-                CreateRuntimeProfileResolver(traceLog, m_runtimeProfiles);
-            RuntimeProfile = runtimeProfile ?? ResolveRuntimeProfile(
-                traceLog, segments, frames, m_runtimeProfileResolver, m_runtimeProfiles,
-                useProcessProfile: runtimeProfileResolver == null);
+            m_runtimeResolver = runtimeResolver ??
+                (traceLog == null ? null : new AsyncProfilerRuntimeResolver(traceLog.ModuleFiles));
+            m_runtimeSupportResolver = runtimeSupportResolver ??
+                CreateRuntimeSupportResolver(traceLog, m_runtimeResolver);
+            RuntimeSupport = runtimeSupport ?? ResolveRuntimeSupport(
+                traceLog, segments, frames, m_runtimeSupportResolver, m_runtimeResolver,
+                useProcessSupport: runtimeSupportResolver == null);
         }
 
         /// <summary>
@@ -77,24 +77,24 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         public List<AsyncProfilerStitchedFrame> Frames { get; }
 
         /// <summary>
-        /// Runtime profile selected for this sample before presentation transforms modify its frames.
+        /// Runtime support selected for this sample before presentation transforms modify its frames.
         /// </summary>
-        internal AsyncProfilerRuntimeRuleProfile RuntimeProfile { get; }
+        internal AsyncProfilerRuntimeSupport RuntimeSupport { get; }
 
         /// <summary>Classifies a frame using the runtime boundary-name contract for this trace.</summary>
         public AsyncProfilerCallStackStitchBoundaryInfo ClassifyBoundary(CodeAddressIndex codeAddress) =>
             m_classifyBoundary(codeAddress);
 
-        /// <summary>Gets the runtime profile for a captured code address.</summary>
-        internal AsyncProfilerRuntimeRuleProfile GetRuntimeProfile(CodeAddressIndex codeAddress) =>
-            m_runtimeProfileResolver(codeAddress) ??
-            throw new InvalidOperationException("The runtime profile resolver returned null.");
+        /// <summary>Gets the runtime support for a captured code address.</summary>
+        internal AsyncProfilerRuntimeSupport GetRuntimeSupport(CodeAddressIndex codeAddress) =>
+            m_runtimeSupportResolver(codeAddress) ??
+            throw new InvalidOperationException("The runtime support resolver returned null.");
 
         /// <summary>Gets the captured CoreLib owner, or Invalid when it cannot be identified.</summary>
         internal ModuleFileIndex GetHostModuleOwner(CodeAddressIndex codeAddress) =>
             TraceLog == null || codeAddress == CodeAddressIndex.Invalid
                 ? ModuleFileIndex.Invalid
-                : m_runtimeProfiles.GetHostModuleOwner(TraceLog.CodeAddresses.ModuleFileIndex(codeAddress));
+                : m_runtimeResolver.GetHostModuleOwner(TraceLog.CodeAddresses.ModuleFileIndex(codeAddress));
 
         /// <summary>
         /// Uses the supplied method resolver, or the trace's method index when no resolver was supplied.
@@ -117,7 +117,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <summary>Checks that two physical addresses form a V2 dispatch pair from the same runtime.</summary>
         internal bool IsV2DispatchPair(CodeAddressIndex instrumented, CodeAddressIndex dispatch) =>
             TraceLog != null &&
-            AsyncProfilerCallStackStitcher.IsV2DispatchPair(TraceLog, m_runtimeProfiles, instrumented, dispatch);
+            AsyncProfilerCallStackStitcher.IsV2DispatchPair(TraceLog, m_runtimeResolver, instrumented, dispatch);
 
         /// <summary>Checks the bridge's runtime against a captured V2 dispatch pair for this call stack.</summary>
         internal bool HasVerifiedV2DispatchPair(AsyncProfilerCallStack callStack, CodeAddressIndex bridge)
@@ -134,13 +134,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     ReferenceEquals(placement.CallStack, callStack) &&
                     owner != ModuleFileIndex.Invalid &&
                     owner == GetHostModuleOwner(placement.InstrumentedDispatch);
-                bool hasMatchingRuntimeProfile =
+                bool hasMatchingRuntimeSupport =
                     hasMatchingPlacementOwner &&
-                    ReferenceEquals(GetRuntimeProfile(bridge), GetRuntimeProfile(placement.InstrumentedDispatch));
+                    ReferenceEquals(GetRuntimeSupport(bridge), GetRuntimeSupport(placement.InstrumentedDispatch));
                 bool hasVerifiedPair =
-                    hasMatchingRuntimeProfile &&
+                    hasMatchingRuntimeSupport &&
                     AsyncProfilerCallStackStitcher.IsV2DispatchPair(
-                        TraceLog, m_runtimeProfiles, placement.InstrumentedDispatch, placement.Dispatch);
+                        TraceLog, m_runtimeResolver, placement.InstrumentedDispatch, placement.Dispatch);
                 if (hasVerifiedPair)
                 {
                     return true;
@@ -174,11 +174,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 bool hasMatchingPlacementOwner =
                     ReferenceEquals(placement.CallStack, callStack) &&
                     owner != ModuleFileIndex.Invalid && owner == GetHostModuleOwner(placement.Dispatch);
-                bool hasMatchingRuntimeProfile =
+                bool hasMatchingRuntimeSupport =
                     hasMatchingPlacementOwner &&
-                    ReferenceEquals(GetRuntimeProfile(bridge), GetRuntimeProfile(placement.Dispatch));
+                    ReferenceEquals(GetRuntimeSupport(bridge), GetRuntimeSupport(placement.Dispatch));
                 bool hasResolvedV1Dispatcher =
-                    hasMatchingRuntimeProfile &&
+                    hasMatchingRuntimeSupport &&
                     ClassifyBoundary(placement.Dispatch).Kind ==
                         AsyncProfilerCallStackStitchBoundaryKind.V1Dispatcher &&
                     TraceLog.CodeAddresses.MethodIndex(placement.Dispatch) != MethodIndex.Invalid;
@@ -367,7 +367,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         /// <summary>
         /// Matches a runtime sequence and verifies its physical frames belong to the same runtime.
-        /// V1 startup begins in application code, so it uses the sample's profile and checks only its helpers.
+        /// V1 startup begins in application code, so it uses the sample's support and checks only its helpers.
         /// </summary>
         internal AsyncProfilerRuntimeSequenceMatch MatchRuntimeSequence(
             AsyncProfilerRuntimeSequenceKind kind, int start, int end, bool allowRuntimeInteriors = false)
@@ -384,8 +384,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             bool isV1Startup = kind == AsyncProfilerRuntimeSequenceKind.V1Startup;
-            AsyncProfilerRuntimeRuleProfile profile = isV1Startup ? RuntimeProfile : GetRuntimeProfile(Frames[start].CodeAddress);
-            AsyncProfilerRuntimeSequenceMatch match = profile.MatchSequence(kind, this, start, end, allowRuntimeInteriors);
+            AsyncProfilerRuntimeSupport support = isV1Startup ? RuntimeSupport : GetRuntimeSupport(Frames[start].CodeAddress);
+            AsyncProfilerRuntimeSequenceMatch match = support.MatchSequence(kind, this, start, end, allowRuntimeInteriors);
             if (match.Length > end - start)
             {
                 throw new InvalidOperationException(
@@ -402,11 +402,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             if (isV1Startup)
             {
                 bool hasStateMachineBody = IsSyncFrameKind(Frames[start], AsyncProfilerStitchSyncFrameKind.V1StateMachineBody);
-                hasOwnedRuntimeSpan = hasStateMachineBody && IsSameRuntimeSpan(profile, start + 1, match.Length - 1);
+                hasOwnedRuntimeSpan = hasStateMachineBody && IsSameRuntimeSpan(support, start + 1, match.Length - 1);
             }
             else
             {
-                hasOwnedRuntimeSpan = IsSameRuntimeSpan(profile, start, match.Length);
+                hasOwnedRuntimeSpan = IsSameRuntimeSpan(support, start, match.Length);
             }
 
             if (!hasOwnedRuntimeSpan)
@@ -419,15 +419,15 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         #region private
 
-        /// <summary>Selects one profile for the sample.</summary>
-        private static AsyncProfilerRuntimeRuleProfile ResolveRuntimeProfile(
+        /// <summary>Selects one runtime-support implementation for the sample.</summary>
+        private static AsyncProfilerRuntimeSupport ResolveRuntimeSupport(
             TraceLog traceLog, IReadOnlyList<AsyncProfilerCallStack> segments, List<AsyncProfilerStitchedFrame> frames,
-            Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile> runtimeProfileResolver,
-            AsyncProfilerRuntimeRuleProfileCache profiles, bool useProcessProfile)
+            Func<CodeAddressIndex, AsyncProfilerRuntimeSupport> runtimeSupportResolver,
+            AsyncProfilerRuntimeResolver runtimeResolver, bool useProcessSupport)
         {
             // A custom address resolver must not be bypassed by the process-level cache.
             bool hasCapturedProcess =
-                useProcessProfile && profiles != null && segments.Count != 0 &&
+                useProcessSupport && runtimeResolver != null && segments.Count != 0 &&
                 segments[0].Thread.ProcessIndex != ProcessIndex.Invalid;
             if (hasCapturedProcess)
             {
@@ -436,55 +436,55 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 {
                     if (segments[i].Thread.ProcessIndex != process)
                     {
-                        return AsyncProfilerRuntimeRuleProfile.Common;
+                        return AsyncProfilerRuntimeSupport.Common;
                     }
                 }
 
-                return profiles.GetProcessProfile(process);
+                return runtimeResolver.ResolveProcessSupport(process);
             }
 
-            // Without a process-level choice, compare the profiles of the retained runtime frames.
-            AsyncProfilerRuntimeRuleProfile selectedProfile = null;
+            // Without a process-level choice, compare the support selected for retained runtime frames.
+            AsyncProfilerRuntimeSupport selectedSupport = null;
             foreach (AsyncProfilerStitchedFrame frame in frames)
             {
                 if (traceLog != null)
                 {
                     bool isRuntimeFrame =
                         frame.CodeAddress != CodeAddressIndex.Invalid &&
-                        profiles.IsHostModule(traceLog.CodeAddresses.ModuleFileIndex(frame.CodeAddress));
+                        runtimeResolver.IsHostModule(traceLog.CodeAddresses.ModuleFileIndex(frame.CodeAddress));
                     if (!isRuntimeFrame)
                     {
                         continue;
                     }
                 }
 
-                AsyncProfilerRuntimeRuleProfile frameProfile = runtimeProfileResolver(frame.CodeAddress) ??
-                    throw new InvalidOperationException("The runtime profile resolver returned null.");
-                if (selectedProfile != null && !ReferenceEquals(selectedProfile, frameProfile))
+                AsyncProfilerRuntimeSupport frameSupport = runtimeSupportResolver(frame.CodeAddress) ??
+                    throw new InvalidOperationException("The runtime support resolver returned null.");
+                if (selectedSupport != null && !ReferenceEquals(selectedSupport, frameSupport))
                 {
-                    return AsyncProfilerRuntimeRuleProfile.Common;
+                    return AsyncProfilerRuntimeSupport.Common;
                 }
 
-                selectedProfile = frameProfile;
+                selectedSupport = frameSupport;
             }
 
-            return selectedProfile ?? AsyncProfilerRuntimeRuleProfile.Common;
+            return selectedSupport ?? AsyncProfilerRuntimeSupport.Common;
         }
 
         /// <summary>
-        /// Checks that a physical span uses one runtime profile.
+        /// Checks that a physical span uses the same runtime-support implementation.
         /// With trace metadata, also requires resolved methods and a shared runtime owner.
         /// </summary>
-        private bool IsSameRuntimeSpan(AsyncProfilerRuntimeRuleProfile profile, int start, int length)
+        private bool IsSameRuntimeSpan(AsyncProfilerRuntimeSupport support, int start, int length)
         {
             ModuleFileIndex runtimeOwner = ModuleFileIndex.Invalid;
             for (int i = start; i < start + length; i++)
             {
                 AsyncProfilerStitchedFrame frame = Frames[i];
-                bool hasMatchingPhysicalProfile =
+                bool hasMatchingPhysicalSupport =
                     frame.Origin == AsyncProfilerStitchedFrameOrigin.Sync &&
-                    ReferenceEquals(profile, GetRuntimeProfile(frame.CodeAddress));
-                if (!hasMatchingPhysicalProfile)
+                    ReferenceEquals(support, GetRuntimeSupport(frame.CodeAddress));
+                if (!hasMatchingPhysicalSupport)
                 {
                     return false;
                 }
@@ -517,22 +517,22 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         /// <summary>Creates an address resolver.</summary>
-        private static Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile> CreateRuntimeProfileResolver(
-            TraceLog traceLog, AsyncProfilerRuntimeRuleProfileCache profiles)
+        private static Func<CodeAddressIndex, AsyncProfilerRuntimeSupport> CreateRuntimeSupportResolver(
+            TraceLog traceLog, AsyncProfilerRuntimeResolver runtimeResolver)
         {
             if (traceLog == null)
             {
-                return _ => AsyncProfilerRuntimeRuleProfile.Common;
+                return _ => AsyncProfilerRuntimeSupport.Common;
             }
 
             return codeAddress => codeAddress == CodeAddressIndex.Invalid
-                ? AsyncProfilerRuntimeRuleProfile.Common
-                : profiles.GetProfile(traceLog.CodeAddresses.ModuleFileIndex(codeAddress));
+                ? AsyncProfilerRuntimeSupport.Common
+                : runtimeResolver.ResolveModuleSupport(traceLog.CodeAddresses.ModuleFileIndex(codeAddress));
         }
 
         private readonly Func<CodeAddressIndex, AsyncProfilerCallStackStitchBoundaryInfo> m_classifyBoundary;
-        private readonly Func<CodeAddressIndex, AsyncProfilerRuntimeRuleProfile> m_runtimeProfileResolver;
-        private readonly AsyncProfilerRuntimeRuleProfileCache m_runtimeProfiles;
+        private readonly Func<CodeAddressIndex, AsyncProfilerRuntimeSupport> m_runtimeSupportResolver;
+        private readonly AsyncProfilerRuntimeResolver m_runtimeResolver;
         private readonly IReadOnlyList<AsyncProfilerCallStackPlacement> m_segmentPlacements;
         private readonly Func<CodeAddressIndex, MethodIndex> m_methodOf;
 
@@ -553,7 +553,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
     /// Custom transforms run last, in registration order.
     /// </summary>
     /// <remarks>
-    /// Configure before stack generation. Runtime profiles choose built-in implementations without changing
+    /// Configure before stack generation. Runtime support implementations choose built-in implementations without changing
     /// pass order or enablement. Parent contexts and frame names are handled by the host, not by
     /// standalone <see cref="Transform"/> calls.
     /// </remarks>
@@ -778,13 +778,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         /// <summary>
         /// Runs the built-in transform identified by <paramref name="kind"/>.
-        /// The sample's runtime profile supplies the implementation.
+        /// The sample's runtime support supplies the implementation.
         /// </summary>
         private static void ApplyRuntimeTransform(
             AsyncProfilerCallStackTransformState context, AsyncProfilerRuntimeTransformKind kind)
         {
-            AsyncProfilerCallStackTransform transform = context.RuntimeProfile.GetTransform(kind) ??
-                throw new InvalidOperationException("A runtime profile returned a null presentation transform.");
+            AsyncProfilerCallStackTransform transform = context.RuntimeSupport.GetTransform(kind) ??
+                throw new InvalidOperationException("A runtime support returned a null presentation transform.");
             transform(context);
         }
 

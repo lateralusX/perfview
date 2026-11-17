@@ -5,7 +5,7 @@ using System;
 
 namespace Microsoft.Diagnostics.Tracing.Computers
 {
-    /// <summary>Frame sequences recognized by runtime profiles.</summary>
+    /// <summary>Frame sequences recognized by runtime support.</summary>
     internal enum AsyncProfilerRuntimeSequenceKind
     {
         TaskCompletion,
@@ -18,7 +18,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         TaskExceptionCompletion,
     }
 
-    /// <summary>Built-in presentation transforms supplied by runtime profiles.</summary>
+    /// <summary>Built-in presentation transforms supplied by runtime support.</summary>
     internal enum AsyncProfilerRuntimeTransformKind
     {
         SampledV2Wrapper,

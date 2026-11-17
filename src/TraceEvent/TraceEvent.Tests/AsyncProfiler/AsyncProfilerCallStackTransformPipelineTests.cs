@@ -11,7 +11,7 @@ using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
 
 using Xunit;
 
-using static Microsoft.Diagnostics.Tracing.Computers.AsyncProfilerRuntimeRuleProfile;
+using static Microsoft.Diagnostics.Tracing.Computers.AsyncProfilerRuntimeSupport;
 
 namespace TraceEventTests
 {
@@ -237,7 +237,7 @@ namespace TraceEventTests
             AsyncProfilerCallStack leafContext = CreateActivation();
             AsyncProfilerCallStack rootContext = sameContext ? leafContext : CreateActivation();
             FrameClassification kind = builderHelper
-                ? (FrameClassification)HelperKind.V1BuilderAwaitRegistration
+                ? (FrameClassification)RuntimeFrameKind.V1BuilderAwaitRegistration
                 : AsyncProfilerStitchSyncFrameKind.None;
             var frames = new List<AsyncProfilerStitchedFrame>
             {
@@ -272,7 +272,7 @@ namespace TraceEventTests
             {
                 Sync(34, AsyncProfilerStitchSyncFrameKind.V1DispatchSetup),
                 Sync(35),
-                Sync(36, HelperKind.SchedulerEntry),
+                Sync(36, RuntimeFrameKind.SchedulerEntry),
             };
             var pipeline = new AsyncProfilerCallStackTransformPipeline();
             AsyncProfilerCallStackTransformState context = Context(frames, diagnostics);
@@ -295,16 +295,16 @@ namespace TraceEventTests
             var frames = new List<AsyncProfilerStitchedFrame>
             {
                 Sync(40),
-                Sync(41, HelperKind.V1BuilderAwaitRegistration),
-                Sync(42, HelperKind.V1BuilderAwaitRegistration),
-                Sync(43, HelperKind.V1BuilderAwaitRegistration),
+                Sync(41, RuntimeFrameKind.V1BuilderAwaitRegistration),
+                Sync(42, RuntimeFrameKind.V1BuilderAwaitRegistration),
+                Sync(43, RuntimeFrameKind.V1BuilderAwaitRegistration),
                 Sync(44, AsyncProfilerStitchSyncFrameKind.V1MethodHelper),
                 Sync(45, AsyncProfilerStitchSyncFrameKind.V1MethodCompletion),
-                Sync(46, HelperKind.V1AwaiterRegistration),
+                Sync(46, RuntimeFrameKind.V1AwaiterRegistration),
                 Sync(47, AsyncProfilerStitchSyncFrameKind.ContinuationBridge),
                 Sync(48, AsyncProfilerStitchSyncFrameKind.ContinuationBridge),
                 Sync(49), // User/custom awaiter, builder, or bridge method remains ordinary.
-                Sync(50, HelperKind.SchedulerEntry),
+                Sync(50, RuntimeFrameKind.SchedulerEntry),
             };
             var pipeline = new AsyncProfilerCallStackTransformPipeline
             {
@@ -331,9 +331,9 @@ namespace TraceEventTests
             var frames = new List<AsyncProfilerStitchedFrame>
             {
                 Sync(60),
-                Sync(61, HelperKind.TaskContinuations),
-                Sync(62, HelperKind.TaskResult),
-                Sync(63, HelperKind.TaskCompletionSourceResult),
+                Sync(61, RuntimeFrameKind.TaskContinuations),
+                Sync(62, RuntimeFrameKind.TaskResult),
+                Sync(63, RuntimeFrameKind.TaskCompletionSourceResult),
                 Sync(64),
             };
             var pipeline = new AsyncProfilerCallStackTransformPipeline
@@ -356,7 +356,7 @@ namespace TraceEventTests
             var frames = new List<AsyncProfilerStitchedFrame>
             {
                 Sync(70),
-                Sync(71, HelperKind.TaskCompletionSourceResult),
+                Sync(71, RuntimeFrameKind.TaskCompletionSourceResult),
                 Sync(72),
             };
             var pipeline = new AsyncProfilerCallStackTransformPipeline
@@ -379,11 +379,11 @@ namespace TraceEventTests
             var frames = new List<AsyncProfilerStitchedFrame>
             {
                 AsyncProfilerStitchedFrame.CreateSync(new AsyncProfilerStitchSyncFrame(CA(60), MethodIndex.Invalid,
-                    HelperKind.TaskContinuations), leafContext),
+                    RuntimeFrameKind.TaskContinuations), leafContext),
                 AsyncProfilerStitchedFrame.CreateSync(new AsyncProfilerStitchSyncFrame(CA(61), MethodIndex.Invalid,
-                    HelperKind.TaskResult), rootContext),
+                    RuntimeFrameKind.TaskResult), rootContext),
                 AsyncProfilerStitchedFrame.CreateSync(new AsyncProfilerStitchSyncFrame(CA(62), MethodIndex.Invalid,
-                    HelperKind.TaskCompletionSourceResult), rootContext),
+                    RuntimeFrameKind.TaskCompletionSourceResult), rootContext),
             };
             AsyncProfilerStitchedFrame[] original = frames.ToArray();
             var diagnostics = new AsyncProfilerCallStackDiagnostics();
@@ -406,14 +406,14 @@ namespace TraceEventTests
             var diagnostics = new AsyncProfilerCallStackDiagnostics();
             var frames = new List<AsyncProfilerStitchedFrame>
             {
-                Sync(80, HelperKind.TaskContinuations),
-                Sync(81, HelperKind.TaskResult),
+                Sync(80, RuntimeFrameKind.TaskContinuations),
+                Sync(81, RuntimeFrameKind.TaskResult),
             };
             for (int i = 0; i < chainCount; i++)
             {
-                frames.Add(Sync(82, HelperKind.TaskContinuations));
-                frames.Add(Sync(83, HelperKind.TaskResult));
-                frames.Add(Sync(84, HelperKind.TaskCompletionSourceResult));
+                frames.Add(Sync(82, RuntimeFrameKind.TaskContinuations));
+                frames.Add(Sync(83, RuntimeFrameKind.TaskResult));
+                frames.Add(Sync(84, RuntimeFrameKind.TaskCompletionSourceResult));
             }
             var pipeline = new AsyncProfilerCallStackTransformPipeline
             {
@@ -443,9 +443,9 @@ namespace TraceEventTests
             var frames = new List<AsyncProfilerStitchedFrame>();
             foreach (char frame in pattern)
             {
-                FrameClassification kind = frame == 'R' ? (FrameClassification)HelperKind.TaskContinuations
-                    : frame == 'T' ? (FrameClassification)HelperKind.TaskResult
-                    : frame == 'S' ? (FrameClassification)HelperKind.TaskCompletionSourceResult
+                FrameClassification kind = frame == 'R' ? (FrameClassification)RuntimeFrameKind.TaskContinuations
+                    : frame == 'T' ? (FrameClassification)RuntimeFrameKind.TaskResult
+                    : frame == 'S' ? (FrameClassification)RuntimeFrameKind.TaskCompletionSourceResult
                     : AsyncProfilerStitchSyncFrameKind.None;
                 frames.Add(Sync(frame, kind));
             }
@@ -795,9 +795,9 @@ namespace TraceEventTests
         {
             List<AsyncProfilerStitchedFrame> frames = StartupFrames();
             frames.Insert(0, Sync(20));
-            frames.Add(Sync(15, HelperKind.V1AwaiterRegistration));
-            frames.Add(Sync(16, HelperKind.TaskCompletionSourceResult));
-            frames.Add(Sync(17, HelperKind.SchedulerEntry));
+            frames.Add(Sync(15, RuntimeFrameKind.V1AwaiterRegistration));
+            frames.Add(Sync(16, RuntimeFrameKind.TaskCompletionSourceResult));
+            frames.Add(Sync(17, RuntimeFrameKind.SchedulerEntry));
             return frames;
         }
 
@@ -812,8 +812,8 @@ namespace TraceEventTests
             {
                 Sync(10),
                 Sync(11, AsyncProfilerStitchSyncFrameKind.V1StateMachineBody),
-                Sync(12, HelperKind.V1Startup),
-                Sync(13, HelperKind.V1Startup),
+                Sync(12, RuntimeFrameKind.V1Startup),
+                Sync(13, RuntimeFrameKind.V1Startup),
                 Sync(14),
             };
 
