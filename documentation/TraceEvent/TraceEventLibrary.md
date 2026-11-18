@@ -35,6 +35,12 @@ class Program
 }
 ```
 
+## Async-profiler architecture
+
+[Async-profiler architecture](AsyncProfiler.md) describes how TraceEvent decodes
+async-profiler records, persists call-stack intervals, and reconstructs logical
+async call stacks from physical samples.
+
 ## TraceEvent Samples
 
 To see more complete samples that use the APIs in more sophisticated (but not too sophisticated ways). In the [Samples directory](https://github.com/Microsoft/perfview/tree/main/src/TraceEvent/Samples) here are one or two page samples doing interesting things (collecting data, parsing from files or in real time, transforming one ETL file to another etc). Each sample is independent of the others.
