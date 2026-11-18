@@ -7,7 +7,7 @@ using Microsoft.Diagnostics.Tracing.Etlx;
 
 namespace Microsoft.Diagnostics.Tracing.Computers
 {
-    /// <summary>Queries recorded async-profiler activations and their captured frames.</summary>
+    /// <summary>Queries recorded async call stacks and their captured frames.</summary>
     /// <remarks>
     /// Uses data indexed during trace conversion; it does not enable or collect profiler events.
     /// Captured frames do not identify the currently executing method. Use
@@ -34,7 +34,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// No TraceThread record is required.</param>
         /// <param name="timestampQpc">A timestamp in the originating trace's QPC domain.
         /// StartQpc is inclusive; EndQpc is exclusive.</param>
-        /// <returns>A non-null list of matching activations, or an empty list if no data is available.</returns>
+        /// <returns>A non-null list of matching call stacks, or an empty list if no data is available.</returns>
         public IReadOnlyList<AsyncProfilerCallStack> GetCallStacks(int processId, ulong osThreadId, long timestampQpc)
         {
             AsyncProfilerCallStacksIndex index = m_log.AsyncProfilerCallStacks;
@@ -42,7 +42,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             return process == null ? Array.Empty<AsyncProfilerCallStack>() : index.GetCallStacks(new AsyncProfilerThreadKey(process.ProcessIndex, osThreadId), timestampQpc);
         }
 
-        /// <summary>Returns recorded activations for an event's process, thread, and QPC timestamp.</summary>
+        /// <summary>Returns recorded async call stacks for an event's process, thread, and QPC timestamp.</summary>
         /// <remarks>
         /// The event must belong to this computer's TraceLog instance. It is not retained, and no physical stack is required.
         /// Ordering, frame semantics, and result lifetime match the process/thread/QPC overload.

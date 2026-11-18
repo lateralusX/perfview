@@ -74,7 +74,7 @@ namespace Microsoft.Diagnostics.Tracing.Stacks.Formats
         /// <remarks>
         /// All threads share a grid beginning at trace start. At each grid point the exporter observes the
         /// finalized captured stacks with recorded completion/unwind progress, then holds that snapshot for
-        /// one interval, clipped at trace end. Empty snapshots leave gaps; activations entirely between grid
+        /// one interval, clipped at trace end. Empty snapshots leave gaps; async call stacks entirely between grid
         /// points can be missed. Widths estimate async-context occupancy, not CPU time or exact lifetimes.
         /// V1 append, nesting, unknown-frame, and zero-IP policies match the exact-event overload.
         /// </remarks>
@@ -265,7 +265,7 @@ namespace Microsoft.Diagnostics.Tracing.Stacks.Formats
                         }
                     }
                 }
-                // Equal names in different activations must still close and reopen.
+                // Equal names in different call stacks must still close and reopen.
                 int common = 0;
                 while (common < previous.Count && common < current.Count &&
                     ReferenceEquals(previous[common].Context, current[common].Context) &&
@@ -291,7 +291,7 @@ namespace Microsoft.Diagnostics.Tracing.Stacks.Formats
                     {
                         break;
                     }
-                    // Skip empty time without re-anchoring a thread's grid at its next activation.
+                    // Skip empty time without re-anchoring a thread's grid at its next call stack.
                     long steps = previous.Count == 0
                         ? (changes[position].Qpc - qpc - 1) / sampleIntervalQpc + 1
                         : 1;

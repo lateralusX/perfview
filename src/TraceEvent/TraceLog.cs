@@ -516,7 +516,7 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
         /// <summary>
         /// True if the source trace contained async-profiler event batches. This is a cheap capability check backed
         /// by persisted event statistics; it does not load the deferred async-callstack index. A trace containing
-        /// only profiler metadata, reset events, or malformed batches can return true without usable activation intervals.
+        /// only profiler metadata, reset events, or malformed batches can return true without usable call-stack intervals.
         /// </summary>
         internal bool HasAsyncProfilerEvents
         {
@@ -2210,7 +2210,7 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
             }
 
             // Both instrumentation families emit native IPs. Register them before rundown and retain their indices:
-            // resolution removes raw addresses from the lookup map, but some activations are interned only at trace end.
+            // resolution removes raw addresses from the lookup map, but some call stacks are interned only at trace end.
             // Persist only CodeAddressIndex references; compiler state remains separate from address identity.
             var asyncProfilerFrameCodeAddressByMethodId = new Dictionary<(ProcessIndex ProcessIndex, ulong MethodId), CodeAddressIndex>();
 
@@ -2516,7 +2516,7 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
             if (asyncProfilerComputer.ParseErrorCount != 0)
             {
                 DebugWarn(false, string.Format(
-                    "AsyncProfiler reported {0} parse errors; uncertain activation state was invalidated. " +
+                    "AsyncProfiler reported {0} parse errors; uncertain call-stack state was invalidated. " +
                     "At most {1} error details were logged.",
                     asyncProfilerComputer.ParseErrorCount, MaxAsyncProfilerErrorDetails), null);
             }
@@ -4345,7 +4345,7 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
 
         /// <summary>
         /// The per-thread active async call stack index (RuntimeAsync + StateMachineAsync) built from the
-        /// AsyncProfilerEventSource, or null if no usable activation intervals were recorded. Lazily deserialized
+        /// AsyncProfilerEventSource, or null if no usable call-stack intervals were recorded. Lazily deserialized
         /// on first access; event presence alone does not imply an index exists.
         /// </summary>
         internal AsyncProfilerCallStacksIndex AsyncProfilerCallStacks
@@ -4365,7 +4365,7 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
         /// the ETLX deferred region. A later async query transparently loads a new index without replaying raw events.
         /// </summary>
         /// <remarks>
-        /// Already-returned activation objects, frame lists, and query results remain valid; retaining them may
+        /// Already-returned call-stack objects, frame lists, and query results remain valid; retaining them may
         /// retain some index data in memory. Code-address indices still belong to this TraceLog, which must remain
         /// open for symbol and source lookup. This method does not release the TraceLog's code-address or symbol tables.
         /// </remarks>

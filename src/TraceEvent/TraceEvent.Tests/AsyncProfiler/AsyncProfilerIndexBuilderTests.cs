@@ -376,7 +376,7 @@ namespace TraceEventTests
         }
 
         [Fact]
-        public void NestedActivations_QueryReturnsOrderedStack()
+        public void NestedCallStacks_QueryReturnsOrderedStack()
         {
             // D1 [10,40) with D2 [20,30) nested inside it.
             var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
@@ -540,7 +540,7 @@ namespace TraceEventTests
         [InlineData(false, true)]
         [InlineData(true, false)]
         [InlineData(true, true)]
-        public void DispatcherInfo_ReentrantParentLookupSelectsInnermostActivation(
+        public void DispatcherInfo_ReentrantParentLookupSelectsInnermostCallStack(
             bool stateMachine, bool equalStartQpc)
         {
             AsyncEventID resume = stateMachine
@@ -611,7 +611,7 @@ namespace TraceEventTests
         [InlineData(true, false)]
         [InlineData(false, true)]
         [InlineData(true, true)]
-        public void DispatcherInfo_RuntimeCreationFormsResolveParentWithoutOpeningActivation(
+        public void DispatcherInfo_RuntimeCreationFormsResolveParentWithoutOpeningCallStack(
             bool includeContextCreate, bool includeCallstackCreate)
         {
             var computer = new AsyncProfilerIndexBuilder();
@@ -926,7 +926,7 @@ namespace TraceEventTests
         }
 
         [Fact]
-        public void WrapperCount_IsCapturedWhenActivationStarts()
+        public void WrapperCount_IsCapturedWhenCallStackStarts()
         {
             var computer = new AsyncProfilerIndexBuilder();
             Process(computer, ProcessA, new AsyncProfilerBufferBuilder(ThreadA)
@@ -970,12 +970,12 @@ namespace TraceEventTests
         }
 
         [Fact]
-        public void ResetMidEpisode_CommitsInProgressActivationAtResetQpc()
+        public void ResetMidEpisode_CommitsInProgressCallStackAtResetQpc()
         {
             var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
                 .Armed(Start)
                 .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA })
-                .Reset(Start + 15)      // commits the in-progress activation as [Start+10, Start+15), then clears
+                .Reset(Start + 15)      // commits the in-progress call stack as [Start+10, Start+15), then clears
                 .Suspend(Start + 20));  // nothing to pop
 
             Assert.Equal(0xAUL, Assert.Single(computer.GetCallStacks(Key(ThreadA), Start + 12)).Frames.InstructionPointerAt(0));
@@ -984,7 +984,7 @@ namespace TraceEventTests
         }
 
         [Fact]
-        public void MultipleResetsAndMetadataWhileArmed_CommitEachOpenActivation()
+        public void MultipleResetsAndMetadataWhileArmed_CommitEachOpenCallStack()
         {
             var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
                 .Armed(Start)
@@ -1024,7 +1024,7 @@ namespace TraceEventTests
         }
 
         [Fact]
-        public void WrapperResets_AreScopedPerActivation_AndYieldCompletedFrames()
+        public void WrapperResets_AreScopedPerCallStack_AndYieldCompletedFrames()
         {
             var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
                 .Metadata(Start + 1, qpcFrequency: 10_000_000, qpcSync: 1, utcSync: 1,
@@ -1171,17 +1171,17 @@ namespace TraceEventTests
                 foreach (long timestampQpc in new[] { Start + 18, Start + 45, Start + 18 })
                 {
                     index.GetCallStacks(Key(ThreadA), timestampQpc, borrowed);
-                    AsyncProfilerCallStack activation = Assert.Single(borrowed);
-                    Assert.False(activation.MethodCompletionObserved);
-                    Assert.False(activation.ExceptionCompletionObserved);
-                    capturedFrames = capturedFrames ?? activation.CapturedFrames;
-                    Assert.Same(capturedFrames, activation.CapturedFrames);
+                    AsyncProfilerCallStack callStack = Assert.Single(borrowed);
+                    Assert.False(callStack.MethodCompletionObserved);
+                    Assert.False(callStack.ExceptionCompletionObserved);
+                    capturedFrames = capturedFrames ?? callStack.CapturedFrames;
+                    Assert.Same(capturedFrames, callStack.CapturedFrames);
 
                     bool observed = timestampQpc < Start + 30;
                     Assert.Equal(observed ? 2 : 1, capturedFrames.Count);
                     Assert.Equal(observed ? 0xAUL : 0xCUL, capturedFrames[0].CapturedInstructionPointer);
                     AsyncProfilerCallStack stable = Assert.Single(index.GetCallStacks(Key(ThreadA), timestampQpc));
-                    Assert.NotSame(activation, stable);
+                    Assert.NotSame(callStack, stable);
                     Assert.Equal(observed, stable.MethodCompletionObserved);
                     Assert.Equal(observed, stable.ExceptionCompletionObserved);
                     Assert.Equal(observed, index.GetCallStacks(Key(ThreadA))[observed ? 0 : 1].MethodCompletionObserved);
@@ -1280,7 +1280,7 @@ namespace TraceEventTests
         }
 
         [Fact]
-        public void AppendWithDifferentDispatcher_DoesNotMutateCurrentActivation()
+        public void AppendWithDifferentDispatcher_DoesNotMutateCurrentCallStack()
         {
             var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
                 .Armed(Start)
@@ -1363,9 +1363,9 @@ namespace TraceEventTests
         }
 
         [Fact]
-        public void CoarseTimestamps_ZeroWidthActivation_ExcludedButOuterStaysCoherent()
+        public void CoarseTimestamps_ZeroWidthCallStack_ExcludedButOuterStaysCoherent()
         {
-            // Coarse timestamps can produce recorded activations with empty half-open intervals.
+            // Coarse timestamps can produce recorded call stacks with empty half-open intervals.
             var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
                 .Armed(Start)
                 .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA })
@@ -1383,7 +1383,7 @@ namespace TraceEventTests
         [Fact]
         public void CoarseTimestamps_AllTransitionsSameTick_ReturnCoherentStack()
         {
-            // Sequential zero-width activations reuse the same depth within a single tick.
+            // Sequential zero-width call stacks reuse the same depth within a single tick.
             var computer = Compute(new AsyncProfilerBufferBuilder(ThreadA)
                 .Armed(Start)
                 .ResumeStack(Start + 10, dispatcher: 1, new ulong[] { 0xA })

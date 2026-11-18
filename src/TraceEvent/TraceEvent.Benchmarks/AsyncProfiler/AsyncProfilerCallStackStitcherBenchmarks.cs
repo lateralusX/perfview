@@ -10,7 +10,7 @@ using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
 namespace TraceEventBenchmarks
 {
     /// <summary>Measures structural stitching with synthetic frame identities, without trace conversion or stack-source emission.</summary>
-    /// <remarks>Activation lookup and output-frame interning are excluded.</remarks>
+    /// <remarks>Call-stack lookup and output-frame interning are excluded.</remarks>
     [MemoryDiagnoser]
     public class AsyncProfilerCallStackStitcherBenchmarks
     {
@@ -174,7 +174,7 @@ namespace TraceEventBenchmarks
             _methods.TryGetValue(codeAddress, out MethodIndex method) ? method : MethodIndex.Invalid;
 
         private static bool MethodCompletionObservedByProcess(
-            ProcessIndex processIndex, AsyncCallstackKind kind, long activationStartQpc) => false;
+            ProcessIndex processIndex, AsyncCallstackKind kind, long callStackStartQpc) => false;
 
         private static CodeAddressIndex CodeAddress(int value) => (CodeAddressIndex)value;
 

@@ -109,7 +109,7 @@ namespace Microsoft.Diagnostics.Tracing
 
         /// <summary>
         /// True after generation initializes requested async call stacks with a usable index. Does not guarantee
-        /// that any particular stack matched an async activation. False before generation or when async call
+        /// that any particular stack matched an async call stack. False before generation or when async call
         /// stacks were disabled or no usable index exists.
         /// </summary>
         public bool AsyncCallStacksActive => m_asyncProfilerCallStackSourceBuilder != null;

@@ -9,11 +9,11 @@ using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
 
 namespace TraceEventBenchmarks
 {
-    /// <summary>Compares allocating and reusable queries as the number of indexed activations grows.</summary>
+    /// <summary>Compares allocating and reusable queries as the number of indexed call stacks grows.</summary>
     [MemoryDiagnoser]
     public class AsyncProfilerCallStacksIndexBenchmarks
     {
-        /// <summary>Number of sequential outer activations, in addition to the nested activations at the query time.</summary>
+        /// <summary>Number of sequential outer call stacks, in addition to the nested call stacks at the query time.</summary>
         [Params(1_000, 100_000)]
         public int IntervalCount { get; set; }
 
@@ -51,22 +51,22 @@ namespace TraceEventBenchmarks
             _index.GetCallStacks(s_thread, _queryQpc, _result);
             if (_result.Count != 8 || AllocateResultList() != _result.Count)
             {
-                throw new InvalidOperationException("The index benchmark did not find all eight nested activations.");
+                throw new InvalidOperationException("The index benchmark did not find all eight nested call stacks.");
             }
             for (int depth = 0; depth < _result.Count; depth++)
             {
                 if (_result[depth].Depth != depth)
                 {
-                    throw new InvalidOperationException("The index benchmark returned activations out of nesting order.");
+                    throw new InvalidOperationException("The index benchmark returned call stacks out of nesting order.");
                 }
             }
         }
 
-        /// <summary>Queries the warmed index into a newly allocated list of stable activation objects.</summary>
+        /// <summary>Queries the warmed index into a newly allocated list of stable call-stack objects.</summary>
         [Benchmark(Baseline = true)]
         public int AllocateResultList() => _index.GetCallStacks(s_thread, _queryQpc).Count;
 
-        /// <summary>Queries the same index using a reusable result list and borrowed activation objects.</summary>
+        /// <summary>Queries the same index using a reusable result list and borrowed call-stack objects.</summary>
         [Benchmark]
         public int ReuseResultList()
         {

@@ -234,8 +234,8 @@ namespace TraceEventTests
         [InlineData(true, true)]
         public void AsyncInfrastructureCleanup_PreservesDispatcherContextBoundaries(bool sameContext, bool builderHelper)
         {
-            AsyncProfilerCallStack leafContext = CreateActivation();
-            AsyncProfilerCallStack rootContext = sameContext ? leafContext : CreateActivation();
+            AsyncProfilerCallStack leafContext = CreateCallStack();
+            AsyncProfilerCallStack rootContext = sameContext ? leafContext : CreateCallStack();
             FrameClassification kind = builderHelper
                 ? (FrameClassification)RuntimeFrameKind.V1BuilderAwaitRegistration
                 : AsyncProfilerStitchSyncFrameKind.None;
@@ -374,8 +374,8 @@ namespace TraceEventTests
         [Fact]
         public void AsyncInfrastructureCleanup_PreservesCompletionChainsAcrossContextBoundaries()
         {
-            AsyncProfilerCallStack leafContext = CreateActivation();
-            AsyncProfilerCallStack rootContext = CreateActivation();
+            AsyncProfilerCallStack leafContext = CreateCallStack();
+            AsyncProfilerCallStack rootContext = CreateCallStack();
             var frames = new List<AsyncProfilerStitchedFrame>
             {
                 AsyncProfilerStitchedFrame.CreateSync(new AsyncProfilerStitchSyncFrame(CA(60), MethodIndex.Invalid,
@@ -801,7 +801,7 @@ namespace TraceEventTests
             return frames;
         }
 
-        private static AsyncProfilerCallStack CreateActivation() =>
+        private static AsyncProfilerCallStack CreateCallStack() =>
             new AsyncProfilerCallStack(0, (AsyncProfilerCallStackFramesIndex)0,
                 new AsyncProfilerCallStackFrames(AsyncCallstackKind.StateMachineAsync, new ulong[] { 3 }, new[] { 0 }),
                 0, 32, 0, long.MaxValue, Array.Empty<AsyncProfilerCallStack.CompletionDelta>(),

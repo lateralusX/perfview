@@ -16,7 +16,7 @@ using static Microsoft.Diagnostics.Tracing.Computers.AsyncProfilerRuntimeSupport
 namespace TraceEventTests
 {
     /// <summary>
-    /// Tests structural reconstruction with synthetic leaf-to-root frames and recorded activations.
+    /// Tests structural reconstruction with synthetic leaf-to-root frames and recorded call stacks.
     /// Independent code-address and method identities allow unresolved symbols to be tested without a trace.
     /// </summary>
     public class AsyncProfilerCallStackStitcherTests
@@ -103,14 +103,14 @@ namespace TraceEventTests
         public void StitchedFrame_EqualityPreservesStructuralIdentityAndLabelValues()
         {
             var s = new Scenario();
-            AsyncProfilerCallStack activation = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack callStack = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { 500, 501 }, new[] { 30, 31 });
-            AsyncProfilerCallStack otherActivation = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack otherCallStack = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { 500, 501 }, new[] { 30, 31 });
             var sync = new AsyncProfilerStitchSyncFrame(Scenario.CA(40), Scenario.MI(41),
                 AsyncProfilerStitchSyncFrameKind.None, Scenario.MI(30));
-            AsyncProfilerStitchedFrame frame = AsyncProfilerStitchedFrame.CreateSync(sync, activation);
-            AsyncProfilerStitchedFrame equal = AsyncProfilerStitchedFrame.CreateSync(sync, activation);
+            AsyncProfilerStitchedFrame frame = AsyncProfilerStitchedFrame.CreateSync(sync, callStack);
+            AsyncProfilerStitchedFrame equal = AsyncProfilerStitchedFrame.CreateSync(sync, callStack);
             Assert.True(frame.Equals(equal));
             Assert.True(frame.Equals((object)equal));
             Assert.Equal(frame.GetHashCode(), equal.GetHashCode());
@@ -121,24 +121,24 @@ namespace TraceEventTests
             {
                 AsyncProfilerStitchedFrame.CreateSync(
                     new AsyncProfilerStitchSyncFrame(Scenario.CA(42), Scenario.MI(41),
-                        AsyncProfilerStitchSyncFrameKind.None, Scenario.MI(30)), activation),
+                        AsyncProfilerStitchSyncFrameKind.None, Scenario.MI(30)), callStack),
                 AsyncProfilerStitchedFrame.CreateSync(
                     new AsyncProfilerStitchSyncFrame(Scenario.CA(40), Scenario.MI(42),
-                        AsyncProfilerStitchSyncFrameKind.None, Scenario.MI(30)), activation),
+                        AsyncProfilerStitchSyncFrameKind.None, Scenario.MI(30)), callStack),
                 AsyncProfilerStitchedFrame.CreateSync(
                     new AsyncProfilerStitchSyncFrame(Scenario.CA(40), Scenario.MI(41),
-                        AsyncProfilerStitchSyncFrameKind.V1StateMachineBody, Scenario.MI(30)), activation),
+                        AsyncProfilerStitchSyncFrameKind.V1StateMachineBody, Scenario.MI(30)), callStack),
                 AsyncProfilerStitchedFrame.CreateSync(
                     new AsyncProfilerStitchSyncFrame(Scenario.CA(40), Scenario.MI(41),
-                        AsyncProfilerStitchSyncFrameKind.None, Scenario.MI(31)), activation),
-                AsyncProfilerStitchedFrame.CreateSync(sync, otherActivation),
+                        AsyncProfilerStitchSyncFrameKind.None, Scenario.MI(31)), callStack),
+                AsyncProfilerStitchedFrame.CreateSync(sync, otherCallStack),
                 frame.WithPresentation(AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames),
             };
             Assert.All(distinct, candidate => Assert.False(frame.Equals(candidate)));
-            Assert.False(AsyncProfilerStitchedFrame.CreateAsyncCurrent(Scenario.CA(40), Scenario.MI(41), activation, 0)
-                .Equals(AsyncProfilerStitchedFrame.CreateAsyncCurrent(Scenario.CA(40), Scenario.MI(41), activation, 1)));
-            Assert.False(AsyncProfilerStitchedFrame.CreateAsync(activation, 0)
-                .Equals(AsyncProfilerStitchedFrame.CreateAsyncContextParent(activation, 0)));
+            Assert.False(AsyncProfilerStitchedFrame.CreateAsyncCurrent(Scenario.CA(40), Scenario.MI(41), callStack, 0)
+                .Equals(AsyncProfilerStitchedFrame.CreateAsyncCurrent(Scenario.CA(40), Scenario.MI(41), callStack, 1)));
+            Assert.False(AsyncProfilerStitchedFrame.CreateAsync(callStack, 0)
+                .Equals(AsyncProfilerStitchedFrame.CreateAsyncContextParent(callStack, 0)));
 
             AsyncProfilerStitchedFrame label = AsyncProfilerStitchedFrame.CreateSynthetic("Label");
             AsyncProfilerStitchedFrame equalLabel =
@@ -154,11 +154,11 @@ namespace TraceEventTests
         public void StitchedFrame_WithPresentationPreservesReferencePayload(bool synthetic)
         {
             var s = new Scenario();
-            AsyncProfilerCallStack activation = s.Segment(AsyncCallstackKind.StateMachineAsync,
+            AsyncProfilerCallStack callStack = s.Segment(AsyncCallstackKind.StateMachineAsync,
                 new[] { 500 }, new[] { 30 });
             AsyncProfilerStitchedFrame frame = synthetic
                 ? AsyncProfilerStitchedFrame.CreateSynthetic("Label")
-                : AsyncProfilerStitchedFrame.CreateAsyncCurrent(Scenario.CA(40), Scenario.MI(41), activation, 0, Scenario.MI(30));
+                : AsyncProfilerStitchedFrame.CreateAsyncCurrent(Scenario.CA(40), Scenario.MI(41), callStack, 0, Scenario.MI(30));
             AsyncProfilerStitchedFrame changed =
                 frame.WithPresentation(AsyncProfilerStitchedFramePresentation.AsyncDispatcherFrames);
 
@@ -221,9 +221,9 @@ namespace TraceEventTests
                 new[] { segment },
                 Qpc,
                 s.Classify,
-                (processIndex, kind, activationStartQpc) =>
+                (processIndex, kind, callStackStartQpc) =>
                 {
-                    completionPolicyQpc = activationStartQpc;
+                    completionPolicyQpc = callStackStartQpc;
                     return s.MethodCompletionObserved(kind);
                 },
                 (ProcessIndex)1,
@@ -245,7 +245,7 @@ namespace TraceEventTests
                 Array.Empty<AsyncProfilerCallStack>(),
                 Qpc,
                 s.Classify,
-                (processIndex, kind, activationStartQpc) => s.MethodCompletionObserved(kind),
+                (processIndex, kind, callStackStartQpc) => s.MethodCompletionObserved(kind),
                 (ProcessIndex)1,
                 s.MethodOf,
                 trace: false,
@@ -1730,7 +1730,7 @@ namespace TraceEventTests
         [InlineData((int)AsyncCallstackKind.RuntimeAsync, (int)AsyncCallstackKind.StateMachineAsync)]
         [InlineData((int)AsyncCallstackKind.RuntimeAsync, (int)AsyncCallstackKind.RuntimeAsync)]
         [InlineData((int)AsyncCallstackKind.StateMachineAsync, (int)AsyncCallstackKind.StateMachineAsync)]
-        public void NestedIncompleteRoot_IsOnlyAttachedToTheOutermostActivation(
+        public void NestedIncompleteRoot_IsOnlyAttachedToTheOutermostCallStack(
             int outerKindValue, int innerKindValue)
         {
             var outerKind = (AsyncCallstackKind)outerKindValue;
@@ -1956,7 +1956,7 @@ namespace TraceEventTests
             {
                 s.Sync(50, 10),                  // L current (frames[0] of leaf seg)
                 s.Boundary(51, Wrapper(0)),      // leaf boundary
-                s.Sync(55, 70),                  // synchronous bridge between the nested activations
+                s.Sync(55, 70),                  // synchronous bridge between the nested call stacks
                 s.Sync(52, 20),                  // R current (frames[0] of root seg)
                 s.Boundary(53, Wrapper(0)),      // root boundary
                 s.Sync(54, 99),                  // root frame
@@ -2000,7 +2000,7 @@ namespace TraceEventTests
         [InlineData(true, false, true)]
         [InlineData(true, true, false)]
         [InlineData(true, true, true)]
-        public void MissingInnerV1Boundary_PreservesVerifiedOuterV2Activation(
+        public void MissingInnerV1Boundary_PreservesVerifiedOuterV2CallStack(
             bool carrier, bool methodEvents, bool sharedMethod)
         {
             var s = new Scenario();
@@ -2090,7 +2090,7 @@ namespace TraceEventTests
         }
 
         [Fact]
-        public void MissingInnerV1Boundaries_PreserveTheEnclosingV2AcrossMultipleActivations()
+        public void MissingInnerV1Boundaries_PreserveTheEnclosingV2AcrossMultipleCallStacks()
         {
             var s = new Scenario();
             AsyncProfilerCallStack outer = s.Segment(AsyncCallstackKind.RuntimeAsync,
@@ -2310,7 +2310,7 @@ namespace TraceEventTests
         }
 
         [Fact]
-        public void ParentContexts_PreservesOverlappingDistinctParentActivations()
+        public void ParentContexts_PreservesOverlappingDistinctParentCallStacks()
         {
             var s = new Scenario();
             var index = new AsyncProfilerCallStacksIndex();
@@ -2497,7 +2497,7 @@ namespace TraceEventTests
         }
 
         [Fact]
-        public void ParentContexts_CycleStopsBeforeRepeatingAnActivation()
+        public void ParentContexts_CycleStopsBeforeRepeatingACallStack()
         {
             var s = new Scenario();
             var index = new AsyncProfilerCallStacksIndex();
@@ -3311,7 +3311,7 @@ namespace TraceEventTests
         }
 
         [Fact]
-        public void V2_ZeroIpInitialEntry_PreservesVerifiedEnclosingActivation()
+        public void V2_ZeroIpInitialEntry_PreservesVerifiedEnclosingCallStack()
         {
             var s = new Scenario();
             AsyncProfilerCallStack inner = s.Segment(AsyncCallstackKind.RuntimeAsync,
@@ -3436,7 +3436,7 @@ namespace TraceEventTests
         [InlineData("method-and-unwind", 3)]
         [InlineData("wrapper-and-unwind", 3)]
         [InlineData("raw-ip", 1)]
-        public void V2_WrapperIsLeaf_UsesVerifiedActivationPosition(string evidence, int expectedIndex)
+        public void V2_WrapperIsLeaf_UsesVerifiedCallStackPosition(string evidence, int expectedIndex)
         {
             var s = new Scenario();
             bool methodEvents = evidence == "method" || evidence == "method-and-unwind";
@@ -3539,7 +3539,7 @@ namespace TraceEventTests
         [Fact]
         public void V2_NoWrapperWithoutIndexHistory_UsesSyncLayout()
         {
-            // Completion counting alone cannot establish dispatcher ownership without activation history.
+            // Completion counting alone cannot establish dispatcher ownership without call-stack history.
             var s = new Scenario();
             s.MarkMethodCompletionObserved(AsyncCallstackKind.RuntimeAsync);
             AsyncProfilerCallStack seg = s.Segment(AsyncCallstackKind.RuntimeAsync,
@@ -3594,7 +3594,7 @@ namespace TraceEventTests
                 sync.Add(s.Boundary(87, s_dispatchContinuation));
                 sync.Add(s.Boundary(88, s_dispatchContinuation));
             }
-            // A later activation must not affect an earlier sample.
+            // A later call stack must not affect an earlier sample.
             index.Add(segment.Thread, segment.FramesIndex, 100, 0, 0, 32, Qpc + 1, Qpc + 2,
                 Array.Empty<AsyncProfilerCallStack.CompletionDelta>(),
                 Array.Empty<AsyncProfilerCallStack.CompletionDelta>(), Array.Empty<long>());
@@ -3768,7 +3768,7 @@ namespace TraceEventTests
         [InlineData((int)AsyncCallstackKind.RuntimeAsync, true)]
         [InlineData((int)AsyncCallstackKind.StateMachineAsync, false)]
         [InlineData((int)AsyncCallstackKind.StateMachineAsync, true)]
-        public void V2_InnerWrapperIsLeaf_PreservesEntryAndBridgeWhileStitchingOuterActivation(
+        public void V2_InnerWrapperIsLeaf_PreservesEntryAndBridgeWhileStitchingOuterCallStack(
             int outerKindValue, bool methodEvents)
         {
             var outerKind = (AsyncCallstackKind)outerKindValue;
@@ -3853,7 +3853,7 @@ namespace TraceEventTests
         [InlineData(6, true)]
         [InlineData(7, false)]
         [InlineData(7, true)]
-        public void V2_InnerWrapperIsLeaf_StitchesMultipleMixedOuterActivations(int protocols, bool methodEvents)
+        public void V2_InnerWrapperIsLeaf_StitchesMultipleMixedOuterCallStacks(int protocols, bool methodEvents)
         {
             var s = new Scenario();
             var segments = new AsyncProfilerCallStack[4];
@@ -3862,7 +3862,7 @@ namespace TraceEventTests
                 s.MarkMethodCompletionObserved(AsyncCallstackKind.RuntimeAsync);
             }
             int v1Count = 0;
-            // Each bit chooses V1 rather than V2 for one enclosing activation.
+            // Each bit chooses V1 rather than V2 for one enclosing call stack.
             for (int i = 0; i < 3; i++)
             {
                 AsyncCallstackKind kind = (protocols & (1 << i)) == 0
@@ -3935,13 +3935,13 @@ namespace TraceEventTests
             Assert.Equal(2, result.SegmentPlacements[0].RootIndexExclusive);
             for (int i = 0; i < 3; i++)
             {
-                AsyncProfilerCallStack activation = segments[2 - i];
+                AsyncProfilerCallStack callStack = segments[2 - i];
                 AsyncProfilerStitchedFrame current = result.Frames[3 + i * 3];
                 Assert.Equal(AsyncProfilerStitchedFrameOrigin.AsyncCurrent, current.Origin);
                 Assert.Equal(1, current.SegmentFrameIndex);
-                Assert.Same(activation, current.Context);
+                Assert.Same(callStack, current.Context);
                 AsyncProfilerCallStackPlacement placement = result.SegmentPlacements[i + 1];
-                Assert.Same(activation, placement.CallStack);
+                Assert.Same(callStack, placement.CallStack);
                 Assert.Equal(2 + i * 3, placement.LeafIndex);
                 Assert.Equal(5 + i * 3, placement.RootIndexExclusive);
             }
@@ -3952,7 +3952,7 @@ namespace TraceEventTests
         [InlineData("unresolved-current")]
         [InlineData("mismatched-current")]
         [InlineData("completed-outer")]
-        public void V2_InnerWrapperIsLeaf_UnverifiedOuterActivationPreservesSyncLayout(string obstruction)
+        public void V2_InnerWrapperIsLeaf_UnverifiedOuterCallStackPreservesSyncLayout(string obstruction)
         {
             var s = new Scenario();
             bool completed = obstruction == "completed-outer";
@@ -4110,7 +4110,7 @@ namespace TraceEventTests
             }
 
             /// <summary>
-            /// Builds an activation with leaf-to-root frames. Negative code addresses are unresolved; raw method IDs
+            /// Builds a call stack with leaf-to-root frames. Negative code addresses are unresolved; raw method IDs
             /// need only be supplied when their values matter to the test.
             /// </summary>
             public AsyncProfilerCallStack Segment(AsyncCallstackKind kind, int[] frameCodeAddrs, int[] frameMethods,

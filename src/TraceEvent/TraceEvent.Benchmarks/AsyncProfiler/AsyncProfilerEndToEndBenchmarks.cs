@@ -26,7 +26,7 @@ namespace TraceEventBenchmarks
         Mixed,
     }
 
-    /// <summary>Activation rates and trace durations used to compare end-to-end scaling.</summary>
+    /// <summary>Call-stack rates and trace durations used to compare end-to-end scaling.</summary>
     public enum AsyncProfilerWorkloadProfile
     {
         Realistic,

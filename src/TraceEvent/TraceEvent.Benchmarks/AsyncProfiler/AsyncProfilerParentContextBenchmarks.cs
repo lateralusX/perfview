@@ -143,7 +143,7 @@ namespace TraceEventBenchmarks
         private AsyncProfilerCallStacksIndex CreateIndex(int parentCount)
         {
             var index = new AsyncProfilerCallStacksIndex();
-            AddActivation(
+            AddCallStack(
                 index, s_childThread, dispatcherId: 1, depth: 0,
                 startQpc: 900, endQpc: 1_100, firstMethodId: 200);
             SetCodeAddresses(index.GetCallStacks(s_childThread, Qpc)[0], firstCodeAddress: 200);
@@ -161,7 +161,7 @@ namespace TraceEventBenchmarks
                 long creationQpc = childStartQpc - 100;
                 var parentThread = new AsyncProfilerThreadKey(s_processIndex, (ulong)(100 + parentIndex));
 
-                AddActivation(
+                AddCallStack(
                     index, parentThread, parentDispatcherId, depth: 0,
                     startQpc: creationQpc - 50, endQpc: creationQpc + 50,
                     firstMethodId: 300 + (parentIndex * 10));
@@ -177,7 +177,7 @@ namespace TraceEventBenchmarks
             return index;
         }
 
-        private static void AddActivation(
+        private static void AddCallStack(
             AsyncProfilerCallStacksIndex index, AsyncProfilerThreadKey thread, ulong dispatcherId,
             int depth, long startQpc, long endQpc, int firstMethodId)
         {
@@ -196,12 +196,12 @@ namespace TraceEventBenchmarks
                 wrapperResets: Array.Empty<long>());
         }
 
-        private void SetCodeAddresses(AsyncProfilerCallStack activation, int firstCodeAddress)
+        private void SetCodeAddresses(AsyncProfilerCallStack callStack, int firstCodeAddress)
         {
-            for (int i = 0; i < activation.Frames.FrameCount; i++)
+            for (int i = 0; i < callStack.Frames.FrameCount; i++)
             {
                 CodeAddressIndex codeAddress = CodeAddress(firstCodeAddress + i);
-                activation.Frames.SetCodeAddressAt(i, codeAddress);
+                callStack.Frames.SetCodeAddressAt(i, codeAddress);
                 _methods[codeAddress] = Method(firstCodeAddress + i);
             }
         }
@@ -248,7 +248,7 @@ namespace TraceEventBenchmarks
                 : MethodIndex.Invalid;
 
         private static bool MethodCompletionObserved(
-            ProcessIndex processIndex, AsyncCallstackKind kind, long activationStartQpc) => false;
+            ProcessIndex processIndex, AsyncCallstackKind kind, long callStackStartQpc) => false;
 
         private static CodeAddressIndex CodeAddress(int value) => (CodeAddressIndex)value;
 

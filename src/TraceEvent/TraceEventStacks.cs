@@ -94,7 +94,7 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
         public bool IsCompleting { get; }
 
         /// <summary>True when verified physical return-unwind work is attributed to the logical root of a fully
-        /// completed V1 activation. Displays inferred state -2 without claiming physical root-body execution.</summary>
+        /// completed V1 call stack. Displays inferred state -2 without claiming physical root-body execution.</summary>
         public bool IsCompletionUnwind { get; }
 
         /// <summary>

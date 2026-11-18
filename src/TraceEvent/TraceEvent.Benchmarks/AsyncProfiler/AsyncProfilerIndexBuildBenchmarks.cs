@@ -14,15 +14,15 @@ using TraceEventTests;
 
 namespace TraceEventBenchmarks
 {
-    /// <summary>Separates buffer decoding, activation-index construction, and serialization across input sizes and frame reuse.</summary>
+    /// <summary>Separates buffer decoding, call-stack index construction, and serialization across input sizes and frame reuse.</summary>
     [MemoryDiagnoser]
     public class AsyncProfilerIndexBuildBenchmarks
     {
-        /// <summary>Number of activations in each prepared input buffer.</summary>
+        /// <summary>Number of call stacks in each prepared input buffer.</summary>
         [Params(1_000, 10_000)]
         public int EpisodeCount { get; set; }
 
-        /// <summary>Captured frame count per activation.</summary>
+        /// <summary>Captured frame count per call stack.</summary>
         [Params(4, 16)]
         public int FrameCount { get; set; }
 
@@ -30,7 +30,7 @@ namespace TraceEventBenchmarks
         [Params(AsyncProfilerKindMode.V2Only, AsyncProfilerKindMode.V1Only)]
         public AsyncProfilerKindMode Kind { get; set; }
 
-        /// <summary>Whether each activation has distinct frames or shares one interned frame sequence.</summary>
+        /// <summary>Whether each call stack has distinct frames or shares one interned frame sequence.</summary>
         [Params(false, true)]
         public bool UniqueCallstacks { get; set; }
 
@@ -65,7 +65,7 @@ namespace TraceEventBenchmarks
             }
         }
 
-        /// <summary>Decodes one prepared buffer into a counting sink without constructing an activation index.</summary>
+        /// <summary>Decodes one prepared buffer into a counting sink without constructing a call-stack index.</summary>
         [Benchmark]
         public int Decode()
         {
@@ -120,7 +120,7 @@ namespace TraceEventBenchmarks
                 computer.Index.HasDispatcherRecords != includeDispatcherInfo ||
                 computer.GetFrames((AsyncProfilerCallStackFramesIndex)0).FrameCount != FrameCount)
             {
-                throw new InvalidOperationException("The index-build benchmark did not produce the expected activations and frame storage.");
+                throw new InvalidOperationException("The index-build benchmark did not produce the expected call stacks and frame storage.");
             }
         }
 
@@ -212,7 +212,7 @@ namespace TraceEventBenchmarks
     [MemoryDiagnoser]
     public class AsyncProfilerStateMachineAppendBenchmarks
     {
-        /// <summary>Number of incrementally assembled activations in each prepared buffer.</summary>
+        /// <summary>Number of incrementally assembled call stacks in each prepared buffer.</summary>
         [Params(1_000, 10_000)]
         public int EpisodeCount { get; set; }
 
@@ -261,7 +261,7 @@ namespace TraceEventBenchmarks
                 computer.DistinctFramesCount != 1 ||
                 computer.GetFrames((AsyncProfilerCallStackFramesIndex)0).FrameCount != 16)
             {
-                throw new InvalidOperationException("The append benchmark did not assemble the expected sixteen-frame activations.");
+                throw new InvalidOperationException("The append benchmark did not assemble the expected sixteen-frame call stacks.");
             }
         }
 

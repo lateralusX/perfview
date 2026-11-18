@@ -13,7 +13,8 @@ using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
 namespace Microsoft.Diagnostics.Tracing.Computers
 {
     /// <summary>
-    /// One recorded activation of an async call stack on a thread. Nested activations can overlap in time.
+    /// One recorded async call stack on a thread, active from resume until suspension or completion.
+    /// Nested call stacks can overlap in time.
     /// </summary>
     /// <remarks>
     /// Obtain instances from <see cref="AsyncProfilerCallStackComputer"/>.
@@ -26,10 +27,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <summary>The unique process instance in the originating TraceLog.</summary>
         public ProcessIndex ProcessIndex => Thread.ProcessIndex;
 
-        /// <summary>The OS thread identifier for this activation.</summary>
+        /// <summary>The OS thread identifier for this call stack.</summary>
         public ulong OsThreadId => Thread.OsThreadId;
 
-        /// <summary>The instrumentation family that emitted this activation.</summary>
+        /// <summary>The instrumentation family that emitted this call stack.</summary>
         public AsyncProfilerCallStackKind Kind =>
             Frames.Kind == AsyncCallstackKind.StateMachineAsync ? AsyncProfilerCallStackKind.StateMachineAsync : AsyncProfilerCallStackKind.RuntimeAsync;
 
@@ -90,13 +91,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <summary>Whether exception-unwind events were observed.</summary>
         internal bool ExceptionCompletionObserved { get; set; }
 
-        /// <summary>The dispatcher identifier. Multiple activations can share the same identifier.</summary>
+        /// <summary>The dispatcher identifier. Multiple call stacks can share the same identifier.</summary>
         internal ulong DispatcherId { get; private set; }
 
         /// <summary>The continuation-wrapper slot captured at resume.</summary>
         internal byte ContinuationIndexBase { get; private set; }
 
-        /// <summary>The continuation-wrapper pool size for this activation, or 0 when unavailable.</summary>
+        /// <summary>The continuation-wrapper pool size for this call stack, or 0 when unavailable.</summary>
         internal byte WrapperCount { get; private set; }
 
         internal AsyncProfilerThreadKey Thread { get; private set; }
@@ -124,7 +125,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// This count already includes exceptional unwinds; do not add them again.
         /// </summary>
         /// <remarks>
-        /// The timestamp and slot must refer to this activation. Neither is range-checked,
+        /// The timestamp and slot must refer to this call stack. Neither is range-checked,
         /// and the result is not capped at <c>CapturedFrames.Count</c>.
         /// </remarks>
         internal int GetCompletedFrameCount(long timestampQpc, int currentMethodIndex)
@@ -147,7 +148,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         /// <summary>
         /// The number of continuation-wrapper resets recorded at or before <paramref name="timestampQpc"/>
-        /// during this activation.
+        /// during this call stack.
         /// </summary>
         internal int GetWrapperResetCount(long timestampQpc)
         {
@@ -312,12 +313,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         private sealed class CapturedFrameList : IReadOnlyList<AsyncProfilerCallStackFrame>
         {
-            internal CapturedFrameList(AsyncProfilerCallStack activation)
+            internal CapturedFrameList(AsyncProfilerCallStack callStack)
             {
-                m_activation = activation;
+                m_callStack = callStack;
             }
 
-            public int Count => m_activation.Frames.FrameCount;
+            public int Count => m_callStack.Frames.FrameCount;
             public AsyncProfilerCallStackFrame this[int index]
             {
                 get
@@ -327,7 +328,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                         throw new ArgumentOutOfRangeException(nameof(index));
                     }
 
-                    return new AsyncProfilerCallStackFrame(AsyncProfilerStitchedFrame.CreateAsync(m_activation, index));
+                    return new AsyncProfilerCallStackFrame(AsyncProfilerStitchedFrame.CreateAsync(m_callStack, index));
                 }
             }
 
@@ -341,7 +342,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
             IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
 
-            private readonly AsyncProfilerCallStack m_activation;
+            private readonly AsyncProfilerCallStack m_callStack;
         }
 
         // All three timelines are ordered by QPC.

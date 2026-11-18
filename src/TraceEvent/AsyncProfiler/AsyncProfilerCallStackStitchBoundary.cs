@@ -26,7 +26,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         /// <summary>
         /// V2 dispatcher helpers, not independent splice boundaries.
-        /// A wrapperless target requires separate completion and activation-history evidence.
+        /// A wrapperless target requires separate completion and call-stack history evidence.
         /// </summary>
         V2DispatcherInfrastructure,
 
