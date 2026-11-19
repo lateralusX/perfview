@@ -14,7 +14,7 @@ namespace TraceEventTests
     /// <c>AsyncEvents</c> buffer in the exact runtime wire format (see <see cref="AsyncProfilerBufferBuilder"/>)
     /// and asserts the decoded sub-events. These exercise the pure decoder without a live TraceEventSource.
     /// </summary>
-    public class AsyncProfilerParsing
+    public class AsyncProfilerParsingTests
     {
         [Fact]
         public void Header_TooShort_ReportsParseError()
@@ -416,24 +416,13 @@ namespace TraceEventTests
             Assert.Single(sink.Methods);
         }
 
-        [Fact]
-        public void Header_TotalSizeSmallerThanHeader_ReportsParseError()
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void Header_TotalSizeOutsideValidRange_ReportsParseError(bool largerThanPhysicalBuffer)
         {
             byte[] buffer = new AsyncProfilerBufferBuilder().Build();
-            WriteUInt32At(buffer, 1, BufferHeader.Size - 1);
-
-            var sink = new AsyncProfilerCollectingSink();
-            AsyncProfilerTraceEventParser.ParseBuffer(buffer, sink);
-
-            Assert.Single(sink.Errors);
-            Assert.Empty(sink.Order);
-        }
-
-        [Fact]
-        public void Header_TotalSizeLargerThanPhysicalBuffer_ReportsParseError()
-        {
-            byte[] buffer = new AsyncProfilerBufferBuilder().Build();
-            WriteUInt32At(buffer, 1, (uint)buffer.Length + 1);
+            WriteUInt32At(buffer, 1, largerThanPhysicalBuffer ? (uint)buffer.Length + 1 : BufferHeader.Size - 1);
 
             var sink = new AsyncProfilerCollectingSink();
             AsyncProfilerTraceEventParser.ParseBuffer(buffer, sink);
@@ -510,28 +499,17 @@ namespace TraceEventTests
             Assert.Empty(sink.Order);
         }
 
-        [Fact]
-        public void TruncatedUShortPayloadLength_ReportsParseError()
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void TruncatedPayloadLength_ReportsParseError(bool ushortLength)
         {
             byte[] complete = new AsyncProfilerBufferBuilder()
-                .RawEvent((byte)AsyncEventID.AsyncProfilerMetadata, StartQpc + 1, PayloadLengthFieldSize.UShort, Array.Empty<byte>())
-                .Build();
-            var truncated = new byte[complete.Length - 1];
-            Array.Copy(complete, truncated, truncated.Length);
-            WriteUInt32At(truncated, 1, (uint)truncated.Length);
-
-            var sink = new AsyncProfilerCollectingSink();
-            AsyncProfilerTraceEventParser.ParseBuffer(truncated, sink);
-
-            Assert.Single(sink.Errors);
-            Assert.Empty(sink.Order);
-        }
-
-        [Fact]
-        public void TruncatedBytePayloadLength_ReportsParseError()
-        {
-            byte[] complete = new AsyncProfilerBufferBuilder()
-                .RawEvent((byte)AsyncEventID.ResumeRuntimeAsyncContext, StartQpc + 1, PayloadLengthFieldSize.Byte, Array.Empty<byte>())
+                .RawEvent(
+                    (byte)(ushortLength ? AsyncEventID.AsyncProfilerMetadata : AsyncEventID.ResumeRuntimeAsyncContext),
+                    StartQpc + 1,
+                    ushortLength ? PayloadLengthFieldSize.UShort : PayloadLengthFieldSize.Byte,
+                    Array.Empty<byte>())
                 .Build();
             var truncated = new byte[complete.Length - 1];
             Array.Copy(complete, truncated, truncated.Length);

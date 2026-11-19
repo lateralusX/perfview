@@ -38,6 +38,7 @@
     <Compile Include="..\..\PerfView.TestUtilities\DebugAssertionTests.cs">
       <Link>DebugAssertionTests.cs</Link>
     </Compile>
+    <Compile Include="..\TraceEvent.Benchmarks\AsyncProfiler\AsyncProfilerEndToEndFixture.cs" Link="AsyncProfiler\AsyncProfilerEndToEndFixture.cs" />
   </ItemGroup>
 
   <ItemGroup>

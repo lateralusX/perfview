@@ -109,17 +109,11 @@ namespace TraceEventTests
         [InlineData("My.App.dll!Method", "Method")]
         [InlineData("Ns.Type.Method[Other.Namespace.Payload]()", "Method[Other.Namespace.Payload]")]
         [InlineData("BareToken", "BareToken")]                                                                // unqualified
+        [InlineData(null, null)]
+        [InlineData("", "")]
         public void GetBareMethodName_ExtractsMethodComponent(string frameName, string expected)
         {
             Assert.Equal(expected, AsyncProfilerMethodNames.GetBareMethodName(frameName));
-        }
-
-        [Theory]
-        [InlineData(null)]
-        [InlineData("")]
-        public void GetBareMethodName_NullOrEmpty_ReturnedUnchanged(string frameName)
-        {
-            Assert.Equal(frameName, AsyncProfilerMethodNames.GetBareMethodName(frameName));
         }
 
         [Theory]
@@ -204,6 +198,8 @@ namespace TraceEventTests
             "AsyncProfilerAsyncStateMachineBox`1[System.Int64,Scenario+<ChildAsync>d__9]")]
         [InlineData("System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1+DebugFinalizableAsyncStateMachineBox`1[System.Int64,Scenario+<ChildAsync>d__9]..ctor()",
             "DebugFinalizableAsyncStateMachineBox`1[System.Int64,Scenario+<ChildAsync>d__9]")]
+        [InlineData("System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1+AsyncProfilerAsyncStateMachineBox`1[System.Int64,V1TraceScenarios+<BurnCpuAsync>d__15].InstrumentedMoveNext(class System.Threading.Thread,value class Flags)",
+            "AsyncProfilerAsyncStateMachineBox`1[System.Int64,V1TraceScenarios+<BurnCpuAsync>d__15]")]   // separators inside type arguments and signature
         [InlineData(".ctor()", null)]
         [InlineData(".cctor()", null)]
         [InlineData("BareToken", null)]                                       // no type qualifier
@@ -216,19 +212,6 @@ namespace TraceEventTests
         public void GetDeclaringTypeName_ExtractsTypeComponent(string frameName, string expected)
         {
             Assert.Equal(expected, AsyncProfilerMethodNames.GetDeclaringTypeName(frameName));
-        }
-
-        [Fact]
-        public void GetDeclaringTypeName_ConstructedNestedGenericType_IgnoresSeparatorsInTypeArguments()
-        {
-            const string frameName =
-                "System.Private.CoreLib!System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1+" +
-                "AsyncProfilerAsyncStateMachineBox`1[System.Int64,V1TraceScenarios+<BurnCpuAsync>d__15]." +
-                "InstrumentedMoveNext(class System.Threading.Thread,value class Flags)";
-
-            Assert.Equal(
-                "AsyncProfilerAsyncStateMachineBox`1[System.Int64,V1TraceScenarios+<BurnCpuAsync>d__15]",
-                AsyncProfilerMethodNames.GetDeclaringTypeName(frameName));
         }
 
         [Theory]

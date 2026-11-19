@@ -243,21 +243,22 @@ namespace TraceEventTests
         {
         }
 
-        protected EventPipeWriterV6(Stream stream)
+        public EventPipeWriterV6(Stream stream)
             : base(stream)
         {
         }
 
         public override void WriteHeaders() => WriteHeaders(null, 6, 0);
 
-        public void WriteHeaders(Dictionary<string,string> keyValues, int majorVersion = 6, int minorVersion = 0, long syncTimeQpc = 0)
+        public void WriteHeaders(Dictionary<string,string> keyValues, int majorVersion = 6, int minorVersion = 0, long syncTimeQpc = 0,
+            long qpcFrequency = 1000)
         {
             if(keyValues == null)
             {
                 keyValues = new Dictionary<string, string>();
             }
             _writer.WriteNetTraceHeaderV6OrGreater(majorVersion, minorVersion);
-            _writer.WriteTraceBlockV6OrGreater(keyValues, syncTimeQpc);
+            _writer.WriteTraceBlockV6OrGreater(keyValues, syncTimeQpc, qpcFrequency);
         }
 
         public override void WriteMetadataBlock(params EventMetadata[] metadataBlobs)
@@ -320,6 +321,17 @@ namespace TraceEventTests
         public void WriteLabelListBlock(int firstIndex, int count, Action<V6LabelListBlockWriter> writeLabelListEntries)
         {
             _writer.WriteV6LabelListBlock(firstIndex, count, writeLabelListEntries);
+        }
+
+        /// <summary>Writes a stack block; <paramref name="writeStacks"/> must write <paramref name="count"/> stack payloads.</summary>
+        public void WriteStackBlock(int firstStackId, int count, Action<BinaryWriter> writeStacks)
+        {
+            WriteBlock(5 /* BlockKind.StackBlock */, w =>
+            {
+                w.Write(firstStackId);
+                w.Write(count);
+                writeStacks(w);
+            });
         }
 
         public void WriteEndBlock() => WriteBlock(0 /* BLockKind.EndOfStream */, w => { });
@@ -487,12 +499,13 @@ namespace TraceEventTests
             });
         }
 
-        public static void WriteTraceBlockV6OrGreater(this BinaryWriter writer, Dictionary<string,string> keyValues, long syncTimeQpc = 0)
+        public static void WriteTraceBlockV6OrGreater(this BinaryWriter writer, Dictionary<string,string> keyValues, long syncTimeQpc = 0,
+            long qpcFrequency = 1000)
         {
             writer.WriteTraceBlockV6OrGreater(
                 new DateTime(2025, 2, 3, 4, 5, 6),
                 syncTimeQpc: syncTimeQpc,
-                qpcFrequency: 1000,
+                qpcFrequency: qpcFrequency,
                 pointerSize: 8,
                 keyValues);
         }
@@ -1005,6 +1018,44 @@ namespace TraceEventTests
         public static void WriteEndObject(this BinaryWriter writer)
         {
             writer.Write(1); // null tag
+        }
+
+        /// <summary>Writes one stack-block entry: the byte length followed by leaf-to-root instruction pointers.</summary>
+        public static void WriteStackPayload(this BinaryWriter writer, params ulong[] addresses)
+        {
+            writer.Write(addresses.Length * sizeof(ulong));
+            foreach (ulong address in addresses)
+            {
+                writer.Write(address);
+            }
+        }
+
+        /// <summary>Writes a Universal.System ProcessMapping payload with no file offset or metadata.</summary>
+        public static void WriteProcessMappingPayload(this BinaryWriter writer, ulong id, ulong startAddress, ulong endAddress, string fileName)
+        {
+            writer.WriteVarUInt(id);
+            writer.WriteVarUInt(startAddress);
+            writer.WriteVarUInt(endAddress);
+            writer.WriteVarUInt(0); // FileOffset
+            writer.WriteUInt16PrefixedUTF8String(fileName);
+            writer.WriteVarUInt(0); // MetadataId
+        }
+
+        /// <summary>Writes a Universal.System ProcessSymbol payload covering 16 bytes starting at <paramref name="address"/>.</summary>
+        public static void WriteProcessSymbolPayload(this BinaryWriter writer, ulong id, ulong mappingId, ulong address, string name)
+        {
+            writer.WriteVarUInt(id);
+            writer.WriteVarUInt(mappingId);
+            writer.WriteVarUInt(address);
+            writer.WriteVarUInt(address + 0xF);
+            writer.WriteUInt16PrefixedUTF8String(name);
+        }
+
+        public static void WriteUInt16PrefixedUTF8String(this BinaryWriter writer, string value)
+        {
+            byte[] utf8 = Encoding.UTF8.GetBytes(value);
+            writer.Write((ushort)utf8.Length);
+            writer.Write(utf8);
         }
     }
 

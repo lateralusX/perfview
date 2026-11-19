@@ -101,39 +101,14 @@ namespace TraceEventTests
             });
         }
 
-        private static void WithTrace(Action<StackEventSource> emit, Action<TraceLog> verify)
-        {
-            string path = Path.Combine(Path.GetTempPath(), "stack_user_time_" + Guid.NewGuid().ToString("N") + ".etlx");
-            try
-            {
-                using (var source = new StackEventSource(emit))
-                {
-                    TraceLog.CreateFromTraceEventSource(source, path, new TraceLogOptions());
-                }
-                using (var log = new TraceLog(path))
-                {
-                    verify(log);
-                }
-            }
-            finally
-            {
-                File.Delete(path);
-            }
-        }
+        private static void WithTrace(Action<StackEventSource> emit, Action<TraceLog> verify) =>
+            SyntheticEtwSource.ConvertAndVerify(() => new StackEventSource(emit), verify);
 
-        private unsafe sealed class StackEventSource : TraceEventDispatcher
+        private unsafe sealed class StackEventSource : SyntheticEtwSource
         {
-            public StackEventSource(Action<StackEventSource> emit)
+            public StackEventSource(Action<StackEventSource> emit) : base(StartQpc, ProcessId)
             {
                 m_emit = emit;
-                pointerSize = 8;
-                numberOfProcessors = 1;
-                cpuSpeedMHz = 3000;
-                _QPCFreq = 10_000_000;
-                _syncTimeQPC = sessionStartTimeQPC = StartQpc;
-                sessionEndTimeQPC = StartQpc + 100;
-                _syncTimeUTC = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-                osVersion = new Version(10, 0);
             }
 
             public override bool Process()
@@ -141,8 +116,6 @@ namespace TraceEventTests
                 m_emit(this);
                 return true;
             }
-
-            public override int EventsLost => 0;
 
             public void Sample(long qpc, ulong ip)
             {
@@ -228,37 +201,10 @@ namespace TraceEventTests
                 }));
             }
 
+            // Classic kernel events, except the stack-trace extended item that only a manifest (id 18) header carries.
             private void Emit(Guid provider, byte opcode, long qpc, int threadId, byte[] payload,
-                TraceEventNativeMethods.EVENT_HEADER_EXTENDED_DATA_ITEM* extended = null)
-            {
-                fixed (byte* bytes = payload)
-                {
-                    var record = new TraceEventNativeMethods.EVENT_RECORD();
-                    record.EventHeader.ProviderId = provider;
-                    record.EventHeader.Opcode = opcode;
-                    record.EventHeader.Id = extended == null ? (ushort)0 : (ushort)18;
-                    record.EventHeader.Version = 2;
-                    record.EventHeader.Flags = TraceEventNativeMethods.EVENT_HEADER_FLAG_64_BIT_HEADER;
-                    if (extended == null) { record.EventHeader.Flags |= TraceEventNativeMethods.EVENT_HEADER_FLAG_CLASSIC_HEADER; }
-                    record.EventHeader.ProcessId = ProcessId;
-                    record.EventHeader.ThreadId = threadId;
-                    record.EventHeader.TimeStamp = qpc;
-                    record.UserData = (IntPtr)bytes;
-                    record.UserDataLength = (ushort)payload.Length;
-                    record.ExtendedData = extended;
-                    record.ExtendedDataCount = (ushort)(extended == null ? 0 : 1);
-                    Dispatch(Lookup(&record));
-                }
-            }
-
-            private static byte[] Payload(Action<BinaryWriter> write)
-            {
-                using (var stream = new MemoryStream())
-                {
-                    using (var writer = new BinaryWriter(stream)) { write(writer); }
-                    return stream.ToArray();
-                }
-            }
+                TraceEventNativeMethods.EVENT_HEADER_EXTENDED_DATA_ITEM* extended = null) =>
+                Emit(provider, extended == null ? (ushort)0 : (ushort)18, opcode, qpc, threadId, classic: extended == null, payload, extended);
 
             private readonly Action<StackEventSource> m_emit;
         }

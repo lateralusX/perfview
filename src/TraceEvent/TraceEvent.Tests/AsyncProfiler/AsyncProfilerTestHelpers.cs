@@ -3,16 +3,27 @@
 
 using System;
 using System.Collections.Generic;
+using Microsoft.Diagnostics.Tracing.Computers;
+using Microsoft.Diagnostics.Tracing.Etlx;
 using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
 
 namespace TraceEventTests
 {
-    /// <summary>Default header values used by <see cref="AsyncProfilerBufferBuilder"/> and the parser tests.</summary>
+    /// <summary>Default header values used by <see cref="AsyncProfilerBufferBuilder"/> and the parser tests, plus payload helpers.</summary>
     internal static class AsyncProfilerTestData
     {
         public const uint DefaultAsyncThreadContextId = 0x0BADF00D;
         public const ulong DefaultOsThreadId = 0x1234;
         public const long DefaultStartQpc = 1_000_000;
+
+        /// <summary>Wraps a raw buffer in the <c>AsyncEvents</c> event payload: an Int32 byte length followed by the buffer.</summary>
+        public static byte[] AsyncEventsPayload(byte[] buffer)
+        {
+            byte[] payload = new byte[sizeof(int) + buffer.Length];
+            Array.Copy(BitConverter.GetBytes(buffer.Length), 0, payload, 0, sizeof(int));
+            Array.Copy(buffer, 0, payload, sizeof(int), buffer.Length);
+            return payload;
+        }
     }
 
     /// <summary>
@@ -269,6 +280,31 @@ namespace TraceEventTests
         #endregion
     }
 
+    /// <summary>Builds call stacks and stitched frames for tests that run below trace conversion.</summary>
+    internal static class AsyncProfilerStackTestData
+    {
+        /// <summary>A single-frame state-machine call stack for tests that only need a non-null owner.</summary>
+        public static AsyncProfilerCallStack CallStack() =>
+            CallStack(new AsyncProfilerCallStackFrames(AsyncCallstackKind.StateMachineAsync, new ulong[] { 3 }, new[] { 0 }));
+
+        public static AsyncProfilerCallStack CallStack(AsyncProfilerCallStackFrames frames, int depth = 0,
+            long startQpc = 0, long endQpc = long.MaxValue,
+            AsyncProfilerCallStack.CompletionDelta[] methodCompletions = null,
+            AsyncProfilerCallStack.CompletionDelta[] exceptionCompletions = null,
+            byte continuationIndexBase = 0, byte wrapperCount = 32, long[] wrapperResets = null) =>
+            new AsyncProfilerCallStack(depth, (AsyncProfilerCallStackFramesIndex)0, frames,
+                continuationIndexBase, wrapperCount, startQpc, endQpc,
+                methodCompletions ?? Array.Empty<AsyncProfilerCallStack.CompletionDelta>(),
+                exceptionCompletions ?? Array.Empty<AsyncProfilerCallStack.CompletionDelta>(),
+                wrapperResets ?? Array.Empty<long>());
+
+        /// <summary>A physical frame with an unresolved method, optionally owned by <paramref name="callStack"/>.</summary>
+        public static AsyncProfilerStitchedFrame Sync(int codeAddress,
+            AsyncProfilerRuntimeSupport.FrameClassification kind = default, AsyncProfilerCallStack callStack = null) =>
+            AsyncProfilerStitchedFrame.CreateSync(
+                new AsyncProfilerStitchSyncFrame((CodeAddressIndex)codeAddress, MethodIndex.Invalid, kind), callStack);
+    }
+
     /// <summary>A sink that records every decoded sub-event so tests can assert on them.</summary>
     internal sealed class AsyncProfilerCollectingSink : ISubEventSink
     {
@@ -368,5 +404,70 @@ namespace TraceEventTests
         {
             Errors.Add(e);
         }
+    }
+
+    /// <summary>A non-allocating sink that counts decoded sub-events, frames, and resume/suspend pairs by instrumentation family.</summary>
+    internal sealed class AsyncProfilerCountingSink : ISubEventSink
+    {
+        public int SubEventCount { get; private set; }
+        public int FrameCount { get; private set; }
+        public int RuntimeResumeCount { get; private set; }
+        public int RuntimeSuspendCount { get; private set; }
+        public int StateMachineResumeCount { get; private set; }
+        public int StateMachineSuspendCount { get; private set; }
+        public int ParseErrorCount { get; private set; }
+
+        public void Reset()
+        {
+            SubEventCount = 0;
+            FrameCount = 0;
+            RuntimeResumeCount = 0;
+            RuntimeSuspendCount = 0;
+            StateMachineResumeCount = 0;
+            StateMachineSuspendCount = 0;
+            ParseErrorCount = 0;
+        }
+
+        public void OnContextCreate(in AsyncContextEvent e) => SubEventCount++;
+        public void OnContextResume(in AsyncContextEvent e) => SubEventCount++;
+
+        public void OnContextSuspend(in AsyncContextEvent e)
+        {
+            SubEventCount++;
+            if (e.EventId == AsyncEventID.SuspendRuntimeAsyncContext)
+            {
+                RuntimeSuspendCount++;
+            }
+            else if (e.EventId == AsyncEventID.SuspendStateMachineAsyncContext)
+            {
+                StateMachineSuspendCount++;
+            }
+        }
+
+        public void OnContextComplete(in AsyncContextEvent e) => SubEventCount++;
+        public void OnException(in AsyncUnwindEvent e) => SubEventCount++;
+
+        public void OnCallstack(in AsyncCallstackEvent e)
+        {
+            SubEventCount++;
+            FrameCount += e.FrameCount;
+            if (e.EventId == AsyncEventID.ResumeRuntimeAsyncCallstack)
+            {
+                RuntimeResumeCount++;
+            }
+            else if (e.EventId == AsyncEventID.ResumeStateMachineAsyncCallstack)
+            {
+                StateMachineResumeCount++;
+            }
+        }
+
+        public void OnMethodResume(in AsyncMethodEvent e) => SubEventCount++;
+        public void OnMethodComplete(in AsyncMethodEvent e) => SubEventCount++;
+        public void OnResetThreadContext(in AsyncNeutralEvent e) => SubEventCount++;
+        public void OnResetContinuationWrapperIndex(in AsyncNeutralEvent e) => SubEventCount++;
+        public void OnMetadata(in AsyncMetadataEvent e) => SubEventCount++;
+        public void OnSyncClock(in AsyncSyncClockEvent e) => SubEventCount++;
+        public void OnUnknown(in AsyncUnknownEvent e) => SubEventCount++;
+        public void OnParseError(in ParseError e) => ParseErrorCount++;
     }
 }

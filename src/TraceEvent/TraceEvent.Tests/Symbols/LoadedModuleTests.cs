@@ -108,40 +108,15 @@ namespace TraceEventTests
             Assert.Same(expected, modules.GetLoadedModule(ModulePath.ToUpperInvariant(), log.QPCTimeToRelMSec(qpc), kind));
         }
 
-        private static void WithTrace(bool managedFirst, bool includeNative, Action<TraceLog> verify)
-        {
-            string path = Path.Combine(Path.GetTempPath(), "loaded_modules_" + Guid.NewGuid().ToString("N") + ".etlx");
-            try
-            {
-                using (var source = new ModuleEventSource(managedFirst, includeNative))
-                {
-                    TraceLog.CreateFromTraceEventSource(source, path, new TraceLogOptions());
-                }
-                using (var log = new TraceLog(path))
-                {
-                    verify(log);
-                }
-            }
-            finally
-            {
-                File.Delete(path);
-            }
-        }
+        private static void WithTrace(bool managedFirst, bool includeNative, Action<TraceLog> verify) =>
+            SyntheticEtwSource.ConvertAndVerify(() => new ModuleEventSource(managedFirst, includeNative), verify);
 
-        private unsafe sealed class ModuleEventSource : TraceEventDispatcher
+        private unsafe sealed class ModuleEventSource : SyntheticEtwSource
         {
-            public ModuleEventSource(bool managedFirst, bool includeNative)
+            public ModuleEventSource(bool managedFirst, bool includeNative) : base(StartQpc, ProcessId)
             {
                 m_moduleId = managedFirst ? ImageBase - 0x10000 : ImageBase + 0x10000;
                 m_includeNative = includeNative;
-                pointerSize = 8;
-                numberOfProcessors = 1;
-                cpuSpeedMHz = 3000;
-                _QPCFreq = 10_000_000;
-                _syncTimeQPC = sessionStartTimeQPC = StartQpc;
-                sessionEndTimeQPC = StartQpc + 100;
-                _syncTimeUTC = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-                osVersion = new Version(10, 0);
             }
 
             public override bool Process()
@@ -152,8 +127,6 @@ namespace TraceEventTests
                 if (m_includeNative) { Image(StartQpc + 70, 2); }
                 return true;
             }
-
-            public override int EventsLost => 0;
 
             private void Image(long qpc, byte opcode)
             {
@@ -189,31 +162,8 @@ namespace TraceEventTests
                 });
             }
 
-            private void Emit(Guid provider, ushort id, byte opcode, long qpc, bool classic, Action<BinaryWriter> write)
-            {
-                byte[] payload;
-                using (var stream = new MemoryStream())
-                {
-                    using (var writer = new BinaryWriter(stream)) { write(writer); }
-                    payload = stream.ToArray();
-                }
-                fixed (byte* bytes = payload)
-                {
-                    var record = new TraceEventNativeMethods.EVENT_RECORD();
-                    record.EventHeader.ProviderId = provider;
-                    record.EventHeader.Id = id;
-                    record.EventHeader.Opcode = opcode;
-                    record.EventHeader.Version = 2;
-                    record.EventHeader.Flags = TraceEventNativeMethods.EVENT_HEADER_FLAG_64_BIT_HEADER;
-                    if (classic) { record.EventHeader.Flags |= TraceEventNativeMethods.EVENT_HEADER_FLAG_CLASSIC_HEADER; }
-                    record.EventHeader.ProcessId = ProcessId;
-                    record.EventHeader.ThreadId = 5000;
-                    record.EventHeader.TimeStamp = qpc;
-                    record.UserData = (IntPtr)bytes;
-                    record.UserDataLength = (ushort)payload.Length;
-                    Dispatch(Lookup(&record));
-                }
-            }
+            private void Emit(Guid provider, ushort id, byte opcode, long qpc, bool classic, Action<BinaryWriter> write) =>
+                Emit(provider, id, opcode, qpc, threadId: 5000, classic, Payload(write));
 
             private static void WriteString(BinaryWriter writer, string value)
             {

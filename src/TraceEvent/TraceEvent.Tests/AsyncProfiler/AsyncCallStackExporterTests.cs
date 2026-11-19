@@ -202,258 +202,292 @@ namespace TraceEventTests
                 (ProfileEventType.Close, 1, 47, 0));
         }
 
+        private const long Start = 100_000;
+        private const int Process = 1234;
+        private const int OtherProcess = 5678;
+        private const ulong GhostThread = 6000;
+        private const string MoveNext = "Namespace.Scenarios+<DeepLevel1Async>d__8::MoveNext()";
+        private const string GenericMoveNext = "System.Void Namespace.Outer`1+Nested+<RunAsync>d_4`1[System.Int64]::MoveNext()";
+        private const string LogicalName = "[Async V1] testapp!Namespace.Scenarios.DeepLevel1Async [ordinal 8, state 4]";
+        private const string GenericLogicalName = "[Async V1] testapp!Namespace.Outer`1.Nested.RunAsync [ordinal 4`1[System.Int64], state 3]";
+
         [Fact]
-        public void PersistedIndexOnly_ExportsWithoutSamplesOrRawEventsAndSeparatesProcessesAndThreads()
+        public void PersistedIndex_ExportsAllProcessesWithoutSamplesOrRawEvents()
         {
-            const long Start = 100_000;
-            const int Process = 1234;
-            const int OtherProcess = 5678;
-            const ulong GhostThread = 6000;
-            const string MoveNext = "Namespace.Scenarios+<DeepLevel1Async>d__8::MoveNext()";
-            const string GenericMoveNext = "System.Void Namespace.Outer`1+Nested+<RunAsync>d_4`1[System.Int64]::MoveNext()";
-            const string LogicalName = "[Async V1] testapp!Namespace.Scenarios.DeepLevel1Async [ordinal 8, state 4]";
-            const string GenericLogicalName = "[Async V1] testapp!Namespace.Outer`1.Nested.RunAsync [ordinal 4`1[System.Int64], state 3]";
-            var universalSystemProvider = new Guid("8c107b6c-79f8-5231-4de6-2a0e20a3f562");
-            var buffers = new[]
+            using (var trace = new ExportTrace())
             {
-                new AsyncProfilerBufferBuilder(5000, startQpc: Start).Armed(Start)
-                    .ResumeRuntimeStack(Start + 12, 1, new ulong[] { 0xA0 })
-                    .SuspendRuntime(Start + 50).Build(),
-                new AsyncProfilerBufferBuilder(GhostThread, startQpc: Start).Armed(Start)
-                    .ResumeStack(Start + 10, 1, new ulong[] { 0, 0xB0 }, new[] { 2, 3 })
-                    .CompleteMethod(Start + 20)
-                    .AppendStack(Start + 25, 1, new ulong[] { 0xC0 }, new[] { 4 })
-                    .UnwindException(Start + 30, 1)
-                    .Suspend(Start + 40)
-                    .ResumeStack(Start + 45, 2, new ulong[] { 0xD0 }).Build(),
-                new AsyncProfilerBufferBuilder(GhostThread, startQpc: Start).Armed(Start)
-                    .ResumeRuntimeStack(Start + 15, 1, new ulong[] { 0xE0 })
-                    .SuspendRuntime(Start + 25).Build()
-            };
-            var writer = new EventPipeWriterV6();
-            writer.WriteHeaders(null, syncTimeQpc: Start);
-            writer.WriteMetadataBlock(
-                new EventMetadata(1, AsyncProfilerTraceEventParser.ProviderName,
-                    "AsyncEvents", AsyncProfilerTraceEventParser.AsyncEventsEventId),
-                new EventMetadata(2, "TimelineAnchor", "End", 1),
-                new EventMetadata(3, "Universal.System", "ProcessMapping", 3)
+                TraceLog log = trace.Log;
+                Assert.True(log.HasAsyncProfilerEvents);
+                Assert.False(log.IsAsyncProfilerCallStacksLoaded);
+                Assert.Single(log.Events.Where(e => e.ProviderName == "TimelineAnchor"));
+                Assert.DoesNotContain(log.Threads, t => (ulong)t.ThreadID == GhostThread);
+                SpeedScopeStackSourceWriter.WriteAsyncCallStacksAsJson(log, trace.Output);
+                using (JsonDocument json = trace.ReadJson())
                 {
-                    ProviderId = universalSystemProvider,
-                },
-                new EventMetadata(4, "Universal.System", "ProcessSymbol", 4)
-                {
-                    ProviderId = universalSystemProvider,
-                });
-            writer.WriteThreadBlock(w =>
-            {
-                w.WriteThreadEntry(7, threadId: 5000, processId: Process);
-                w.WriteThreadEntry(8, threadId: 7000, processId: OtherProcess);
-            });
-            writer.WriteEventBlock(w =>
-            {
-                w.WriteEventBlob(new WriteEventOptions
-                {
-                    MetadataId = 3, ThreadIndexOrId = 7, CaptureThreadIndexOrId = 7,
-                    SequenceNumber = 1, Timestamp = Start + 1, IsSorted = true
-                }, p =>
-                {
-                    p.WriteVarUInt(1);
-                    p.WriteVarUInt(1);
-                    p.WriteVarUInt(0x100);
-                    p.WriteVarUInt(0);
-                    WriteShortUTF8String(p, "testapp.dll");
-                    p.WriteVarUInt(0);
-                });
-                for (int i = 0; i < buffers.Length; i++)
-                {
-                    int slot = i;
-                    w.WriteEventBlob(new WriteEventOptions
-                    {
-                        MetadataId = 1,
-                        ThreadIndexOrId = i == 2 ? 8 : 7,
-                        CaptureThreadIndexOrId = i == 2 ? 8 : 7,
-                        SequenceNumber = i + 2,
-                        Timestamp = Start + 60 + i * 10,
-                        IsSorted = true
-                    }, p =>
-                    {
-                        p.Write(buffers[slot].Length);
-                        p.Write(buffers[slot]);
-                    });
-                }
-                var symbols = new (ulong Address, string Name)[]
-                {
-                    (0xA0, MoveNext), (0xB0, GenericMoveNext), (0xC0, MoveNext)
-                };
-                for (int i = 0; i < symbols.Length; i++)
-                {
-                    var symbol = symbols[i];
-                    w.WriteEventBlob(new WriteEventOptions
-                    {
-                        MetadataId = 4, ThreadIndexOrId = 7, CaptureThreadIndexOrId = 7,
-                        SequenceNumber = 5 + i, Timestamp = Start + 81 + i, IsSorted = true
-                    }, p =>
-                    {
-                        p.WriteVarUInt(symbol.Address);
-                        p.WriteVarUInt(1);
-                        p.WriteVarUInt(symbol.Address);
-                        p.WriteVarUInt(symbol.Address + 1);
-                        WriteShortUTF8String(p, symbol.Name);
-                    });
-                }
-                w.WriteEventBlob(new WriteEventOptions
-                {
-                    MetadataId = 2,
-                    ThreadIndexOrId = 7,
-                    CaptureThreadIndexOrId = 7,
-                    SequenceNumber = 8,
-                    Timestamp = Start + 90,
-                    IsSorted = true
-                }, p => { });
-            });
-            writer.WriteEndBlock();
-
-            string input = Path.Combine(Path.GetTempPath(), $"async_export_{Guid.NewGuid():N}.nettrace");
-            string output = Path.ChangeExtension(input, ".speedscope.json");
-            string etlx = null;
-            try
-            {
-                File.WriteAllBytes(input, writer.ToArray());
-                etlx = TraceLog.CreateFromEventPipeDataFile(input);
-                using (var log = new TraceLog(etlx))
-                {
-                    Assert.True(log.HasAsyncProfilerEvents);
-                    Assert.False(log.IsAsyncProfilerCallStacksLoaded);
-                    Assert.Single(log.Events.Where(e => e.ProviderName == "TimelineAnchor"));
-                    Assert.DoesNotContain(log.Threads, t => (ulong)t.ThreadID == GhostThread);
-                    SpeedScopeStackSourceWriter.WriteAsyncCallStacksAsJson(log, output);
-                    using (var json = JsonDocument.Parse(File.ReadAllText(output)))
-                    {
-                        Assert.Equal(3, json.RootElement.GetProperty("profiles").GetArrayLength());
-                        ValidateJson(json);
-                    }
-
-                    SpeedScopeStackSourceWriter.WriteAsyncCallStacksAsJson(log, output, Process);
-                    using (var json = JsonDocument.Parse(File.ReadAllText(output)))
-                    {
-                        ValidateJson(json);
-                        var root = json.RootElement;
-                        var profiles = root.GetProperty("profiles").EnumerateArray().ToArray();
-                        Assert.Equal(2, profiles.Length);
-                        Assert.All(profiles, p => Assert.Contains($"({Process}, instance ", p.GetProperty("name").GetString()));
-                        var ghost = profiles.Single(p => p.GetProperty("name").GetString().Contains("Thread (6000)"));
-                        var frames = root.GetProperty("shared").GetProperty("frames");
-                        string Name(JsonElement e) => frames[e.GetProperty("frame").GetInt32()].GetProperty("name").GetString();
-                        var events = ghost.GetProperty("events").EnumerateArray().ToArray();
-                        Assert.Equal(LogicalName, Name(events[0]));
-                        Assert.Equal(GenericLogicalName, Name(events[1]));
-                        Assert.Equal(log.QPCTimeToRelMSec(Start + 10),
-                            events.Single(e => e.GetProperty("type").GetString() == "O" &&
-                                Name(e) == LogicalName).GetProperty("at").GetDouble());
-                        Assert.DoesNotContain(events, e => e.GetProperty("at").GetDouble() ==
-                            log.QPCTimeToRelMSec(Start + 20));
-                        Assert.Equal(log.QPCTimeToRelMSec(Start + 30),
-                            events.Single(e => e.GetProperty("type").GetString() == "C" &&
-                                Name(e) == GenericLogicalName).GetProperty("at").GetDouble());
-                        Assert.Contains("[Async V1] AsyncFrame(0xd0) [captured state 0]",
-                            frames.EnumerateArray().Select(f => f.GetProperty("name").GetString()));
-                        Assert.Contains("[Async V2] testapp!" + MoveNext,
-                            frames.EnumerateArray().Select(f => f.GetProperty("name").GetString()));
-                        Assert.Equal(log.QPCTimeToRelMSec(log.sessionEndTimeQPC),
-                            events.Last().GetProperty("at").GetDouble());
-                    }
-
-                    string exact = File.ReadAllText(output);
-                    var interval = TimeSpan.FromSeconds(20.25 / log.QPCFreq);
-                    SpeedScopeStackSourceWriter.WriteAsyncCallStacksAsJson(log, output, interval, Process);
-                    using (var json = JsonDocument.Parse(File.ReadAllText(output)))
-                    {
-                        ValidateJson(json);
-                        var root = json.RootElement;
-                        var profiles = root.GetProperty("profiles").EnumerateArray().ToArray();
-                        Assert.Equal(2, profiles.Length);
-                        Assert.All(profiles, p => Assert.Contains("(virtual 20 ms)", p.GetProperty("name").GetString()));
-                        var ghost = profiles.Single(p => p.GetProperty("name").GetString().Contains("Thread (6000)"));
-                        var frames = root.GetProperty("shared").GetProperty("frames");
-                        string Name(JsonElement e) => frames[e.GetProperty("frame").GetInt32()].GetProperty("name").GetString();
-                        var events = ghost.GetProperty("events").EnumerateArray().ToArray();
-                        Assert.Equal(new[]
-                        {
-                            log.QPCTimeToRelMSec(Start + 20), log.QPCTimeToRelMSec(Start + 20),
-                            log.QPCTimeToRelMSec(Start + 40), log.QPCTimeToRelMSec(Start + 40),
-                            log.QPCTimeToRelMSec(Start + 60), log.QPCTimeToRelMSec(Start + 90)
-                        }, events.Select(e => e.GetProperty("at").GetDouble()));
-                        Assert.Equal(LogicalName, Name(events[0]));
-                        Assert.Equal(GenericLogicalName, Name(events[1]));
-                        Assert.Contains("AsyncFrame(0xd0)", Name(events[4]));
-                        var normal = profiles.Single(p => p.GetProperty("name").GetString().Contains("Thread (5000)"));
-                        Assert.Equal(new[] { log.QPCTimeToRelMSec(Start + 20), log.QPCTimeToRelMSec(Start + 60) },
-                            normal.GetProperty("events").EnumerateArray().Select(e => e.GetProperty("at").GetDouble()));
-                    }
-                    SpeedScopeStackSourceWriter.WriteAsyncCallStacksAsJson(log, output, TimeSpan.FromSeconds(1), Process);
-                    using (var json = JsonDocument.Parse(File.ReadAllText(output)))
-                    {
-                        Assert.Empty(json.RootElement.GetProperty("profiles").EnumerateArray());
-                    }
-                    foreach (var invalid in new[] { TimeSpan.Zero, TimeSpan.FromSeconds(-1), TimeSpan.FromTicks(1) })
-                    {
-                        Assert.Throws<ArgumentOutOfRangeException>(() =>
-                            SpeedScopeStackSourceWriter.WriteAsyncCallStacksAsJson(log, output, invalid));
-                    }
-                    SpeedScopeStackSourceWriter.WriteAsyncCallStacksAsJson(log, output, Process);
-                    Assert.Equal(exact, File.ReadAllText(output));
-                    Assert.True(log.ReleaseAsyncProfilerCallStacks());
-                    SpeedScopeStackSourceWriter.WriteAsyncCallStacksAsJson(log, output, OtherProcess);
-                    using (var json = JsonDocument.Parse(File.ReadAllText(output)))
-                    {
-                        var profile = Assert.Single(json.RootElement.GetProperty("profiles").EnumerateArray());
-                        Assert.Contains($"({OtherProcess}, instance ", profile.GetProperty("name").GetString());
-                        Assert.Contains("Thread (6000)", profile.GetProperty("name").GetString());
-                        var frames = json.RootElement.GetProperty("shared").GetProperty("frames");
-                        Assert.Equal(new[]
-                        {
-                            log.QPCTimeToRelMSec(Start + 15), log.QPCTimeToRelMSec(Start + 25),
-                        }, profile.GetProperty("events").EnumerateArray().Select(e => e.GetProperty("at").GetDouble()));
-                        Assert.All(profile.GetProperty("events").EnumerateArray(), e =>
-                            Assert.Contains("AsyncFrame(0xe0)", frames[e.GetProperty("frame").GetInt32()].GetProperty("name").GetString()));
-                        ValidateJson(json);
-                    }
-                    SpeedScopeStackSourceWriter.WriteAsyncCallStacksAsJson(log, output, 9999);
-                    using (var json = JsonDocument.Parse(File.ReadAllText(output)))
-                    {
-                        Assert.Empty(json.RootElement.GetProperty("profiles").EnumerateArray());
-                    }
+                    Assert.Equal(3, json.RootElement.GetProperty("profiles").GetArrayLength());
+                    ValidateJson(json);
                 }
             }
-            finally
+        }
+
+        [Fact]
+        public void PersistedIndex_PerProcessExportResolvesLogicalNamesAndCompletions()
+        {
+            using (var trace = new ExportTrace())
             {
-                File.Delete(input);
-                File.Delete(output);
-                if (etlx != null)
+                TraceLog log = trace.Log;
+                SpeedScopeStackSourceWriter.WriteAsyncCallStacksAsJson(log, trace.Output, Process);
+                using (JsonDocument json = trace.ReadJson())
                 {
-                    File.Delete(etlx);
+                    ValidateJson(json);
+                    var root = json.RootElement;
+                    var profiles = root.GetProperty("profiles").EnumerateArray().ToArray();
+                    Assert.Equal(2, profiles.Length);
+                    Assert.All(profiles, p => Assert.Contains($"({Process}, instance ", p.GetProperty("name").GetString()));
+                    var ghost = profiles.Single(p => p.GetProperty("name").GetString().Contains("Thread (6000)"));
+                    var frames = root.GetProperty("shared").GetProperty("frames");
+                    string Name(JsonElement e) => frames[e.GetProperty("frame").GetInt32()].GetProperty("name").GetString();
+                    var events = ghost.GetProperty("events").EnumerateArray().ToArray();
+                    Assert.Equal(LogicalName, Name(events[0]));
+                    Assert.Equal(GenericLogicalName, Name(events[1]));
+                    Assert.Equal(log.QPCTimeToRelMSec(Start + 10),
+                        events.Single(e => e.GetProperty("type").GetString() == "O" &&
+                            Name(e) == LogicalName).GetProperty("at").GetDouble());
+                    Assert.DoesNotContain(events, e => e.GetProperty("at").GetDouble() ==
+                        log.QPCTimeToRelMSec(Start + 20));
+                    Assert.Equal(log.QPCTimeToRelMSec(Start + 30),
+                        events.Single(e => e.GetProperty("type").GetString() == "C" &&
+                            Name(e) == GenericLogicalName).GetProperty("at").GetDouble());
+                    Assert.Contains("[Async V1] AsyncFrame(0xd0) [captured state 0]",
+                        frames.EnumerateArray().Select(f => f.GetProperty("name").GetString()));
+                    Assert.Contains("[Async V2] testapp!" + MoveNext,
+                        frames.EnumerateArray().Select(f => f.GetProperty("name").GetString()));
+                    Assert.Equal(log.QPCTimeToRelMSec(log.sessionEndTimeQPC),
+                        events.Last().GetProperty("at").GetDouble());
+                }
+            }
+        }
+
+        [Fact]
+        public void PersistedIndex_VirtualIntervalExportSamplesActiveFramesWithoutChangingExactExport()
+        {
+            using (var trace = new ExportTrace())
+            {
+                TraceLog log = trace.Log;
+                SpeedScopeStackSourceWriter.WriteAsyncCallStacksAsJson(log, trace.Output, Process);
+                string exact = File.ReadAllText(trace.Output);
+
+                var interval = TimeSpan.FromSeconds(20.25 / log.QPCFreq);
+                SpeedScopeStackSourceWriter.WriteAsyncCallStacksAsJson(log, trace.Output, interval, Process);
+                using (JsonDocument json = trace.ReadJson())
+                {
+                    ValidateJson(json);
+                    var root = json.RootElement;
+                    var profiles = root.GetProperty("profiles").EnumerateArray().ToArray();
+                    Assert.Equal(2, profiles.Length);
+                    Assert.All(profiles, p => Assert.Contains("(virtual 20 ms)", p.GetProperty("name").GetString()));
+                    var ghost = profiles.Single(p => p.GetProperty("name").GetString().Contains("Thread (6000)"));
+                    var frames = root.GetProperty("shared").GetProperty("frames");
+                    string Name(JsonElement e) => frames[e.GetProperty("frame").GetInt32()].GetProperty("name").GetString();
+                    var events = ghost.GetProperty("events").EnumerateArray().ToArray();
+                    Assert.Equal(new[]
+                    {
+                        log.QPCTimeToRelMSec(Start + 20), log.QPCTimeToRelMSec(Start + 20),
+                        log.QPCTimeToRelMSec(Start + 40), log.QPCTimeToRelMSec(Start + 40),
+                        log.QPCTimeToRelMSec(Start + 60), log.QPCTimeToRelMSec(Start + 90)
+                    }, events.Select(e => e.GetProperty("at").GetDouble()));
+                    Assert.Equal(LogicalName, Name(events[0]));
+                    Assert.Equal(GenericLogicalName, Name(events[1]));
+                    Assert.Contains("AsyncFrame(0xd0)", Name(events[4]));
+                    var normal = profiles.Single(p => p.GetProperty("name").GetString().Contains("Thread (5000)"));
+                    Assert.Equal(new[] { log.QPCTimeToRelMSec(Start + 20), log.QPCTimeToRelMSec(Start + 60) },
+                        normal.GetProperty("events").EnumerateArray().Select(e => e.GetProperty("at").GetDouble()));
+                }
+
+                // An interval longer than the trace samples nothing.
+                SpeedScopeStackSourceWriter.WriteAsyncCallStacksAsJson(log, trace.Output, TimeSpan.FromSeconds(1), Process);
+                using (JsonDocument json = trace.ReadJson())
+                {
+                    Assert.Empty(json.RootElement.GetProperty("profiles").EnumerateArray());
+                }
+
+                SpeedScopeStackSourceWriter.WriteAsyncCallStacksAsJson(log, trace.Output, Process);
+                Assert.Equal(exact, File.ReadAllText(trace.Output));
+            }
+        }
+
+        [Theory]
+        [InlineData(0)]
+        [InlineData(-TimeSpan.TicksPerSecond)]
+        [InlineData(1)]
+        public void PersistedIndex_VirtualIntervalExportRejectsInvalidIntervals(long intervalTicks)
+        {
+            using (var trace = new ExportTrace())
+            {
+                Assert.Throws<ArgumentOutOfRangeException>(() =>
+                    SpeedScopeStackSourceWriter.WriteAsyncCallStacksAsJson(trace.Log, trace.Output, TimeSpan.FromTicks(intervalTicks)));
+            }
+        }
+
+        [Fact]
+        public void PersistedIndex_ExportReloadsReleasedIndexAndFiltersByProcess()
+        {
+            using (var trace = new ExportTrace())
+            {
+                TraceLog log = trace.Log;
+                SpeedScopeStackSourceWriter.WriteAsyncCallStacksAsJson(log, trace.Output);
+                Assert.True(log.ReleaseAsyncProfilerCallStacks());
+                Assert.False(log.IsAsyncProfilerCallStacksLoaded);
+
+                SpeedScopeStackSourceWriter.WriteAsyncCallStacksAsJson(log, trace.Output, OtherProcess);
+                using (JsonDocument json = trace.ReadJson())
+                {
+                    var profile = Assert.Single(json.RootElement.GetProperty("profiles").EnumerateArray());
+                    Assert.Contains($"({OtherProcess}, instance ", profile.GetProperty("name").GetString());
+                    Assert.Contains("Thread (6000)", profile.GetProperty("name").GetString());
+                    var frames = json.RootElement.GetProperty("shared").GetProperty("frames");
+                    Assert.Equal(new[]
+                    {
+                        log.QPCTimeToRelMSec(Start + 15), log.QPCTimeToRelMSec(Start + 25),
+                    }, profile.GetProperty("events").EnumerateArray().Select(e => e.GetProperty("at").GetDouble()));
+                    Assert.All(profile.GetProperty("events").EnumerateArray(), e =>
+                        Assert.Contains("AsyncFrame(0xe0)", frames[e.GetProperty("frame").GetInt32()].GetProperty("name").GetString()));
+                    ValidateJson(json);
+                }
+
+                SpeedScopeStackSourceWriter.WriteAsyncCallStacksAsJson(log, trace.Output, 9999);
+                using (JsonDocument json = trace.ReadJson())
+                {
+                    Assert.Empty(json.RootElement.GetProperty("profiles").EnumerateArray());
                 }
             }
         }
 
         #region private
 
-        private static void WriteShortUTF8String(BinaryWriter writer, string value)
+        /// <summary>
+        /// Converts a nettrace containing only async-profiler buffers, symbol metadata and a timeline anchor:
+        /// process <see cref="Process"/> thread 5000 (runtime async), ghost thread 6000 without a TraceThread
+        /// (V1 frames with completions, exception unwind and an unresolved frame), and thread 6000 in
+        /// <see cref="OtherProcess"/>.
+        /// </summary>
+        private sealed class ExportTrace : IDisposable
         {
-            byte[] utf8 = System.Text.Encoding.UTF8.GetBytes(value);
-            writer.Write((ushort)utf8.Length);
-            writer.Write(utf8);
+            private readonly string m_input;
+            private readonly string m_etlx;
+
+            public ExportTrace()
+            {
+                var universalSystemProvider = new Guid("8c107b6c-79f8-5231-4de6-2a0e20a3f562");
+                var buffers = new[]
+                {
+                    new AsyncProfilerBufferBuilder(5000, startQpc: Start).Armed(Start)
+                        .ResumeRuntimeStack(Start + 12, 1, new ulong[] { 0xA0 })
+                        .SuspendRuntime(Start + 50).Build(),
+                    new AsyncProfilerBufferBuilder(GhostThread, startQpc: Start).Armed(Start)
+                        .ResumeStack(Start + 10, 1, new ulong[] { 0, 0xB0 }, new[] { 2, 3 })
+                        .CompleteMethod(Start + 20)
+                        .AppendStack(Start + 25, 1, new ulong[] { 0xC0 }, new[] { 4 })
+                        .UnwindException(Start + 30, 1)
+                        .Suspend(Start + 40)
+                        .ResumeStack(Start + 45, 2, new ulong[] { 0xD0 }).Build(),
+                    new AsyncProfilerBufferBuilder(GhostThread, startQpc: Start).Armed(Start)
+                        .ResumeRuntimeStack(Start + 15, 1, new ulong[] { 0xE0 })
+                        .SuspendRuntime(Start + 25).Build()
+                };
+                var writer = new EventPipeWriterV6();
+                writer.WriteHeaders(null, syncTimeQpc: Start);
+                writer.WriteMetadataBlock(
+                    new EventMetadata(1, AsyncProfilerTraceEventParser.ProviderName,
+                        "AsyncEvents", AsyncProfilerTraceEventParser.AsyncEventsEventId),
+                    new EventMetadata(2, "TimelineAnchor", "End", 1),
+                    new EventMetadata(3, "Universal.System", "ProcessMapping", 3)
+                    {
+                        ProviderId = universalSystemProvider,
+                    },
+                    new EventMetadata(4, "Universal.System", "ProcessSymbol", 4)
+                    {
+                        ProviderId = universalSystemProvider,
+                    });
+                writer.WriteThreadBlock(w =>
+                {
+                    w.WriteThreadEntry(7, threadId: 5000, processId: Process);
+                    w.WriteThreadEntry(8, threadId: 7000, processId: OtherProcess);
+                });
+                writer.WriteEventBlock(w =>
+                {
+                    w.WriteEventBlob(new WriteEventOptions
+                    {
+                        MetadataId = 3, ThreadIndexOrId = 7, CaptureThreadIndexOrId = 7,
+                        SequenceNumber = 1, Timestamp = Start + 1, IsSorted = true
+                    }, p => p.WriteProcessMappingPayload(1, 1, 0x100, "testapp.dll"));
+                    for (int i = 0; i < buffers.Length; i++)
+                    {
+                        int slot = i;
+                        w.WriteEventBlob(new WriteEventOptions
+                        {
+                            MetadataId = 1,
+                            ThreadIndexOrId = i == 2 ? 8 : 7,
+                            CaptureThreadIndexOrId = i == 2 ? 8 : 7,
+                            SequenceNumber = i + 2,
+                            Timestamp = Start + 60 + i * 10,
+                            IsSorted = true
+                        }, p => p.Write(AsyncProfilerTestData.AsyncEventsPayload(buffers[slot])));
+                    }
+                    var symbols = new (ulong Address, string Name)[]
+                    {
+                        (0xA0, MoveNext), (0xB0, GenericMoveNext), (0xC0, MoveNext)
+                    };
+                    for (int i = 0; i < symbols.Length; i++)
+                    {
+                        var symbol = symbols[i];
+                        w.WriteEventBlob(new WriteEventOptions
+                        {
+                            MetadataId = 4, ThreadIndexOrId = 7, CaptureThreadIndexOrId = 7,
+                            SequenceNumber = 5 + i, Timestamp = Start + 81 + i, IsSorted = true
+                        }, p => p.WriteProcessSymbolPayload(symbol.Address, 1, symbol.Address, symbol.Name));
+                    }
+                    w.WriteEventBlob(new WriteEventOptions
+                    {
+                        MetadataId = 2,
+                        ThreadIndexOrId = 7,
+                        CaptureThreadIndexOrId = 7,
+                        SequenceNumber = 8,
+                        Timestamp = Start + 90,
+                        IsSorted = true
+                    }, p => { });
+                });
+                writer.WriteEndBlock();
+
+                m_input = Path.Combine(Path.GetTempPath(), $"async_export_{Guid.NewGuid():N}.nettrace");
+                Output = Path.ChangeExtension(m_input, ".speedscope.json");
+                File.WriteAllBytes(m_input, writer.ToArray());
+                m_etlx = TraceLog.CreateFromEventPipeDataFile(m_input);
+                Log = new TraceLog(m_etlx);
+            }
+
+            public TraceLog Log { get; }
+
+            public string Output { get; }
+
+            public JsonDocument ReadJson() => JsonDocument.Parse(File.ReadAllText(Output));
+
+            public void Dispose()
+            {
+                Log.Dispose();
+                File.Delete(m_input);
+                File.Delete(Output);
+                File.Delete(m_etlx);
+            }
         }
 
         private static AsyncProfilerCallStack Context(long start, long end, ulong[] frames, int depth = 0,
             bool runtime = false, AsyncProfilerCallStack.CompletionDelta[] methods = null,
             AsyncProfilerCallStack.CompletionDelta[] exceptions = null) =>
-            new AsyncProfilerCallStack(depth, 0,
+            AsyncProfilerStackTestData.CallStack(
                 new AsyncProfilerCallStackFrames(runtime ? AsyncCallstackKind.RuntimeAsync : AsyncCallstackKind.StateMachineAsync,
                     frames, runtime ? null : new int[frames.Length]),
-                0, 32, start, end,
-                methods ?? Array.Empty<AsyncProfilerCallStack.CompletionDelta>(),
-                exceptions ?? Array.Empty<AsyncProfilerCallStack.CompletionDelta>(), Array.Empty<long>());
+                depth, start, end, methods, exceptions);
 
         private static AsyncProfilerCallStack.CompletionDelta Delta(long qpc, int count = 1) =>
             new AsyncProfilerCallStack.CompletionDelta(qpc, count);

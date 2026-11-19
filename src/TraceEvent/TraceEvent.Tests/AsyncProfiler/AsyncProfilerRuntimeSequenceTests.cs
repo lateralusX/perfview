@@ -48,10 +48,6 @@ namespace TraceEventTests
                 (AsyncProfilerRuntimeSequenceKind)kind, 0, fixture.Frames.Count);
             Assert.True(match.IsMatch);
             Assert.Equal(length, match.Length);
-            Assert.Equal(RuntimeFrameKind.TaskResult,
-                fixture.Support.ClassifySynchronousFrame(AsyncProfilerExtendedCompletionRuntimeSupport.RenamedCompletionName, true));
-            Assert.Equal(AsyncProfilerStitchSyncFrameKind.None,
-                fixture.Support.ClassifySynchronousFrame(AsyncProfilerExtendedCompletionRuntimeSupport.RenamedCompletionName, false));
         }
 
         [Theory]
@@ -240,71 +236,6 @@ namespace TraceEventTests
                 AsyncProfilerCallStackTransformState context, int start, int end) =>
                 AsyncProfilerRuntimeSequenceMatch.Match(end - start + 1);
         }
-
-        #endregion
-    }
-
-    // A hypothetical layout, never selected by production version detection.
-    internal sealed class AsyncProfilerExtendedCompletionRuntimeSupport : AsyncProfilerRuntimeSupport
-    {
-        public AsyncProfilerExtendedCompletionRuntimeSupport(
-            Func<AsyncProfilerCallStackTransformState, AsyncProfilerStitchedFrame, string> methodName = null)
-            : base("Test-only extended completion layout")
-        {
-            m_methodName = methodName ??
-                ((context, frame) => context.TraceLog.CodeAddresses[frame.CodeAddress].FullMethodName);
-        }
-
-        public const string InjectedHelperName = "System.Threading.Tasks.Task.CompletionHelper";
-        public const string RenamedCompletionName = "System.Threading.Tasks.Task.TryComplete";
-
-        public override FrameClassification ClassifySynchronousFrame(string frameName, bool isHostModule) =>
-            isHostModule && frameName == RenamedCompletionName
-                ? (FrameClassification)RuntimeFrameKind.TaskResult
-                : base.ClassifySynchronousFrame(frameName, isHostModule);
-
-        protected override AsyncProfilerRuntimeSequenceMatch MatchTaskCompletion(
-            AsyncProfilerCallStackTransformState context, int start, int end)
-        {
-            if (start == end || !IsKind(context.Frames[start], RuntimeFrameKind.TaskContinuations))
-            {
-                return default;
-            }
-            return end - start >= 3 &&
-                   context.Frames[start + 1].Origin == AsyncProfilerStitchedFrameOrigin.Sync &&
-                   m_methodName(context, context.Frames[start + 1]) == InjectedHelperName &&
-                   IsKind(context.Frames[start + 2], RuntimeFrameKind.TaskResult)
-                ? AsyncProfilerRuntimeSequenceMatch.Match(3)
-                : AsyncProfilerRuntimeSequenceMatch.Reject(Math.Min(3, end - start));
-        }
-
-        protected override AsyncProfilerRuntimeSequenceMatch MatchTaskCompletionChain(
-            AsyncProfilerCallStackTransformState context, int start, int end)
-        {
-            AsyncProfilerRuntimeSequenceMatch match = base.MatchTaskCompletionChain(context, start, end);
-            return match.Length == 0 && start < end &&
-                   IsKind(context.Frames[start], RuntimeFrameKind.TaskContinuations)
-                ? AsyncProfilerRuntimeSequenceMatch.Reject(Math.Min(4, end - start))
-                : match;
-        }
-
-        protected override AsyncProfilerRuntimeSequenceMatch MatchV2CompletionHandoff(
-            AsyncProfilerCallStackTransformState context, int start, int end)
-        {
-            AsyncProfilerRuntimeSequenceMatch match = base.MatchV2CompletionHandoff(context, start, end);
-            return match.Length == 0 && end - start >= 2 &&
-                   IsKind(context.Frames[start], AsyncProfilerStitchSyncFrameKind.ContinuationBridge) &&
-                   IsKind(context.Frames[start + 1], RuntimeFrameKind.TaskContinuations)
-                ? AsyncProfilerRuntimeSequenceMatch.Reject(Math.Min(6, end - start))
-                : match;
-        }
-
-        #region private
-
-        private static bool IsKind(AsyncProfilerStitchedFrame frame, FrameClassification kind) =>
-            frame.Origin == AsyncProfilerStitchedFrameOrigin.Sync && frame.SyncClassification == kind;
-
-        private readonly Func<AsyncProfilerCallStackTransformState, AsyncProfilerStitchedFrame, string> m_methodName;
 
         #endregion
     }

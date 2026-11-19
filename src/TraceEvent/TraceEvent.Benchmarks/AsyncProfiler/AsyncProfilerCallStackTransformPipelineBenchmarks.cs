@@ -22,11 +22,11 @@ namespace TraceEventBenchmarks
             var captured = new AsyncProfilerCallStackFrames(
                 AsyncCallstackKind.StateMachineAsync, new ulong[] { 200 }, new[] { 0 });
             captured.SetCodeAddressAt(0, (CodeAddressIndex)200);
-            m_segment = new AsyncProfilerCallStack(
+            _segment = new AsyncProfilerCallStack(
                 0, (AsyncProfilerCallStackFramesIndex)0, captured, 0, 32, 0, long.MaxValue,
                 Array.Empty<AsyncProfilerCallStack.CompletionDelta>(),
                 Array.Empty<AsyncProfilerCallStack.CompletionDelta>(), Array.Empty<long>());
-            m_input = new[]
+            _input = new[]
             {
                 Sync(10),
                 Sync(11, AsyncProfilerStitchSyncFrameKind.V1StateMachineBody),
@@ -37,57 +37,57 @@ namespace TraceEventBenchmarks
                 Sync(16, RuntimeFrameKind.TaskResult),
                 Sync(17, RuntimeFrameKind.TaskCompletionSourceResult),
                 Sync(18),
-                AsyncProfilerStitchedFrame.CreateAsync(m_segment, 0),
+                AsyncProfilerStitchedFrame.CreateAsync(_segment, 0),
             };
-            m_frames = new List<AsyncProfilerStitchedFrame>(m_input.Length);
-            m_diagnostics = new AsyncProfilerCallStackDiagnostics();
-            m_stitchingState = new AsyncProfilerCallStackStitchingState();
-            m_context = new AsyncProfilerCallStackTransformState(
-                traceLog: null, segments: new[] { m_segment }, timestampQpc: 1,
+            _frames = new List<AsyncProfilerStitchedFrame>(_input.Length);
+            _diagnostics = new AsyncProfilerCallStackDiagnostics();
+            _stitchingState = new AsyncProfilerCallStackStitchingState();
+            _context = new AsyncProfilerCallStackTransformState(
+                traceLog: null, segments: new[] { _segment }, timestampQpc: 1,
                 classifyBoundary: _ => AsyncProfilerCallStackStitchBoundaryInfo.None,
-                stitchingState: m_stitchingState,
-                diagnostics: m_diagnostics, frames: m_frames);
-            m_structural = new AsyncProfilerCallStackTransformPipeline { EnableNormalization = false };
-            m_normalization = new AsyncProfilerCallStackTransformPipeline();
-            m_cleanup = new AsyncProfilerCallStackTransformPipeline { EnableInfrastructureCleanup = true };
+                stitchingState: _stitchingState,
+                diagnostics: _diagnostics, frames: _frames);
+            _structural = new AsyncProfilerCallStackTransformPipeline { EnableNormalization = false };
+            _normalization = new AsyncProfilerCallStackTransformPipeline();
+            _cleanup = new AsyncProfilerCallStackTransformPipeline { EnableInfrastructureCleanup = true };
 
-            Validate(m_structural, expectedFrames: 10, normalized: 0, startupCollapsed: 0, infrastructureCollapsed: 0);
-            Validate(m_normalization, expectedFrames: 8, normalized: 1, startupCollapsed: 2, infrastructureCollapsed: 0);
-            Validate(m_cleanup, expectedFrames: 6, normalized: 1, startupCollapsed: 2, infrastructureCollapsed: 3);
+            Validate(_structural, expectedFrames: 10, normalized: 0, startupCollapsed: 0, infrastructureCollapsed: 0);
+            Validate(_normalization, expectedFrames: 8, normalized: 1, startupCollapsed: 2, infrastructureCollapsed: 0);
+            Validate(_cleanup, expectedFrames: 6, normalized: 1, startupCollapsed: 2, infrastructureCollapsed: 3);
         }
 
         /// <summary>Measures buffer reset and pipeline dispatch with all built-in presentation transforms disabled.</summary>
         [Benchmark(Baseline = true)]
-        public int StructuralOnly() => Apply(m_structural);
+        public int StructuralOnly() => Apply(_structural);
 
         /// <summary>Normalizes synchronous V1 startup frames in the same restored stack.</summary>
         [Benchmark]
-        public int DefaultNormalization() => Apply(m_normalization);
+        public int DefaultNormalization() => Apply(_normalization);
 
         /// <summary>Normalizes startup frames and groups a runtime task-completion chain in the same restored stack.</summary>
         [Benchmark]
-        public int NormalizationWithInfrastructureCleanup() => Apply(m_cleanup);
+        public int NormalizationWithInfrastructureCleanup() => Apply(_cleanup);
 
         #region private
 
         private int Apply(AsyncProfilerCallStackTransformPipeline pipeline)
         {
             // Restore the same preclassified sample for each invocation, including the no-transform baseline.
-            m_frames.Clear();
-            m_frames.AddRange(m_input);
-            m_diagnostics.Clear();
-            m_stitchingState.Clear();
-            pipeline.ApplyInPlace(m_context);
-            return m_frames.Count;
+            _frames.Clear();
+            _frames.AddRange(_input);
+            _diagnostics.Clear();
+            _stitchingState.Clear();
+            pipeline.ApplyInPlace(_context);
+            return _frames.Count;
         }
 
         private void Validate(AsyncProfilerCallStackTransformPipeline pipeline,
             int expectedFrames, int normalized, int startupCollapsed, int infrastructureCollapsed)
         {
             if (Apply(pipeline) != expectedFrames ||
-                m_diagnostics.V1SynchronousMoveNextFramesNormalized != normalized ||
-                m_diagnostics.V1SynchronousStartupFramesCollapsed != startupCollapsed ||
-                m_diagnostics.AsyncInfrastructureFramesCollapsed != infrastructureCollapsed)
+                _diagnostics.V1SynchronousMoveNextFramesNormalized != normalized ||
+                _diagnostics.V1SynchronousStartupFramesCollapsed != startupCollapsed ||
+                _diagnostics.AsyncInfrastructureFramesCollapsed != infrastructureCollapsed)
             {
                 throw new InvalidOperationException("The pipeline benchmark did not exercise the expected transforms.");
             }
@@ -96,17 +96,17 @@ namespace TraceEventBenchmarks
         private AsyncProfilerStitchedFrame Sync(int codeAddress,
             FrameClassification kind = default) =>
             AsyncProfilerStitchedFrame.CreateSync(
-                new AsyncProfilerStitchSyncFrame((CodeAddressIndex)codeAddress, MethodIndex.Invalid, kind), m_segment);
+                new AsyncProfilerStitchSyncFrame((CodeAddressIndex)codeAddress, MethodIndex.Invalid, kind), _segment);
 
-        private AsyncProfilerCallStack m_segment;
-        private AsyncProfilerStitchedFrame[] m_input;
-        private List<AsyncProfilerStitchedFrame> m_frames;
-        private AsyncProfilerCallStackDiagnostics m_diagnostics;
-        private AsyncProfilerCallStackStitchingState m_stitchingState;
-        private AsyncProfilerCallStackTransformState m_context;
-        private AsyncProfilerCallStackTransformPipeline m_structural;
-        private AsyncProfilerCallStackTransformPipeline m_normalization;
-        private AsyncProfilerCallStackTransformPipeline m_cleanup;
+        private AsyncProfilerCallStack _segment;
+        private AsyncProfilerStitchedFrame[] _input;
+        private List<AsyncProfilerStitchedFrame> _frames;
+        private AsyncProfilerCallStackDiagnostics _diagnostics;
+        private AsyncProfilerCallStackStitchingState _stitchingState;
+        private AsyncProfilerCallStackTransformState _context;
+        private AsyncProfilerCallStackTransformPipeline _structural;
+        private AsyncProfilerCallStackTransformPipeline _normalization;
+        private AsyncProfilerCallStackTransformPipeline _cleanup;
 
         #endregion
     }

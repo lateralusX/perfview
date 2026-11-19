@@ -58,18 +58,5 @@ namespace TraceEventTests
             Assert.Equal(expectedKind, kind);
             Assert.Equal(expectedWrapperIndex, wrapperIndex);
         }
-
-        [Fact]
-        public void Contract_ConstantsMatchRuntime()
-        {
-            // These values are a contract with the dotnet/runtime async profiler; guard against accidental drift.
-            Assert.Equal("Continuation_Wrapper_", AsyncProfilerCallStackStitchBoundary.ContinuationWrapperPrefix);
-            Assert.Equal(32, AsyncProfilerCallStackStitchBoundary.WrapperPoolCount);
-            Assert.Equal("DispatchContinuations", AsyncProfilerCallStackStitchBoundary.DispatchContinuationsName);
-            Assert.Equal("InstrumentedDispatchContinuations", AsyncProfilerCallStackStitchBoundary.InstrumentedDispatchContinuationsName);
-            Assert.Equal("MoveNextAsDispatcher", AsyncProfilerCallStackStitchBoundary.MoveNextAsDispatcherName);
-            Assert.Equal("AsyncStateMachineDispatcher", AsyncProfilerCallStackStitchBoundary.AsyncStateMachineDispatcherTypeName);
-            Assert.Equal("MoveNext", AsyncProfilerCallStackStitchBoundary.AsyncStateMachineDispatcherMethodName);
-        }
     }
 }

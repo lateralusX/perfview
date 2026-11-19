@@ -12,6 +12,7 @@ using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
 using Xunit;
 
 using static Microsoft.Diagnostics.Tracing.Computers.AsyncProfilerRuntimeSupport;
+using static TraceEventTests.AsyncProfilerStackTestData;
 
 namespace TraceEventTests
 {
@@ -140,7 +141,7 @@ namespace TraceEventTests
             Assert.Equal(1, Context(registration, AsyncProfilerRuntimeSupport.Common).MatchRuntimeSequence(
                 AsyncProfilerRuntimeSequenceKind.V1AwaitRegistration, 0, 3).Length);
 
-            var segment = Segment();
+            var segment = CallStack();
             var entry = new List<AsyncProfilerStitchedFrame>
             {
                 Sync(1, RuntimeFrameKind.ProfilerResume),
@@ -251,7 +252,7 @@ namespace TraceEventTests
         {
             var frames = new List<AsyncProfilerStitchedFrame>
             {
-                AsyncProfilerStitchedFrame.CreateAsyncCurrent((CodeAddressIndex)1, (MethodIndex)1, Segment(), 0),
+                AsyncProfilerStitchedFrame.CreateAsyncCurrent((CodeAddressIndex)1, (MethodIndex)1, CallStack(), 0),
             };
             var context = new AsyncProfilerCallStackTransformState(null, new List<AsyncProfilerCallStack>(), 1,
                 _ => AsyncProfilerCallStackStitchBoundaryInfo.None, new AsyncProfilerCallStackStitchingState(), new AsyncProfilerCallStackDiagnostics(), frames,
@@ -316,15 +317,6 @@ namespace TraceEventTests
             List<AsyncProfilerStitchedFrame> frames, AsyncProfilerRuntimeSupport support) =>
             new AsyncProfilerCallStackTransformState(null, new List<AsyncProfilerCallStack>(), 1,
                 _ => AsyncProfilerCallStackStitchBoundaryInfo.None, new AsyncProfilerCallStackStitchingState(), new AsyncProfilerCallStackDiagnostics(), frames, _ => support);
-
-        private static AsyncProfilerStitchedFrame Sync(int ca, FrameClassification kind = default) =>
-            AsyncProfilerStitchedFrame.CreateSync(new AsyncProfilerStitchSyncFrame((CodeAddressIndex)ca, (MethodIndex)ca, kind), null);
-
-        private static AsyncProfilerCallStack Segment() =>
-            new AsyncProfilerCallStack(0, (AsyncProfilerCallStackFramesIndex)0,
-                new AsyncProfilerCallStackFrames(AsyncCallstackKind.StateMachineAsync, new ulong[] { 3 }, new[] { 0 }),
-                0, 32, 0, long.MaxValue, Array.Empty<AsyncProfilerCallStack.CompletionDelta>(),
-                Array.Empty<AsyncProfilerCallStack.CompletionDelta>(), Array.Empty<long>());
 
         private sealed class StageSupport : AsyncProfilerRuntimeSupport
         {
@@ -395,95 +387,5 @@ namespace TraceEventTests
         }
 
         #endregion
-    }
-
-    internal sealed class AsyncProfilerRejectRuntimeBridgeSupport : AsyncProfilerRuntimeSupport
-    {
-        public AsyncProfilerRejectRuntimeBridgeSupport() : base("Test-only rejected bridge layout")
-        {
-        }
-
-        protected override AsyncProfilerRuntimeSequenceMatch MatchRuntimeResumptionBridge(
-            AsyncProfilerCallStackTransformState context, int start, int end) =>
-            end > start ? AsyncProfilerRuntimeSequenceMatch.Reject(end - start) : default;
-    }
-
-    // Hypothetical implementation layouts, never selected by production version detection.
-    internal sealed class AsyncProfilerExtendedRuntimeLayoutSupport : AsyncProfilerRuntimeSupport
-    {
-        public AsyncProfilerExtendedRuntimeLayoutSupport() : base("Test-only extended runtime layouts")
-        {
-        }
-
-        public const string HelperName = "System.Runtime.CompilerServices.AsyncProfiler.LayoutHelper";
-        public const string AnchorName = "System.Threading.ThreadPoolWorkQueue.ChangedDispatch";
-
-        public override FrameClassification ClassifySynchronousFrame(string frameName, bool isHostModule)
-        {
-            if (!isHostModule)
-            {
-                return base.ClassifySynchronousFrame(frameName, false);
-            }
-            if (frameName == HelperName)
-            {
-                return AsyncProfilerStitchSyncFrameKind.V1MethodHelper;
-            }
-            if (frameName == AnchorName)
-            {
-                return AsyncProfilerStitchSyncFrameKind.V1DispatchSetup;
-            }
-            return base.ClassifySynchronousFrame(frameName, true);
-        }
-
-        public override bool IsRuntimeResumptionAnchor(AsyncProfilerStitchedFrame frame) =>
-            frame.Origin == AsyncProfilerStitchedFrameOrigin.Sync &&
-            frame.SyncFrameKind == AsyncProfilerStitchSyncFrameKind.V1DispatchSetup;
-
-        public override bool IsOptionalInfrastructureFrame(AsyncProfilerStitchedFrame frame, AsyncProfilerCallStackStitchBoundaryKind boundary) =>
-            !IsRuntimeResumptionAnchor(frame) && base.IsOptionalInfrastructureFrame(frame, boundary);
-
-        protected override AsyncProfilerRuntimeSequenceMatch MatchV1Startup(
-            AsyncProfilerCallStackTransformState context, int start, int end)
-        {
-            AsyncProfilerRuntimeSequenceMatch common = base.MatchV1Startup(context, start, end);
-            if (!common.IsMatch || end - start < 3 ||
-                context.Frames[start + 1].SyncFrameKind != AsyncProfilerStitchSyncFrameKind.V1MethodHelper ||
-                context.Frames[start + 2].SyncClassification.RuntimeKind != RuntimeFrameKind.V1Startup)
-            {
-                return common;
-            }
-            int next = start + 3;
-            while (next < end && context.Frames[next].SyncClassification.RuntimeKind == RuntimeFrameKind.V1Startup)
-            {
-                next++;
-            }
-            return AsyncProfilerRuntimeSequenceMatch.Match(next - start);
-        }
-
-        protected override AsyncProfilerRuntimeSequenceMatch MatchV1AwaitRegistration(
-            AsyncProfilerCallStackTransformState context, int start, int end)
-        {
-            AsyncProfilerRuntimeSequenceMatch common = base.MatchV1AwaitRegistration(context, start, end);
-            return common.IsMatch && start + common.Length < end &&
-                   context.Frames[start + common.Length].SyncFrameKind == AsyncProfilerStitchSyncFrameKind.V1MethodHelper
-                ? AsyncProfilerRuntimeSequenceMatch.Match(common.Length + 1) : common;
-        }
-
-        protected override AsyncProfilerRuntimeSequenceMatch MatchProfilerEntry(
-            AsyncProfilerCallStackTransformState context, int start, int end)
-        {
-            if (end - start >= 2 && end < context.Frames.Count &&
-                context.Frames[start].SyncClassification.RuntimeKind == RuntimeFrameKind.ProfilerResume &&
-                context.Frames[start + 1].SyncFrameKind == AsyncProfilerStitchSyncFrameKind.V1MethodHelper)
-            {
-                bool dispatcher = context.Frames[end].Origin == AsyncProfilerStitchedFrameOrigin.AsyncDispatchTarget &&
-                    !context.Frames[end].IsStateMachineBoxCarrier;
-                return end - start == (dispatcher ? 3 : 2) &&
-                       (!dispatcher || context.ClassifyBoundary(context.Frames[start + 2].CodeAddress).Kind ==
-                            AsyncProfilerCallStackStitchBoundaryKind.V1Dispatcher)
-                    ? AsyncProfilerRuntimeSequenceMatch.Match(end - start) : default;
-            }
-            return base.MatchProfilerEntry(context, start, end);
-        }
     }
 }

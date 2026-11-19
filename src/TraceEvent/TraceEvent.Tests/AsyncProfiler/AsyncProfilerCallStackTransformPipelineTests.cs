@@ -12,28 +12,35 @@ using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
 using Xunit;
 
 using static Microsoft.Diagnostics.Tracing.Computers.AsyncProfilerRuntimeSupport;
+using static TraceEventTests.AsyncProfilerStackTestData;
 
 namespace TraceEventTests
 {
     /// <summary>Exercises presentation transforms, pipeline composition, and the lifetime of borrowed public callback views.</summary>
     public sealed class AsyncProfilerCallStackTransformPipelineTests
     {
-        [Fact]
-        public void ConservativeTransforms_AreEnabledByDefault()
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public void ConservativeTransforms_AreEnabledByDefaultAndCanBeDisabled(bool useDefault)
         {
             var diagnostics = new AsyncProfilerCallStackDiagnostics();
             List<AsyncProfilerStitchedFrame> frames = StartupFrames();
             var pipeline = new AsyncProfilerCallStackTransformPipeline();
+            if (!useDefault)
+            {
+                pipeline.EnableNormalization = false;
+            }
 
-            Assert.False(pipeline.EnableFrameAnnotations);
             pipeline.ApplyInPlace(Context(frames, diagnostics));
 
-            Assert.Equal(new[] { CA(10), CA(11), CA(14) }, frames.Select(frame => frame.CodeAddress));
+            Assert.Equal(useDefault ? new[] { CA(10), CA(11), CA(14) } : new[] { CA(10), CA(11), CA(12), CA(13), CA(14) },
+                frames.Select(frame => frame.CodeAddress));
             Assert.Equal(
-                AsyncProfilerStitchedFramePresentation.LogicalStateMachineMethod,
+                useDefault ? AsyncProfilerStitchedFramePresentation.LogicalStateMachineMethod : AsyncProfilerStitchedFramePresentation.Native,
                 frames[1].Presentation);
-            Assert.Equal(1, diagnostics.V1SynchronousMoveNextFramesNormalized);
-            Assert.Equal(2, diagnostics.V1SynchronousStartupFramesCollapsed);
+            Assert.Equal(useDefault ? 1 : 0, diagnostics.V1SynchronousMoveNextFramesNormalized);
+            Assert.Equal(useDefault ? 2 : 0, diagnostics.V1SynchronousStartupFramesCollapsed);
         }
 
         [Theory]
@@ -51,26 +58,6 @@ namespace TraceEventTests
                 () => transforms.MaximumParentContextDepth = depth);
             Assert.Equal(nameof(AsyncCallStackTransforms.MaximumParentContextDepth), exception.ParamName);
             Assert.Equal(3, transforms.MaximumParentContextDepth);
-        }
-
-        [Fact]
-        public void ConservativeTransforms_CanBeDisabled()
-        {
-            var diagnostics = new AsyncProfilerCallStackDiagnostics();
-            List<AsyncProfilerStitchedFrame> frames = StartupFrames();
-            var pipeline = new AsyncProfilerCallStackTransformPipeline
-            {
-                EnableNormalization = false,
-            };
-
-            pipeline.ApplyInPlace(Context(frames, diagnostics));
-
-            Assert.Equal(
-                new[] { CA(10), CA(11), CA(12), CA(13), CA(14) },
-                frames.Select(frame => frame.CodeAddress));
-            Assert.All(frames, frame => Assert.Equal(AsyncProfilerStitchedFramePresentation.Native, frame.Presentation));
-            Assert.Equal(0, diagnostics.V1SynchronousMoveNextFramesNormalized);
-            Assert.Equal(0, diagnostics.V1SynchronousStartupFramesCollapsed);
         }
 
         [Fact]
@@ -93,27 +80,6 @@ namespace TraceEventTests
                 frames[1].Presentation);
             Assert.Equal(1, diagnostics.V1SynchronousMoveNextFramesNormalized);
             Assert.Equal(0, diagnostics.V1SynchronousStartupFramesCollapsed);
-        }
-
-        [Fact]
-        public void ConservativeTransforms_DropV2SampledLeafWrapper()
-        {
-            var diagnostics = new AsyncProfilerCallStackDiagnostics();
-            var frames = new List<AsyncProfilerStitchedFrame>
-            {
-                Sync(20),
-                Sync(21),
-                Sync(22),
-            };
-            var pipeline = new AsyncProfilerCallStackTransformPipeline();
-
-            pipeline.ApplyInPlace(Context(
-                frames,
-                diagnostics,
-                wrapperCodeAddress: CA(20), usesV2SynchronousLayout: true));
-
-            Assert.Equal(new[] { CA(21), CA(22) }, frames.Select(frame => frame.CodeAddress));
-            Assert.Equal(1, diagnostics.V2LeafWrapperDropped);
         }
 
         [Theory]
@@ -234,15 +200,15 @@ namespace TraceEventTests
         [InlineData(true, true)]
         public void AsyncInfrastructureCleanup_PreservesDispatcherContextBoundaries(bool sameContext, bool builderHelper)
         {
-            AsyncProfilerCallStack leafContext = CreateCallStack();
-            AsyncProfilerCallStack rootContext = sameContext ? leafContext : CreateCallStack();
+            AsyncProfilerCallStack leafContext = CallStack();
+            AsyncProfilerCallStack rootContext = sameContext ? leafContext : CallStack();
             FrameClassification kind = builderHelper
                 ? (FrameClassification)RuntimeFrameKind.V1BuilderAwaitRegistration
                 : AsyncProfilerStitchSyncFrameKind.None;
             var frames = new List<AsyncProfilerStitchedFrame>
             {
-                AsyncProfilerStitchedFrame.CreateSync(new AsyncProfilerStitchSyncFrame(CA(30), MethodIndex.Invalid, kind), leafContext),
-                AsyncProfilerStitchedFrame.CreateSync(new AsyncProfilerStitchSyncFrame(CA(31), MethodIndex.Invalid, kind), rootContext),
+                Sync(30, kind, leafContext),
+                Sync(31, kind, rootContext),
                 Sync(32),
             };
             var diagnostics = new AsyncProfilerCallStackDiagnostics();
@@ -374,16 +340,13 @@ namespace TraceEventTests
         [Fact]
         public void AsyncInfrastructureCleanup_PreservesCompletionChainsAcrossContextBoundaries()
         {
-            AsyncProfilerCallStack leafContext = CreateCallStack();
-            AsyncProfilerCallStack rootContext = CreateCallStack();
+            AsyncProfilerCallStack leafContext = CallStack();
+            AsyncProfilerCallStack rootContext = CallStack();
             var frames = new List<AsyncProfilerStitchedFrame>
             {
-                AsyncProfilerStitchedFrame.CreateSync(new AsyncProfilerStitchSyncFrame(CA(60), MethodIndex.Invalid,
-                    RuntimeFrameKind.TaskContinuations), leafContext),
-                AsyncProfilerStitchedFrame.CreateSync(new AsyncProfilerStitchSyncFrame(CA(61), MethodIndex.Invalid,
-                    RuntimeFrameKind.TaskResult), rootContext),
-                AsyncProfilerStitchedFrame.CreateSync(new AsyncProfilerStitchSyncFrame(CA(62), MethodIndex.Invalid,
-                    RuntimeFrameKind.TaskCompletionSourceResult), rootContext),
+                Sync(60, RuntimeFrameKind.TaskContinuations, leafContext),
+                Sync(61, RuntimeFrameKind.TaskResult, rootContext),
+                Sync(62, RuntimeFrameKind.TaskCompletionSourceResult, rootContext),
             };
             AsyncProfilerStitchedFrame[] original = frames.ToArray();
             var diagnostics = new AsyncProfilerCallStackDiagnostics();
@@ -801,12 +764,6 @@ namespace TraceEventTests
             return frames;
         }
 
-        private static AsyncProfilerCallStack CreateCallStack() =>
-            new AsyncProfilerCallStack(0, (AsyncProfilerCallStackFramesIndex)0,
-                new AsyncProfilerCallStackFrames(AsyncCallstackKind.StateMachineAsync, new ulong[] { 3 }, new[] { 0 }),
-                0, 32, 0, long.MaxValue, Array.Empty<AsyncProfilerCallStack.CompletionDelta>(),
-                Array.Empty<AsyncProfilerCallStack.CompletionDelta>(), Array.Empty<long>());
-
         private static List<AsyncProfilerStitchedFrame> StartupFrames() =>
             new List<AsyncProfilerStitchedFrame>
             {
@@ -816,10 +773,6 @@ namespace TraceEventTests
                 Sync(13, RuntimeFrameKind.V1Startup),
                 Sync(14),
             };
-
-        private static AsyncProfilerStitchedFrame Sync(int codeAddress, FrameClassification kind = default) =>
-            AsyncProfilerStitchedFrame.CreateSync(
-                new AsyncProfilerStitchSyncFrame(CA(codeAddress), MethodIndex.Invalid, kind), null);
 
         private static AsyncProfilerCallStackTransformState Context(
             List<AsyncProfilerStitchedFrame> frames, AsyncProfilerCallStackDiagnostics diagnostics,

@@ -26,9 +26,9 @@ namespace TraceEventBenchmarks
         [Params(4, 16)]
         public int FrameCount { get; set; }
 
-        /// <summary>Instrumentation family, including per-frame compiler states for V1.</summary>
-        [Params(AsyncProfilerKindMode.V2Only, AsyncProfilerKindMode.V1Only)]
-        public AsyncProfilerKindMode Kind { get; set; }
+        /// <summary>Instrumentation family, including per-frame compiler states for state-machine (V1) async.</summary>
+        [Params(AsyncProfilerIndexBuildKind.RuntimeAsync, AsyncProfilerIndexBuildKind.StateMachineAsync)]
+        public AsyncProfilerIndexBuildKind Kind { get; set; }
 
         /// <summary>Whether each call stack has distinct frames or shares one interned frame sequence.</summary>
         [Params(false, true)]
@@ -37,17 +37,13 @@ namespace TraceEventBenchmarks
         [GlobalSetup]
         public void Setup()
         {
-            if (Kind != AsyncProfilerKindMode.V2Only && Kind != AsyncProfilerKindMode.V1Only)
-            {
-                throw new ArgumentOutOfRangeException(nameof(Kind));
-            }
-            var kind = Kind == AsyncProfilerKindMode.V2Only
+            var kind = Kind == AsyncProfilerIndexBuildKind.RuntimeAsync
                 ? AsyncCallstackKind.RuntimeAsync : AsyncCallstackKind.StateMachineAsync;
             _buffer = BuildBuffer(EpisodeCount, FrameCount, kind, UniqueCallstacks, includeDispatcherInfo: false);
             _bufferWithDispatcherInfo = BuildBuffer(
                 EpisodeCount, FrameCount, kind, UniqueCallstacks, includeDispatcherInfo: true);
             _manifest = new Manifest();
-            _sink = new CountingSink();
+            _sink = new AsyncProfilerCountingSink();
 
             var computer = new AsyncProfilerIndexBuilder();
             computer.Process(_buffer, (ProcessIndex)1);
@@ -59,7 +55,7 @@ namespace TraceEventBenchmarks
             withDispatcherInfo.Process(_bufferWithDispatcherInfo, (ProcessIndex)1);
             withDispatcherInfo.Finish();
             ValidateIndex(withDispatcherInfo, includeDispatcherInfo: true);
-            if (Decode() != EpisodeCount * (FrameCount + 2) + 2)
+            if (Decode() != EpisodeCount * (FrameCount + 2) + 2 || _sink.ParseErrorCount != 0)
             {
                 throw new InvalidOperationException("The decoder benchmark did not consume the expected events and frames.");
             }
@@ -71,7 +67,7 @@ namespace TraceEventBenchmarks
         {
             _sink.Reset();
             AsyncProfilerTraceEventParser.ParseBuffer(_buffer, _manifest, _sink);
-            return _sink.EventCount;
+            return _sink.SubEventCount + _sink.FrameCount;
         }
 
         /// <summary>Decodes the buffer and finalizes a fresh index, including allocation and frame interning.</summary>
@@ -177,35 +173,20 @@ namespace TraceEventBenchmarks
             return builder.Build();
         }
 
-        private sealed class CountingSink : ISubEventSink
-        {
-            public int EventCount { get; private set; }
-
-            public void Reset() => EventCount = 0;
-
-            public void OnContextCreate(in AsyncContextEvent e) => EventCount++;
-            public void OnContextResume(in AsyncContextEvent e) => EventCount++;
-            public void OnContextSuspend(in AsyncContextEvent e) => EventCount++;
-            public void OnContextComplete(in AsyncContextEvent e) => EventCount++;
-            public void OnException(in AsyncUnwindEvent e) => EventCount++;
-            public void OnCallstack(in AsyncCallstackEvent e) => EventCount += e.FrameCount + 1;
-            public void OnMethodResume(in AsyncMethodEvent e) => EventCount++;
-            public void OnMethodComplete(in AsyncMethodEvent e) => EventCount++;
-            public void OnResetThreadContext(in AsyncNeutralEvent e) => EventCount++;
-            public void OnResetContinuationWrapperIndex(in AsyncNeutralEvent e) => EventCount++;
-            public void OnMetadata(in AsyncMetadataEvent e) => EventCount++;
-            public void OnSyncClock(in AsyncSyncClockEvent e) => EventCount++;
-            public void OnUnknown(in AsyncUnknownEvent e) => EventCount++;
-            public void OnParseError(in ParseError e) => throw new InvalidOperationException(e.ToString());
-        }
-
         private byte[] _buffer;
         private byte[] _bufferWithDispatcherInfo;
         private Manifest _manifest;
-        private CountingSink _sink;
+        private AsyncProfilerCountingSink _sink;
         private AsyncProfilerCallStacksIndex _index;
 
         #endregion
+    }
+
+    /// <summary>Async call-stack instrumentation family used by <see cref="AsyncProfilerIndexBuildBenchmarks"/>.</summary>
+    public enum AsyncProfilerIndexBuildKind
+    {
+        RuntimeAsync,
+        StateMachineAsync,
     }
 
     /// <summary>Measures V1 index construction when each captured stack is assembled from resume and append chunks.</summary>
