@@ -1120,18 +1120,21 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
         }
 
         /// <summary>
-        /// Creates a derived frame with an additional positive identity tag. Tag 0 is reserved for ordinary
-        /// untagged frames.
+        /// Creates a derived frame with an additional positive identity tag and an optional presentation prefix.
+        /// Tag 0 is reserved for ordinary untagged frames.
         /// </summary>
         internal StackSourceFrameIndex FrameIntern(
             StackSourceFrameIndex frameIndex,
             string frameSuffix,
-            int identityTag)
+            int identityTag,
+            string displayPrefix = "")
         {
             Debug.Assert(FrameNameLookup != null);
             Debug.Assert(frameSuffix != null);
+            Debug.Assert(displayPrefix != null);
             Debug.Assert(identityTag > 0);
-            return m_frameIntern.Intern(new FrameInfo(frameSuffix, frameIndex, identityTag)) + m_frameStartIndex;
+            return m_frameIntern.Intern(
+                new FrameInfo(frameSuffix, frameIndex, identityTag, displayPrefix)) + m_frameStartIndex;
         }
         /// <summary>
         /// Lookup or create a StackSourceCallStackIndex for a call stack with the frame identified frameIndex and caller identified by callerIndex
@@ -1174,16 +1177,16 @@ namespace Microsoft.Diagnostics.Tracing.Stacks
                 DisplayPrefix = displayPrefix;
             }
             public FrameInfo(string frameSuffix, StackSourceFrameIndex baseFrame)
-                : this(frameSuffix, baseFrame, 0)
+                : this(frameSuffix, baseFrame, 0, string.Empty)
             {
             }
-            public FrameInfo(string frameSuffix, StackSourceFrameIndex baseFrame, int identityTag)
+            public FrameInfo(string frameSuffix, StackSourceFrameIndex baseFrame, int identityTag, string displayPrefix)
             {
                 ModuleIndex = StackSourceModuleIndex.Invalid;
                 BaseFrameIndex = baseFrame;
                 FrameName = frameSuffix;
                 IdentityTag = identityTag;
-                DisplayPrefix = string.Empty;
+                DisplayPrefix = displayPrefix;
             }
             // TODO we could make this smaller if we care since BaseFrame and ModuleIndex are never used together.  
             public readonly StackSourceFrameIndex BaseFrameIndex;

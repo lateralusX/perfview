@@ -128,8 +128,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             ModuleFileIndex owner = GetHostModuleOwner(bridge);
-            foreach (AsyncProfilerCallStackPlacement placement in m_segmentPlacements)
+            for (int i = 0; i < m_segmentPlacements.Count; i++)
             {
+                AsyncProfilerCallStackPlacement placement = m_segmentPlacements[i];
                 bool hasMatchingPlacementOwner =
                     ReferenceEquals(placement.CallStack, callStack) &&
                     owner != ModuleFileIndex.Invalid &&
@@ -169,18 +170,19 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             ModuleFileIndex owner = GetHostModuleOwner(bridge);
-            foreach (AsyncProfilerCallStackPlacement placement in m_segmentPlacements)
+            for (int i = 0; i < m_segmentPlacements.Count; i++)
             {
+                AsyncProfilerCallStackPlacement placement = m_segmentPlacements[i];
                 bool hasMatchingPlacementOwner =
                     ReferenceEquals(placement.CallStack, callStack) &&
-                    owner != ModuleFileIndex.Invalid && owner == GetHostModuleOwner(placement.Dispatch);
+                    owner != ModuleFileIndex.Invalid &&
+                    owner == GetHostModuleOwner(placement.Dispatch);
                 bool hasMatchingRuntimeSupport =
                     hasMatchingPlacementOwner &&
                     ReferenceEquals(GetRuntimeSupport(bridge), GetRuntimeSupport(placement.Dispatch));
                 bool hasResolvedV1Dispatcher =
                     hasMatchingRuntimeSupport &&
-                    ClassifyBoundary(placement.Dispatch).Kind ==
-                        AsyncProfilerCallStackStitchBoundaryKind.V1Dispatcher &&
+                    ClassifyBoundary(placement.Dispatch).Kind == AsyncProfilerCallStackStitchBoundaryKind.V1Dispatcher &&
                     TraceLog.CodeAddresses.MethodIndex(placement.Dispatch) != MethodIndex.Invalid;
                 if (!hasResolvedV1Dispatcher)
                 {
@@ -194,11 +196,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 }
 
                 // Verify the first matching span; do not combine anchors from separate spans.
-                for (int i = Frames.Count - 1; i >= 0; i--)
+                for (int frame = Frames.Count - 1; frame >= 0; frame--)
                 {
-                    if (ReferenceEquals(Frames[i].Context, callStack))
+                    if (ReferenceEquals(Frames[frame].Context, callStack))
                     {
-                        return HasVerifiedAsyncAnchor(this, i, callStack);
+                        return HasVerifiedAsyncAnchor(this, frame, callStack);
                     }
                 }
             }
@@ -298,11 +300,14 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         internal bool HasVerifiedCompletedV1OuterDispatch(AsyncProfilerCallStack callStack, CodeAddressIndex bridge)
         {
             bool hasRootCallStack =
-                TraceLog != null && m_segmentPlacements != null && Segments.Count >= 2 &&
+                TraceLog != null &&
+                m_segmentPlacements != null &&
+                Segments.Count >= 2 &&
                 ReferenceEquals(callStack, Segments[Segments.Count - 1]);
             bool hasNonemptyV1Root =
                 hasRootCallStack &&
-                callStack.Frames.Kind == AsyncCallstackKind.StateMachineAsync && callStack.Frames.FrameCount != 0;
+                callStack.Frames.Kind == AsyncCallstackKind.StateMachineAsync &&
+                callStack.Frames.FrameCount != 0;
             bool hasUnambiguousStitching =
                 hasNonemptyV1Root &&
                 StitchingState.ProcessedCallStackCount == Segments.Count &&
@@ -338,9 +343,15 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 }
             }
 
-            // Require an empty root span immediately after the nested dispatch's physical span.
-            foreach (AsyncProfilerCallStackPlacement rootPlacement in m_segmentPlacements)
+            return HasEmptyRootSpanAfterNestedSpan(callStack, nestedCallStack);
+        }
+
+        /// <summary>Requires an empty root span immediately after the nested dispatch's physical span.</summary>
+        private bool HasEmptyRootSpanAfterNestedSpan(AsyncProfilerCallStack callStack, AsyncProfilerCallStack nestedCallStack)
+        {
+            for (int i = 0; i < m_segmentPlacements.Count; i++)
             {
+                AsyncProfilerCallStackPlacement rootPlacement = m_segmentPlacements[i];
                 bool hasEmptyRootSpan =
                     ReferenceEquals(rootPlacement.CallStack, callStack) &&
                     rootPlacement.LeafIndex == rootPlacement.RootIndexExclusive;
@@ -349,8 +360,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     continue;
                 }
 
-                foreach (AsyncProfilerCallStackPlacement nestedPlacement in m_segmentPlacements)
+                for (int j = 0; j < m_segmentPlacements.Count; j++)
                 {
+                    AsyncProfilerCallStackPlacement nestedPlacement = m_segmentPlacements[j];
                     bool hasAdjacentNestedSpan =
                         ReferenceEquals(nestedPlacement.CallStack, nestedCallStack) &&
                         nestedPlacement.LeafIndex < nestedPlacement.RootIndexExclusive &&

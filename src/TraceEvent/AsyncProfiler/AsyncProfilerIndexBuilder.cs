@@ -92,9 +92,19 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// </remarks>
         public void Process(byte[] buffer, ProcessIndex processIndex)
         {
+            if (buffer == null)
+            {
+                throw new ArgumentNullException(nameof(buffer));
+            }
+
+            Process(buffer, buffer.Length, processIndex);
+        }
+
+        private void Process(byte[] buffer, int length, ProcessIndex processIndex)
+        {
             ProcessBuildState processState = GetOrCreateProcessState(processIndex);
             _currentProcessIndex = processIndex;
-            AsyncProfilerTraceEventParser.ParseBuffer(buffer, processState.Manifest, this);
+            AsyncProfilerTraceEventParser.ParseBuffer(buffer, length, processState.Manifest, this);
         }
 
         /// <summary>
@@ -244,6 +254,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             // Report addresses now; waiting for a later commit could miss method rundown.
+            ReportObservedFrames(e);
+        }
+
+        private void ReportObservedFrames(in AsyncCallstackEvent e)
+        {
             if (OnFrameObserved == null || e.MethodIds == null)
             {
                 return;
@@ -293,7 +308,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             _index.MarkExceptionCompletionObserved(_currentProcessIndex, kind, e.TimestampQpc);
             if (e.UnwoundFrameCount > 0)
             {
-                state.Top?.ExceptionCompletions.Add(new AsyncProfilerCallStack.CompletionDelta(e.TimestampQpc, (int)e.UnwoundFrameCount));
+                var completion = new AsyncProfilerCallStack.CompletionDelta(e.TimestampQpc, (int)e.UnwoundFrameCount);
+                state.Top?.ExceptionCompletions.Add(completion);
             }
         }
 
@@ -407,9 +423,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         private void OnRawTraceEvent(AsyncProfilerTraceEvent data)
         {
             _currentProcessIndex = _processIndexOf(data);
-            if (data.TryGetBuffer(out byte[] buffer))
+            if (data.TryGetBuffer(ref _eventBuffer, out int length))
             {
-                Process(buffer, _currentProcessIndex);
+                Process(_eventBuffer, length, _currentProcessIndex);
             }
             else
             {
@@ -532,8 +548,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 ? _builderPool.Pop()
                 : new CallStackBuilder();
 
-            if (reusablePayload && _index.TryGetInternedFrames(_currentProcessIndex, e.Kind, e.MethodIds, e.FrameStates, e.FrameCount,
-                out AsyncProfilerCallStackFramesIndex framesIndex, out AsyncProfilerCallStackFrames frames))
+            if (reusablePayload &&
+                _index.TryGetInternedFrames(
+                    _currentProcessIndex, e.Kind, e.MethodIds, e.FrameStates, e.FrameCount,
+                    out AsyncProfilerCallStackFramesIndex framesIndex, out AsyncProfilerCallStackFrames frames))
             {
                 builder.Initialize(e, wrapperCount, framesIndex, frames);
             }
@@ -796,6 +814,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         private readonly Stack<CallStackBuilder> _builderPool = new Stack<CallStackBuilder>();
         private readonly ulong[] _callstackMethodIds = new ulong[byte.MaxValue];
         private readonly int[] _callstackFrameStates = new int[byte.MaxValue];
+        // Reused for each AsyncEvents payload; decoders copy what they keep.
+        private byte[] _eventBuffer;
         private ProcessIndex _currentProcessIndex;
 
         #endregion

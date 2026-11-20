@@ -141,7 +141,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             TraceModuleFile managedModule = module.ManagedModule;
-            return managedModule != null && string.Equals(managedModule.Name, AsyncProfilerRuntimeSupport.HostModuleName, StringComparison.OrdinalIgnoreCase);
+            return managedModule != null && string.Equals(
+                managedModule.Name, AsyncProfilerRuntimeSupport.HostModuleName, StringComparison.OrdinalIgnoreCase);
         }
 
         #region private
@@ -188,7 +189,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     flavor |= GetEngineFlavor(loaded.Name);
                 }
 
-                if (flavor != RuntimeSku.CoreClr && flavor != RuntimeSku.Mono && flavor != RuntimeSku.DesktopClr)
+                bool isSingleFlavor =
+                    flavor == RuntimeSku.CoreClr ||
+                    flavor == RuntimeSku.Mono ||
+                    flavor == RuntimeSku.DesktopClr;
+                if (!isSingleFlavor)
                 {
                     flavor = RuntimeSku.None;
                 }
@@ -249,8 +254,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         private readonly TraceModuleFiles m_moduleFiles;
-        private readonly Dictionary<ModuleFileIndex, AsyncProfilerRuntimeSupport> m_supports =new Dictionary<ModuleFileIndex, AsyncProfilerRuntimeSupport>();
-        private readonly Dictionary<ProcessIndex, AsyncProfilerRuntimeSupport> m_processSupports = new Dictionary<ProcessIndex, AsyncProfilerRuntimeSupport>();
+        private readonly Dictionary<ModuleFileIndex, AsyncProfilerRuntimeSupport> m_supports =
+            new Dictionary<ModuleFileIndex, AsyncProfilerRuntimeSupport>();
+        private readonly Dictionary<ProcessIndex, AsyncProfilerRuntimeSupport> m_processSupports =
+            new Dictionary<ProcessIndex, AsyncProfilerRuntimeSupport>();
         private Dictionary<ModuleFileIndex, RuntimeSku> m_runtimeFlavors;
         private ModuleFileIndex[] m_hostModuleOwners;
 

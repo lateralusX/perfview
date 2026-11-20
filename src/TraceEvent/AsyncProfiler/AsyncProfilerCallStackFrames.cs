@@ -65,7 +65,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         #region private
 
-        internal AsyncProfilerCallStackFrames(AsyncCallstackKind kind, ulong[] instructionPointers, int[] frameStates, ProcessIndex processIndex = 0)
+        /// <summary>Whether the slot holds a real frame rather than a zero-IP placeholder.</summary>
+        internal bool IsCapturedFrameAt(int index) =>
+            CodeAddressAt(index) != CodeAddressIndex.Invalid || InstructionPointerAt(index) != 0;
+
+        internal AsyncProfilerCallStackFrames(
+            AsyncCallstackKind kind, ulong[] instructionPointers, int[] frameStates, ProcessIndex processIndex = 0)
         {
             Kind = kind;
             _instructionPointers = instructionPointers;

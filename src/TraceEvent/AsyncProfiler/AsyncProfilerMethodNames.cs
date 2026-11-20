@@ -366,8 +366,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
             if (nestedTypeName != null)
             {
-                if (frameName.Length - typeEnd <= nestedTypeName.Length + 1 || frameName[typeEnd] != '+' ||
-                    string.CompareOrdinal(frameName, typeEnd + 1, nestedTypeName, 0, nestedTypeName.Length) != 0)
+                bool hasNestedTypeRoom = frameName.Length - typeEnd > nestedTypeName.Length + 1;
+                bool hasNestedType =
+                    hasNestedTypeRoom &&
+                    frameName[typeEnd] == '+' &&
+                    string.CompareOrdinal(frameName, typeEnd + 1, nestedTypeName, 0, nestedTypeName.Length) == 0;
+                if (!hasNestedType)
                 {
                     return false;
                 }
@@ -397,7 +401,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
             int end = GetMethodNameEnd(frameName);
             int member = frameName.LastIndexOf('.', end - 1, end);
-            return (frameName[typeEnd] == '+' && member > typeEnd + 1) || (frameName[typeEnd] == '.' && member == typeEnd);
+            bool isNestedTypeMember = frameName[typeEnd] == '+' && member > typeEnd + 1;
+            bool isDirectTypeMember = frameName[typeEnd] == '.' && member == typeEnd;
+            return isNestedTypeMember || isDirectTypeMember;
         }
 
         #region private

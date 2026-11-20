@@ -173,7 +173,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         /// <summary>
         /// Copies the parent's frames, omitting completed frames at child creation only when both
-        /// method-completion and exception-unwind observations are available.
+        /// method-completion and exception-unwind observations are available. Zero-IP placeholders
+        /// are skipped, and a placeholder in the current slot leaves no frame marked current.
         /// </summary>
         private void CollectParentFrames(
             AsyncProfilerCallStacksIndex index,
@@ -189,8 +190,14 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
             for (int frameIndex = completedFrameCount; frameIndex < frameCount; frameIndex++)
             {
+                if (!parent.Frames.IsCapturedFrameAt(frameIndex))
+                {
+                    continue;
+                }
+
                 // "Current" refers to child creation, not the sample time.
-                m_parentFrames.Add(AsyncProfilerStitchedFrame.CreateAsyncContextParent(parent, frameIndex, isCurrent: canTrimCompletedFrames && frameIndex == completedFrameCount));
+                bool isCurrent = canTrimCompletedFrames && frameIndex == completedFrameCount;
+                m_parentFrames.Add(AsyncProfilerStitchedFrame.CreateAsyncContextParent(parent, frameIndex, isCurrent));
             }
         }
 

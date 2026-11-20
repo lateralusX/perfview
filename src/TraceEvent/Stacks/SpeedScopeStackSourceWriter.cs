@@ -109,36 +109,9 @@ namespace Microsoft.Diagnostics.Tracing.Stacks.Formats
                 throw new ArgumentOutOfRangeException(nameof(processId));
             }
 
-            var names = new List<string>();
-            var frameIds = new Dictionary<string, int>();
-            var capturedFrameIds = new Dictionary<AsyncProfilerCallStackFramesIndex, int[]>();
+            var frameIds = new AsyncFrameIdTable(traceLog);
+            Func<AsyncProfilerCallStack, int, int> frameId = frameIds.GetFrameId;
             var profiles = new Dictionary<string, IReadOnlyList<ProfileEvent>>();
-            int GetFrameId(AsyncProfilerCallStack context, int slot)
-            {
-                if (!capturedFrameIds.TryGetValue(context.FramesIndex, out int[] ids))
-                {
-                    ids = new int[context.Frames.FrameCount];
-                    for (int i = 0; i < ids.Length; i++)
-                    {
-                        if (context.Frames.InstructionPointerAt(i) == 0)
-                        {
-                            ids[i] = -1;
-                            continue;
-                        }
-                        string name = GetAsyncFrameName(traceLog, context, i);
-                        if (!frameIds.TryGetValue(name, out int id))
-                        {
-                            id = names.Count;
-                            frameIds.Add(name, id);
-                            names.Add(name);
-                        }
-                        ids[i] = id;
-                    }
-                    capturedFrameIds.Add(context.FramesIndex, ids);
-                }
-                return ids[slot];
-            }
-
             AsyncProfilerCallStacksIndex index = traceLog.AsyncProfilerCallStacks;
             if (index != null)
             {
@@ -151,21 +124,83 @@ namespace Microsoft.Diagnostics.Tracing.Stacks.Formats
                     }
                     var events = GetAsyncProfileEvents(index.GetCallStacks(thread),
                         traceLog.sessionStartTimeQPC, traceLog.sessionEndTimeQPC,
-                        traceLog.QPCTimeToRelMSec, GetFrameId, sampleIntervalQpc);
+                        traceLog.QPCTimeToRelMSec, frameId, sampleIntervalQpc);
                     if (events.Count != 0)
                     {
                         Debug.Assert(Validate(events), "The async export must be balanced and chronological.");
-                        string mode = sampleIntervalQpc == 0 ? "elapsed" :
-                            "virtual " + (sampleIntervalQpc * 1000.0 / traceLog.QPCFreq).ToString("R", CultureInfo.InvariantCulture) + " ms";
-                        string name = $"Async events ({mode}) - {process.Name} ({process.ProcessID}, " +
-                            $"instance {(int)thread.ProcessIndex}) - Thread ({thread.OsThreadId})";
-                        profiles.Add(name, events);
+                        profiles.Add(GetAsyncProfileName(traceLog, process, thread, sampleIntervalQpc), events);
                     }
                 }
             }
             using (var writer = File.CreateText(filePath))
             {
-                WriteToFile(profiles, names, writer, Path.GetFileNameWithoutExtension(filePath));
+                WriteToFile(profiles, frameIds.Names, writer, Path.GetFileNameWithoutExtension(filePath));
+            }
+        }
+
+        private static string GetAsyncProfileName(TraceLog traceLog, TraceProcess process,
+            AsyncProfilerThreadKey thread, long sampleIntervalQpc)
+        {
+            string mode = "elapsed";
+            if (sampleIntervalQpc != 0)
+            {
+                double intervalMSec = sampleIntervalQpc * 1000.0 / traceLog.QPCFreq;
+                mode = "virtual " + intervalMSec.ToString("R", CultureInfo.InvariantCulture) + " ms";
+            }
+
+            return $"Async events ({mode}) - {process.Name} ({process.ProcessID}, " +
+                $"instance {(int)thread.ProcessIndex}) - Thread ({thread.OsThreadId})";
+        }
+
+        /// <summary>
+        /// Assigns shared SpeedScope frame IDs by display name, caching the IDs of each captured frame list.
+        /// Zero-IP sentinel slots get -1.
+        /// </summary>
+        private sealed class AsyncFrameIdTable
+        {
+            private readonly TraceLog m_traceLog;
+            private readonly Dictionary<string, int> m_idByName = new Dictionary<string, int>();
+            private readonly Dictionary<AsyncProfilerCallStackFramesIndex, int[]> m_idsByFrames =
+                new Dictionary<AsyncProfilerCallStackFramesIndex, int[]>();
+
+            public AsyncFrameIdTable(TraceLog traceLog)
+            {
+                m_traceLog = traceLog;
+            }
+
+            public List<string> Names { get; } = new List<string>();
+
+            public int GetFrameId(AsyncProfilerCallStack context, int slot)
+            {
+                if (!m_idsByFrames.TryGetValue(context.FramesIndex, out int[] ids))
+                {
+                    ids = CreateFrameIds(context);
+                    m_idsByFrames.Add(context.FramesIndex, ids);
+                }
+                return ids[slot];
+            }
+
+            private int[] CreateFrameIds(AsyncProfilerCallStack context)
+            {
+                var ids = new int[context.Frames.FrameCount];
+                for (int i = 0; i < ids.Length; i++)
+                {
+                    ids[i] = context.Frames.InstructionPointerAt(i) == 0
+                        ? -1
+                        : GetOrAddName(GetAsyncFrameName(m_traceLog, context, i));
+                }
+                return ids;
+            }
+
+            private int GetOrAddName(string name)
+            {
+                if (!m_idByName.TryGetValue(name, out int id))
+                {
+                    id = Names.Count;
+                    m_idByName.Add(name, id);
+                    Names.Add(name);
+                }
+                return id;
             }
         }
 
@@ -174,138 +209,32 @@ namespace Microsoft.Diagnostics.Tracing.Stacks.Formats
             Func<long, double> relativeTime, Func<AsyncProfilerCallStack, int, int> frameId,
             long sampleIntervalQpc = 0)
         {
-            var changes = new List<(long Qpc, AsyncProfilerCallStack Context, AsyncEventKind Kind, long Delta)>();
-            foreach (var context in contexts)
-            {
-                long start = Math.Max(startQpc, context.StartQpc);
-                long end = Math.Min(endQpc, context.EndQpc);
-                if (start >= end)
-                {
-                    continue;
-                }
-
-                long completed = AddCompletions(context.MethodCompletions) + AddCompletions(context.ExceptionCompletions);
-                changes.Add((start, context, AsyncEventKind.Start, completed));
-                changes.Add((end, context, AsyncEventKind.End, 0));
-
-                long AddCompletions(IReadOnlyList<AsyncProfilerCallStack.CompletionDelta> completions)
-                {
-                    long beforeStart = 0;
-                    for (int i = 0; i < completions.Count; i++)
-                    {
-                        var completion = completions[i];
-                        if (completion.Delta < 0)
-                        {
-                            throw new InvalidDataException("An async completion count cannot be negative.");
-                        }
-                        if (completion.Qpc < start)
-                        {
-                            beforeStart += completion.Delta;
-                        }
-                        else if (completion.Qpc < end)
-                        {
-                            changes.Add((completion.Qpc, context, AsyncEventKind.Complete, completion.Delta));
-                        }
-                    }
-                    return beforeStart;
-                }
-            }
-            changes.Sort((a, b) =>
-            {
-                int order = a.Qpc.CompareTo(b.Qpc);
-                return order != 0 ? order : a.Kind.CompareTo(b.Kind);
-            });
-
-            var active = new SortedDictionary<int, (AsyncProfilerCallStack Context, long Completed)>();
-            var previous = new List<(AsyncProfilerCallStack Context, int Slot, int Id)>();
-            var current = new List<(AsyncProfilerCallStack Context, int Slot, int Id)>();
+            List<AsyncChange> changes = GetAsyncChanges(contexts, startQpc, endQpc);
             var result = new List<ProfileEvent>();
             if (changes.Count == 0)
             {
                 return result;
             }
+
+            var active = new SortedDictionary<int, ActiveAsyncCallStack>();
+            var previous = new List<OpenAsyncFrame>();
+            var current = new List<OpenAsyncFrame>();
             bool sampled = sampleIntervalQpc > 0;
             long qpc = sampled ? startQpc : changes[0].Qpc;
             int position = 0;
-            while (sampled ? qpc < endQpc : position < changes.Count)
+            do
             {
                 // Observe every transition through this instant before emitting the stack snapshot.
-                while (position < changes.Count && changes[position].Qpc <= qpc)
-                {
-                    var change = changes[position++];
-                    int depth = change.Context.Depth;
-                    switch (change.Kind)
-                    {
-                        case AsyncEventKind.End:
-                            active.Remove(depth);
-                            break;
-                        case AsyncEventKind.Start:
-                            if (active.ContainsKey(depth))
-                            {
-                                throw new InvalidDataException("Async contexts overlap at the same nesting depth.");
-                            }
-                            active.Add(depth, (change.Context, change.Delta));
-                            break;
-                        case AsyncEventKind.Complete:
-                            var state = active[depth];
-                            active[depth] = (state.Context, state.Completed + change.Delta);
-                            break;
-                    }
-                }
-
-                current.Clear();
-                foreach (var state in active.Values)
-                {
-                    // Progress counts captured slots, including hidden zero-IP sentinels.
-                    for (int slot = state.Context.Frames.FrameCount - 1; slot >= state.Completed; slot--)
-                    {
-                        if (state.Context.Frames.InstructionPointerAt(slot) != 0)
-                        {
-                            current.Add((state.Context, slot, frameId(state.Context, slot)));
-                        }
-                    }
-                }
-                // Equal names in different call stacks must still close and reopen.
-                int common = 0;
-                while (common < previous.Count && common < current.Count &&
-                    ReferenceEquals(previous[common].Context, current[common].Context) &&
-                    previous[common].Slot == current[common].Slot)
-                {
-                    common++;
-                }
-                double time = relativeTime(qpc);
-                for (int j = previous.Count - 1; j >= common; j--)
-                {
-                    result.Add(new ProfileEvent(ProfileEventType.Close, previous[j].Id, time, j));
-                }
-                for (int j = common; j < current.Count; j++)
-                {
-                    result.Add(new ProfileEvent(ProfileEventType.Open, current[j].Id, time, j));
-                }
+                position = ApplyAsyncChanges(changes, position, qpc, active);
+                GetOpenAsyncFrames(active, frameId, current);
+                AddAsyncFrameTransitions(previous, current, relativeTime(qpc), result);
                 var temporary = previous;
                 previous = current;
                 current = temporary;
-                if (sampled)
-                {
-                    if (previous.Count == 0 && position == changes.Count)
-                    {
-                        break;
-                    }
-                    // Skip empty time without re-anchoring a thread's grid at its next call stack.
-                    long steps = previous.Count == 0
-                        ? (changes[position].Qpc - qpc - 1) / sampleIntervalQpc + 1
-                        : 1;
-                    if (steps > (endQpc - qpc - 1) / sampleIntervalQpc)
-                    {
-                        break;
-                    }
-                    qpc += steps * sampleIntervalQpc;
-                }
-                else if (position < changes.Count)
-                {
-                    qpc = changes[position].Qpc;
-                }
             }
+            while (TryAdvanceAsyncSnapshotTime(changes, position, previous.Count != 0,
+                sampleIntervalQpc, endQpc, ref qpc));
+
             if (sampled)
             {
                 double end = relativeTime(endQpc);
@@ -317,6 +246,221 @@ namespace Microsoft.Diagnostics.Tracing.Stacks.Formats
             return result;
         }
 
+        /// <summary>
+        /// Returns the start, end, and in-interval completion changes of every context, clipped to the trace
+        /// and sorted by time, with ends before starts at the same instant.
+        /// </summary>
+        private static List<AsyncChange> GetAsyncChanges(IReadOnlyList<AsyncProfilerCallStack> contexts, long startQpc, long endQpc)
+        {
+            var changes = new List<AsyncChange>();
+            foreach (var context in contexts)
+            {
+                long start = Math.Max(startQpc, context.StartQpc);
+                long end = Math.Min(endQpc, context.EndQpc);
+                if (start >= end)
+                {
+                    continue;
+                }
+
+                long completedBeforeStart =
+                    AddCompletionChanges(changes, context, context.MethodCompletions, start, end) +
+                    AddCompletionChanges(changes, context, context.ExceptionCompletions, start, end);
+                changes.Add(new AsyncChange(start, context, AsyncEventKind.Start, completedBeforeStart));
+                changes.Add(new AsyncChange(end, context, AsyncEventKind.End, 0));
+            }
+
+            changes.Sort((a, b) =>
+            {
+                int order = a.Qpc.CompareTo(b.Qpc);
+                return order != 0 ? order : a.Kind.CompareTo(b.Kind);
+            });
+            return changes;
+        }
+
+        /// <summary>
+        /// Adds completions inside [start, end) as changes and returns the total completed before start.
+        /// </summary>
+        private static long AddCompletionChanges(List<AsyncChange> changes, AsyncProfilerCallStack context,
+            IReadOnlyList<AsyncProfilerCallStack.CompletionDelta> completions, long start, long end)
+        {
+            long beforeStart = 0;
+            for (int i = 0; i < completions.Count; i++)
+            {
+                var completion = completions[i];
+                if (completion.Delta < 0)
+                {
+                    throw new InvalidDataException("An async completion count cannot be negative.");
+                }
+
+                if (completion.Qpc < start)
+                {
+                    beforeStart += completion.Delta;
+                }
+                else if (completion.Qpc < end)
+                {
+                    changes.Add(new AsyncChange(completion.Qpc, context, AsyncEventKind.Complete, completion.Delta));
+                }
+            }
+            return beforeStart;
+        }
+
+        /// <summary>
+        /// Applies every change at or before <paramref name="qpc"/> and returns the position of the next change.
+        /// </summary>
+        private static int ApplyAsyncChanges(List<AsyncChange> changes, int position, long qpc,
+            SortedDictionary<int, ActiveAsyncCallStack> active)
+        {
+            while (position < changes.Count && changes[position].Qpc <= qpc)
+            {
+                AsyncChange change = changes[position++];
+                int depth = change.Context.Depth;
+                switch (change.Kind)
+                {
+                    case AsyncEventKind.End:
+                        active.Remove(depth);
+                        break;
+                    case AsyncEventKind.Start:
+                        if (active.ContainsKey(depth))
+                        {
+                            throw new InvalidDataException("Async contexts overlap at the same nesting depth.");
+                        }
+                        active.Add(depth, new ActiveAsyncCallStack(change.Context, change.Delta));
+                        break;
+                    case AsyncEventKind.Complete:
+                        ActiveAsyncCallStack state = active[depth];
+                        active[depth] = new ActiveAsyncCallStack(state.Context, state.Completed + change.Delta);
+                        break;
+                }
+            }
+            return position;
+        }
+
+        /// <summary>Fills <paramref name="frames"/> with the visible frames of the active contexts, root first.</summary>
+        private static void GetOpenAsyncFrames(SortedDictionary<int, ActiveAsyncCallStack> active,
+            Func<AsyncProfilerCallStack, int, int> frameId, List<OpenAsyncFrame> frames)
+        {
+            frames.Clear();
+            foreach (ActiveAsyncCallStack state in active.Values)
+            {
+                AsyncProfilerCallStackFrames captured = state.Context.Frames;
+
+                // Progress counts captured slots, including hidden zero-IP sentinels.
+                for (int slot = captured.FrameCount - 1; slot >= state.Completed; slot--)
+                {
+                    if (captured.InstructionPointerAt(slot) != 0)
+                    {
+                        frames.Add(new OpenAsyncFrame(state.Context, slot, frameId(state.Context, slot)));
+                    }
+                }
+            }
+        }
+
+        /// <summary>Closes frames that differ from the previous snapshot and opens the new ones.</summary>
+        private static void AddAsyncFrameTransitions(List<OpenAsyncFrame> previous, List<OpenAsyncFrame> current,
+            double time, List<ProfileEvent> result)
+        {
+            // Equal names in different call stacks must still close and reopen.
+            int common = 0;
+            while (common < previous.Count &&
+                common < current.Count &&
+                ReferenceEquals(previous[common].Context, current[common].Context) &&
+                previous[common].Slot == current[common].Slot)
+            {
+                common++;
+            }
+
+            for (int j = previous.Count - 1; j >= common; j--)
+            {
+                result.Add(new ProfileEvent(ProfileEventType.Close, previous[j].Id, time, j));
+            }
+            for (int j = common; j < current.Count; j++)
+            {
+                result.Add(new ProfileEvent(ProfileEventType.Open, current[j].Id, time, j));
+            }
+        }
+
+        /// <summary>
+        /// Moves <paramref name="qpc"/> to the next snapshot time: the next change for exact export, or the next
+        /// grid point for virtual sampling. Returns false when there are no more snapshots.
+        /// </summary>
+        private static bool TryAdvanceAsyncSnapshotTime(List<AsyncChange> changes, int position, bool hasOpenFrames,
+            long sampleIntervalQpc, long endQpc, ref long qpc)
+        {
+            if (sampleIntervalQpc <= 0)
+            {
+                if (position >= changes.Count)
+                {
+                    return false;
+                }
+
+                qpc = changes[position].Qpc;
+                return true;
+            }
+
+            if (!hasOpenFrames && position == changes.Count)
+            {
+                return false;
+            }
+
+            // Skip empty time without re-anchoring a thread's grid at its next call stack.
+            long steps = 1;
+            if (!hasOpenFrames)
+            {
+                steps = (changes[position].Qpc - qpc - 1) / sampleIntervalQpc + 1;
+            }
+
+            if (steps > (endQpc - qpc - 1) / sampleIntervalQpc)
+            {
+                return false;
+            }
+
+            qpc += steps * sampleIntervalQpc;
+            return true;
+        }
+
+        private readonly struct AsyncChange
+        {
+            public AsyncChange(long qpc, AsyncProfilerCallStack context, AsyncEventKind kind, long delta)
+            {
+                Qpc = qpc;
+                Context = context;
+                Kind = kind;
+                Delta = delta;
+            }
+
+            public long Qpc { get; }
+            public AsyncProfilerCallStack Context { get; }
+            public AsyncEventKind Kind { get; }
+
+            /// <summary>Completed frames: the count before start for Start, or the increment for Complete.</summary>
+            public long Delta { get; }
+        }
+
+        private readonly struct ActiveAsyncCallStack
+        {
+            public ActiveAsyncCallStack(AsyncProfilerCallStack context, long completed)
+            {
+                Context = context;
+                Completed = completed;
+            }
+
+            public AsyncProfilerCallStack Context { get; }
+            public long Completed { get; }
+        }
+
+        private readonly struct OpenAsyncFrame
+        {
+            public OpenAsyncFrame(AsyncProfilerCallStack context, int slot, int id)
+            {
+                Context = context;
+                Slot = slot;
+                Id = id;
+            }
+
+            public AsyncProfilerCallStack Context { get; }
+            public int Slot { get; }
+            public int Id { get; }
+        }
         private static string GetAsyncFrameName(TraceLog traceLog, AsyncProfilerCallStack context, int slot)
         {
             var frames = context.Frames;

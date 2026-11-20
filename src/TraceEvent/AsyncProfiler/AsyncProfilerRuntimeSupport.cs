@@ -83,7 +83,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
             internal FrameClassification(AsyncProfilerStitchSyncFrameKind kind, RuntimeFrameKind runtimeKind)
             {
-                bool isProfilerEntry = runtimeKind == RuntimeFrameKind.ProfilerCapture || runtimeKind == RuntimeFrameKind.ProfilerEmission || runtimeKind == RuntimeFrameKind.ProfilerResume;
+                bool isProfilerEntry =
+                    runtimeKind == RuntimeFrameKind.ProfilerCapture ||
+                    runtimeKind == RuntimeFrameKind.ProfilerEmission ||
+                    runtimeKind == RuntimeFrameKind.ProfilerResume;
                 if (kind == AsyncProfilerStitchSyncFrameKind.None && isProfilerEntry)
                 {
                     kind = AsyncProfilerStitchSyncFrameKind.ProfilerEntry;
@@ -161,6 +164,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         }
 
         /// <summary>Checks for a native CoreCLR or JIT module beside the captured CoreLib.</summary>
+        /// <summary>Checks for a native CoreCLR or JIT module beside the captured CoreLib.</summary>
         public virtual bool IsNativeRuntimeModule(TraceModuleFile module, TraceModuleFile hostModule)
         {
             if (module == null || hostModule == null || module.ImageBase == 0 || module.ManagedModule != null)
@@ -168,13 +172,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 return false;
             }
 
-            string name = module.Name;
-            if (!string.Equals(name, RuntimeNames.NativeModules.CoreClr, StringComparison.OrdinalIgnoreCase) &&
-                !string.Equals(name, RuntimeNames.NativeModules.Jit, StringComparison.OrdinalIgnoreCase) &&
-                !string.Equals(name, RuntimeNames.NativeModules.LinuxCoreClr, StringComparison.OrdinalIgnoreCase) &&
-                !string.Equals(name, RuntimeNames.NativeModules.LinuxJit, StringComparison.OrdinalIgnoreCase) &&
-                !string.Equals(name, RuntimeNames.NativeModules.MacCoreClr, StringComparison.OrdinalIgnoreCase) &&
-                !string.Equals(name, RuntimeNames.NativeModules.MacJit, StringComparison.OrdinalIgnoreCase))
+            if (!IsNativeRuntimeModuleName(module.Name))
             {
                 return false;
             }
@@ -182,9 +180,28 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             // Use captured paths, including when a trace is opened on a different operating system.
             string path = module.FilePath;
             string hostPath = hostModule.FilePath;
-            int directoryEnd = Math.Max(path.LastIndexOf('\\'), path.LastIndexOf('/'));
-            int hostDirectoryEnd = Math.Max(hostPath.LastIndexOf('\\'), hostPath.LastIndexOf('/'));
-            return directoryEnd > 0 && directoryEnd == hostDirectoryEnd && string.Compare(path, 0, hostPath, 0, directoryEnd + 1, StringComparison.OrdinalIgnoreCase) == 0;
+            int directoryEnd = GetDirectoryEnd(path);
+            if (directoryEnd <= 0 || directoryEnd != GetDirectoryEnd(hostPath))
+            {
+                return false;
+            }
+
+            return string.Compare(path, 0, hostPath, 0, directoryEnd + 1, StringComparison.OrdinalIgnoreCase) == 0;
+        }
+
+        private static bool IsNativeRuntimeModuleName(string name)
+        {
+            return string.Equals(name, RuntimeNames.NativeModules.CoreClr, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(name, RuntimeNames.NativeModules.Jit, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(name, RuntimeNames.NativeModules.LinuxCoreClr, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(name, RuntimeNames.NativeModules.LinuxJit, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(name, RuntimeNames.NativeModules.MacCoreClr, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(name, RuntimeNames.NativeModules.MacJit, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static int GetDirectoryEnd(string path)
+        {
+            return Math.Max(path.LastIndexOf('\\'), path.LastIndexOf('/'));
         }
 
         /// <summary>Classifies generated async methods and runtime helpers, keeping specialized helper roles.</summary>
@@ -481,7 +498,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 IsMethodOnType(rootName, RuntimeNames.Awaiters.TaskType, RuntimeNames.Awaiters.UnsafeOnCompletedInternal) ||
                 IsMethodOnType(rootName, RuntimeNames.Awaiters.TaskType, RuntimeNames.Awaiters.OnCompletedInternal);
 
-            bool isBoxAwareAwaiterRegistration = classification.RuntimeKind == RuntimeFrameKind.V1AwaiterRegistration && IsKnownStateMachineBoxAwareAwaiter(rootName);
+            bool isBoxAwareAwaiterRegistration =
+                classification.RuntimeKind == RuntimeFrameKind.V1AwaiterRegistration &&
+                IsKnownStateMachineBoxAwareAwaiter(rootName);
             if (isTaskAwaiterRegistration || isBoxAwareAwaiterRegistration)
             {
                 sequence = AsyncProfilerRuntimeSequenceKind.V1AwaitRegistration;
@@ -523,7 +542,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             while (next < end)
             {
                 AsyncProfilerStitchedFrame frame = context.Frames[next];
-                bool isRegistration = IsHelperFrame(frame, RuntimeFrameKind.V1BuilderAwaitRegistration) || IsHelperFrame(frame, RuntimeFrameKind.V1AwaiterRegistration);
+                bool isRegistration =
+                    IsHelperFrame(frame, RuntimeFrameKind.V1BuilderAwaitRegistration) ||
+                    IsHelperFrame(frame, RuntimeFrameKind.V1AwaiterRegistration);
                 if (!isRegistration)
                 {
                     break;
@@ -645,7 +666,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
                 AsyncProfilerRuntimeSequenceMatch chain = context.MatchRuntimeSequence(AsyncProfilerRuntimeSequenceKind.TaskCompletionChain, completionStart, helpersEnd);
                 int caller = completionStart + chain.Length;
-                if (chain.IsMatch && caller < helpersEnd && context.TraceLog != null && context.GetHostModuleOwner(context.Frames[caller].CodeAddress) == ModuleFileIndex.Invalid)
+                bool hasCaller = chain.IsMatch && caller < helpersEnd && context.TraceLog != null;
+                if (hasCaller && context.GetHostModuleOwner(context.Frames[caller].CodeAddress) == ModuleFileIndex.Invalid)
                 {
                     return AsyncProfilerRuntimeSequenceMatch.Match(caller - start);
                 }
@@ -789,7 +811,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
             if (IsHelperFrame(context.Frames[end - 1], RuntimeFrameKind.TaskResult))
             {
-                return IsHelperFrame(context.Frames[start], RuntimeFrameKind.TaskContinuations) ? AsyncProfilerRuntimeSequenceMatch.Match(end - start) : default;
+                if (!IsHelperFrame(context.Frames[start], RuntimeFrameKind.TaskContinuations))
+                {
+                    return default;
+                }
+
+                return AsyncProfilerRuntimeSequenceMatch.Match(end - start);
             }
 
             return MatchOptionalValueTaskSourceCompletion(context, start, end, RuntimeNames.ValueTaskSources.SetResult);
@@ -820,16 +847,22 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             string leaf = GetFrameName(context, start);
             bool continuation = IsHelperFrame(context.Frames[start], RuntimeFrameKind.TaskContinuations);
             bool canceled = IsMethodOnType(leaf, RuntimeNames.TaskExceptionHolder.Type, RuntimeNames.TaskExceptionHolder.SetCancellationException);
-            if (!continuation && !canceled && !IsMethodOnType(leaf, RuntimeNames.TaskExceptionHolder.Type, RuntimeNames.TaskExceptionHolder.AddFaultException))
+            if (!continuation && !canceled)
             {
-                return default;
+                bool faulted = IsMethodOnType(leaf, RuntimeNames.TaskExceptionHolder.Type, RuntimeNames.TaskExceptionHolder.AddFaultException);
+                if (!faulted)
+                {
+                    return default;
+                }
             }
 
+            string completionMethod = canceled ? RuntimeNames.Task.TrySetCanceled : RuntimeNames.Task.TrySetException;
             for (int i = start + 1; i < end - 1; i++)
             {
                 string name = GetFrameName(context, i);
-                string completionMethod = canceled ? RuntimeNames.Task.TrySetCanceled : RuntimeNames.Task.TrySetException;
-                if (IsTaskMethod(name, completionMethod) || (continuation && IsTaskMethod(name, RuntimeNames.Task.TrySetCanceled)))
+                bool isCompletion = IsTaskMethod(name, completionMethod);
+                bool isContinuationCancel = continuation && IsTaskMethod(name, RuntimeNames.Task.TrySetCanceled);
+                if (isCompletion || isContinuationCancel)
                 {
                     return AsyncProfilerRuntimeSequenceMatch.Match(end - start);
                 }
@@ -897,7 +930,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 string name = GetFrameName(context, i);
                 if (isTaskRegistration)
                 {
-                    bool isContinuationHelper = IsTaskMethod(name, RuntimeNames.Task.SetContinuationForAwait) || IsTaskMethod(name, RuntimeNames.Task.UnsafeSetContinuationForAwait);
+                    bool isContinuationHelper =
+                        IsTaskMethod(name, RuntimeNames.Task.SetContinuationForAwait) ||
+                        IsTaskMethod(name, RuntimeNames.Task.UnsafeSetContinuationForAwait);
                     if (isContinuationHelper)
                     {
                         return AsyncProfilerRuntimeSequenceMatch.Match(end - start);
@@ -918,7 +953,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <summary>Classifies registration and readiness checks before general TaskAwaiter helpers.</summary>
         private static FrameClassification ClassifyAwaiterFrame(string frameName, string method, string typeName)
         {
-            bool isAwaiterRegistration = (IsKnownV1AwaiterType(typeName) || IsKnownStateMachineBoxAwareAwaiter(frameName)) && IsAwaiterRegistrationMethod(method);
+            bool isKnownAwaiter = IsKnownV1AwaiterType(typeName) || IsKnownStateMachineBoxAwareAwaiter(frameName);
+            bool isAwaiterRegistration = isKnownAwaiter && IsAwaiterRegistrationMethod(method);
             if (isAwaiterRegistration)
             {
                 return RuntimeFrameKind.V1AwaiterRegistration;
@@ -1038,8 +1074,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
             int qualifiedStart = frameName.IndexOf('!');
             qualifiedStart = qualifiedStart >= 0 ? qualifiedStart + 1 : 0;
-            const string namespacePrefix = RuntimeNames.CompilerServicesNamespace;
-            if (frameName.Length - qualifiedStart < namespacePrefix.Length || string.CompareOrdinal(frameName, qualifiedStart, namespacePrefix, 0, namespacePrefix.Length) != 0)
+            if (!HasCompilerServicesNamespaceAt(frameName, qualifiedStart))
             {
                 return false;
             }
@@ -1068,7 +1103,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         private static bool IsV1DispatcherTypeName(string declaringType)
         {
             declaringType = GetTypeNameWithoutArity(declaringType);
-            return declaringType.EndsWith(RuntimeNames.StateMachineBoxes.TypeSuffix, StringComparison.Ordinal) || declaringType == AsyncStateMachineDispatcherTypeName;
+            return declaringType.EndsWith(RuntimeNames.StateMachineBoxes.TypeSuffix, StringComparison.Ordinal) ||
+                declaringType == AsyncStateMachineDispatcherTypeName;
         }
 
         private static bool IsKnownV1MethodBuilderType(string builderType)
@@ -1180,8 +1216,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 return AsyncProfilerStitchSyncFrameKind.FaultHandling;
             }
 
-            if ((IsMethodOnType(frameName, RuntimeNames.TaskCompletionSource.Type, method) || IsMethodOnType(frameName, RuntimeNames.TaskCompletionSource.GenericType, method)) &&
-                method == RuntimeNames.TaskCompletionSource.SetResult)
+            bool isTaskCompletionSourceSetResult =
+                method == RuntimeNames.TaskCompletionSource.SetResult &&
+                (IsMethodOnType(frameName, RuntimeNames.TaskCompletionSource.Type, method) ||
+                 IsMethodOnType(frameName, RuntimeNames.TaskCompletionSource.GenericType, method));
+            if (isTaskCompletionSourceSetResult)
             {
                 return RuntimeFrameKind.TaskCompletionSourceResult;
             }
@@ -1193,7 +1232,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     : AsyncProfilerStitchSyncFrameKind.None;
             }
 
-            if (method == RuntimeNames.RuntimeAsyncTaskContinuation.ResumeTaskContinuation && IsMethodOnType(frameName, RuntimeNames.RuntimeAsyncTaskContinuation.ResumeType, method))
+            bool isResumeTaskContinuation =
+                method == RuntimeNames.RuntimeAsyncTaskContinuation.ResumeTaskContinuation &&
+                IsMethodOnType(frameName, RuntimeNames.RuntimeAsyncTaskContinuation.ResumeType, method);
+            if (isResumeTaskContinuation)
             {
                 return AsyncProfilerStitchSyncFrameKind.ContinuationBridge;
             }
@@ -1221,7 +1263,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 return RuntimeFrameKind.ProfilerCapture;
             }
 
-            if ((method == RuntimeNames.Profiler.EmitCallstack || method == RuntimeNames.Profiler.EmitEvent) && IsMethodOnType(frameName, callstackType, method))
+            bool isEmissionMethod = method == RuntimeNames.Profiler.EmitCallstack || method == RuntimeNames.Profiler.EmitEvent;
+            if (isEmissionMethod && IsMethodOnType(frameName, callstackType, method))
             {
                 return RuntimeFrameKind.ProfilerEmission;
             }
@@ -1236,26 +1279,37 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                  method == RuntimeNames.Initialization.InitClassHelper ||
                  method == RuntimeNames.Initialization.InitClassSlow) &&
                 IsMethodOnType(frameName, RuntimeNames.Initialization.InitHelpersType, method);
-            if (isClassInitialization || (method == RuntimeNames.Initialization.GetNonGCStaticBaseSlow && IsMethodOnType(frameName, RuntimeNames.Initialization.StaticsHelpersType, method)))
+            bool isStaticBaseInitialization =
+                method == RuntimeNames.Initialization.GetNonGCStaticBaseSlow &&
+                IsMethodOnType(frameName, RuntimeNames.Initialization.StaticsHelpersType, method);
+            if (isClassInitialization || isStaticBaseInitialization)
             {
                 return RuntimeFrameKind.RuntimeInitialization;
             }
 
-            const string profilerType = RuntimeNames.Profiler.Type;
-            string member = method == RuntimeNames.Constructors.Instance || method == RuntimeNames.Constructors.Static ? "." + method : method;
-            int typeStart = IsHostModuleQualifiedFrame(frameName) ? HostModuleName.Length + 1 : 0;
-            int typeEnd = typeStart + profilerType.Length;
+            bool isConstructor = method == RuntimeNames.Constructors.Instance || method == RuntimeNames.Constructors.Static;
+            string member = isConstructor ? "." + method : method;
             if (IsCommonV1DispatcherInfrastructure(frameName) ||
                 IsV1DispatcherImplementingType(frameName) ||
                 IsMethodOnType(frameName, RuntimeNames.Profiler.DiagnosticsType, member) ||
                 IsMethodOnType(frameName, RuntimeNames.Profiler.EventSourceType, member) ||
-                IsMethodOnType(frameName, profilerType, member) ||
-                (frameName.Length > typeEnd && frameName[typeEnd] == '+' && string.CompareOrdinal(frameName, typeStart, profilerType, 0, profilerType.Length) == 0))
+                IsMethodOnType(frameName, RuntimeNames.Profiler.Type, member) ||
+                IsNestedProfilerTypeFrame(frameName))
             {
                 return AsyncProfilerStitchSyncFrameKind.ProfilerHelper;
             }
 
             return AsyncProfilerStitchSyncFrameKind.None;
+        }
+
+        private static bool IsNestedProfilerTypeFrame(string frameName)
+        {
+            const string profilerType = RuntimeNames.Profiler.Type;
+            int typeStart = IsHostModuleQualifiedFrame(frameName) ? HostModuleName.Length + 1 : 0;
+            int typeEnd = typeStart + profilerType.Length;
+            return frameName.Length > typeEnd &&
+                frameName[typeEnd] == '+' &&
+                string.CompareOrdinal(frameName, typeStart, profilerType, 0, profilerType.Length) == 0;
         }
 
         private static bool IsMethodOnType(string frameName, string fullTypeName, string method, string nestedTypeName = null) =>
@@ -1264,9 +1318,14 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         private static bool IsRuntimeCompilerServicesMethod(string frameName)
         {
             int qualifiedStart = IsHostModuleQualifiedFrame(frameName) ? HostModuleName.Length + 1 : 0;
+            return HasCompilerServicesNamespaceAt(frameName, qualifiedStart);
+        }
+
+        private static bool HasCompilerServicesNamespaceAt(string frameName, int start)
+        {
             const string namespacePrefix = RuntimeNames.CompilerServicesNamespace;
-            return frameName.Length - qualifiedStart >= namespacePrefix.Length &&
-                string.CompareOrdinal(frameName, qualifiedStart, namespacePrefix, 0, namespacePrefix.Length) == 0;
+            return frameName.Length - start >= namespacePrefix.Length &&
+                string.CompareOrdinal(frameName, start, namespacePrefix, 0, namespacePrefix.Length) == 0;
         }
 
         private static Version ParseVersion(string text)

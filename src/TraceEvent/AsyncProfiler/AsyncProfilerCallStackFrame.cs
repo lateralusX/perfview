@@ -39,7 +39,18 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
         /// <summary>The captured V1 compiler state, or null for V2 and non-async frames.
         /// Inferred running/completed states do not change this value.</summary>
-        public int? CapturedState => m_frame.Segment?.Kind == AsyncCallstackKind.StateMachineAsync ? m_frame.Segment.FrameStateAt(m_frame.SegmentFrameIndex) : (int?)null;
+        public int? CapturedState
+        {
+            get
+            {
+                if (m_frame.Segment?.Kind != AsyncCallstackKind.StateMachineAsync)
+                {
+                    return null;
+                }
+
+                return m_frame.Segment.FrameStateAt(m_frame.SegmentFrameIndex);
+            }
+        }
 
         /// <summary>The async call stack associated with this frame, or null.
         /// For historical parent frames, this is the parent's call stack, which may not appear in the callback's segments list.</summary>

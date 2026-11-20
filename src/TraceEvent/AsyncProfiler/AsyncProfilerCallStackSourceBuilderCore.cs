@@ -242,7 +242,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
             m_canonicalMethodByMethodIndex = new Dictionary<MethodIndex, MethodIndex>();
             m_canonicalMethodByIdentity = new Dictionary<ManagedMethodIdentity, MethodIndex>();
-            m_methodOf = codeAddressIndex => codeAddressIndex == CodeAddressIndex.Invalid ? MethodIndex.Invalid : NormalizeMethod(eventLog.CodeAddresses.MethodIndex(codeAddressIndex));
+            m_methodOf = GetMethod;
 
             m_diagnostics = new AsyncProfilerCallStackDiagnostics();
             m_sampleDiagnostics = new AsyncProfilerCallStackDiagnostics();
@@ -261,31 +261,24 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         {
             m_syncFrames.Clear();
             TraceCallStacks callStacks = m_eventLog.CallStacks;
-            TraceCodeAddresses codeAddresses = m_eventLog.CodeAddresses;
             CallStackIndex physicalRoot = CallStackIndex.Invalid;
 
             for (CallStackIndex stackIndex = callStackIndex; stackIndex != CallStackIndex.Invalid; stackIndex = callStacks.Caller(stackIndex))
             {
                 physicalRoot = stackIndex;
                 CodeAddressIndex codeAddressIndex = callStacks.CodeAddressIndex(stackIndex);
-                MethodIndex method = codeAddressIndex != CodeAddressIndex.Invalid ? NormalizeMethod(codeAddresses.MethodIndex(codeAddressIndex)) : MethodIndex.Invalid;
+                MethodIndex method = GetMethod(codeAddressIndex);
 
                 if (!m_syncFrameMetadata.TryGetValue(codeAddressIndex, out var metadata))
                 {
-                    TraceCodeAddress codeAddress = codeAddressIndex == CodeAddressIndex.Invalid ? null : codeAddresses[codeAddressIndex];
-                    string frameName = AsyncProfilerMethodNames.NormalizeMethodName(codeAddress?.FullMethodName);
-
-                    TraceModuleFile module = codeAddressIndex == CodeAddressIndex.Invalid ? null : codeAddresses.ModuleFile(codeAddressIndex);
-                    bool isHostModule = module != null && m_runtimeResolver.IsHostModule(module.ModuleFileIndex);
-                    AsyncProfilerRuntimeSupport support = module == null ? AsyncProfilerRuntimeSupport.Common : m_runtimeResolver.ResolveModuleSupport(module.ModuleFileIndex);
-
-                    metadata = (support.ClassifySynchronousFrame(frameName, isHostModule), support);
+                    metadata = ClassifySyncFrame(codeAddressIndex);
                     m_syncFrameMetadata.Add(codeAddressIndex, metadata);
                 }
 
-                MethodIndex boxedMethod =
+                bool isV1DispatcherInfrastructure =
                     method != MethodIndex.Invalid &&
-                    m_classify(codeAddressIndex).Kind == AsyncProfilerCallStackStitchBoundaryKind.V1DispatcherInfrastructure
+                    m_classify(codeAddressIndex).Kind == AsyncProfilerCallStackStitchBoundaryKind.V1DispatcherInfrastructure;
+                MethodIndex boxedMethod = isV1DispatcherInfrastructure
                     ? GetBoxedStateMachineMethod(codeAddressIndex)
                     : MethodIndex.Invalid;
 
@@ -293,6 +286,43 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             return physicalRoot;
+        }
+
+        private MethodIndex GetMethod(CodeAddressIndex codeAddressIndex)
+        {
+            if (codeAddressIndex == CodeAddressIndex.Invalid)
+            {
+                return MethodIndex.Invalid;
+            }
+
+            return NormalizeMethod(m_eventLog.CodeAddresses.MethodIndex(codeAddressIndex));
+        }
+
+        private (FrameClassification Classification, AsyncProfilerRuntimeSupport Support) ClassifySyncFrame(CodeAddressIndex codeAddressIndex)
+        {
+            TraceCodeAddress codeAddress = null;
+            TraceModuleFile module = null;
+            if (codeAddressIndex != CodeAddressIndex.Invalid)
+            {
+                codeAddress = m_eventLog.CodeAddresses[codeAddressIndex];
+                module = m_eventLog.CodeAddresses.ModuleFile(codeAddressIndex);
+            }
+
+            string frameName = AsyncProfilerMethodNames.NormalizeMethodName(codeAddress?.FullMethodName);
+            AsyncProfilerRuntimeSupport support = GetModuleSupport(module, out bool isHostModule);
+            return (support.ClassifySynchronousFrame(frameName, isHostModule), support);
+        }
+
+        private AsyncProfilerRuntimeSupport GetModuleSupport(TraceModuleFile module, out bool isHostModule)
+        {
+            if (module == null)
+            {
+                isHostModule = false;
+                return AsyncProfilerRuntimeSupport.Common;
+            }
+
+            isHostModule = m_runtimeResolver.IsHostModule(module.ModuleFileIndex);
+            return m_runtimeResolver.ResolveModuleSupport(module.ModuleFileIndex);
         }
 
         private MethodIndex GetBoxedStateMachineMethod(CodeAddressIndex codeAddressIndex)
@@ -304,37 +334,13 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
             TraceCodeAddress codeAddress = m_eventLog.CodeAddresses[codeAddressIndex];
             TraceModuleFile module = m_eventLog.CodeAddresses.ModuleFile(codeAddressIndex);
-            bool isHostModule = module != null && m_runtimeResolver.IsHostModule(module.ModuleFileIndex);
-            AsyncProfilerRuntimeSupport support = module == null ? AsyncProfilerRuntimeSupport.Common : m_runtimeResolver.ResolveModuleSupport(module.ModuleFileIndex);
+            AsyncProfilerRuntimeSupport support = GetModuleSupport(module, out bool isHostModule);
+            string frameName = AsyncProfilerMethodNames.NormalizeMethodName(codeAddress.FullMethodName);
 
             MethodIndex method = MethodIndex.Invalid;
-            if (support.TryGetBoxedStateMachineTypeName(AsyncProfilerMethodNames.NormalizeMethodName(codeAddress.FullMethodName), isHostModule, out string stateMachineType))
+            if (support.TryGetBoxedStateMachineTypeName(frameName, isHostModule, out string stateMachineType))
             {
-                if (m_stateMachineMethodByTypeName == null)
-                {
-                    m_stateMachineMethodByTypeName = new Dictionary<string, MethodIndex>(StringComparer.Ordinal);
-                    TraceMethods methods = m_eventLog.CodeAddresses.Methods;
-
-                    for (int i = 0; i < methods.Count; i++)
-                    {
-                        string typeName = AsyncProfilerMethodNames.GetStateMachineTypeName(AsyncProfilerMethodNames.NormalizeMethodName(methods.FullMethodName((MethodIndex)i)));
-
-                        if (typeName == null)
-                        {
-                            continue;
-                        }
-
-                        MethodIndex canonical = NormalizeMethod((MethodIndex)i);
-                        if (m_stateMachineMethodByTypeName.TryGetValue(typeName, out MethodIndex existing) && existing != canonical)
-                        {
-                            // Type names alone cannot disambiguate identically named types in different modules.
-                            canonical = MethodIndex.Invalid;
-                        }
-
-                        m_stateMachineMethodByTypeName[typeName] = canonical;
-                    }
-                }
-
+                m_stateMachineMethodByTypeName ??= BuildStateMachineMethodByTypeName();
                 if (!m_stateMachineMethodByTypeName.TryGetValue(stateMachineType, out method))
                 {
                     method = MethodIndex.Invalid;
@@ -343,6 +349,33 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
             m_boxedStateMachineMethods.Add(codeAddressIndex, method);
             return method;
+        }
+
+        private Dictionary<string, MethodIndex> BuildStateMachineMethodByTypeName()
+        {
+            var methodByTypeName = new Dictionary<string, MethodIndex>(StringComparer.Ordinal);
+            TraceMethods methods = m_eventLog.CodeAddresses.Methods;
+
+            for (int i = 0; i < methods.Count; i++)
+            {
+                string methodName = AsyncProfilerMethodNames.NormalizeMethodName(methods.FullMethodName((MethodIndex)i));
+                string typeName = AsyncProfilerMethodNames.GetStateMachineTypeName(methodName);
+                if (typeName == null)
+                {
+                    continue;
+                }
+
+                MethodIndex canonical = NormalizeMethod((MethodIndex)i);
+                if (methodByTypeName.TryGetValue(typeName, out MethodIndex existing) && existing != canonical)
+                {
+                    // Type names alone cannot disambiguate identically named types in different modules.
+                    canonical = MethodIndex.Invalid;
+                }
+
+                methodByTypeName[typeName] = canonical;
+            }
+
+            return methodByTypeName;
         }
 
         private AsyncProfilerRuntimeSupport GetRuntimeSupport(CodeAddressIndex codeAddressIndex)
@@ -395,7 +428,7 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         private StackSourceCallStackIndex InternStitchedStack(StackSourceCallStackIndex root, ProcessIndex processIndex, CallStackIndex physicalRoot)
         {
             StackSourceCallStackIndex caller = root;
-            if (physicalRoot != CallStackIndex.Invalid && !m_stitchedFrames.Exists(frame => frame.Origin == AsyncProfilerStitchedFrameOrigin.IncompletePhysicalRoot))
+            if (physicalRoot != CallStackIndex.Invalid && !HasIncompletePhysicalRoot())
             {
                 // Keep the synchronous root policy without duplicating a recovered BROKEN root.
                 caller = m_outputStackSource.GetCallerIndex(m_outputStackSource.GetCallStack(physicalRoot, root));
@@ -419,6 +452,19 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             return caller;
+        }
+
+        private bool HasIncompletePhysicalRoot()
+        {
+            for (int i = 0; i < m_stitchedFrames.Count; i++)
+            {
+                if (m_stitchedFrames[i].Origin == AsyncProfilerStitchedFrameOrigin.IncompletePhysicalRoot)
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private StackSourceFrameIndex InternStitchedFrame(AsyncProfilerStitchedFrame frame, ProcessIndex processIndex)
@@ -449,34 +495,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 return InternAsyncFrame(frame, processIndex);
             }
 
-            if (frame.Presentation == AsyncProfilerStitchedFramePresentation.LogicalStateMachineMethod && frame.CodeAddress != CodeAddressIndex.Invalid)
+            bool isLogicalSyncFrame =
+                frame.Presentation == AsyncProfilerStitchedFramePresentation.LogicalStateMachineMethod &&
+                frame.CodeAddress != CodeAddressIndex.Invalid;
+            if (isLogicalSyncFrame && TryGetLogicalSyncFrame(frame.CodeAddress, out StackSourceFrameIndex logicalFrame))
             {
-                if (m_logicalSyncFrameByCodeAddress.TryGetValue(frame.CodeAddress, out StackSourceFrameIndex cachedFrame))
-                {
-                    if (cachedFrame != StackSourceFrameIndex.Invalid)
-                    {
-                        return cachedFrame;
-                    }
-
-                    return m_outputStackSource.GetFrameIndex(frame.CodeAddress);
-                }
-
-                TraceCodeAddress codeAddress = m_eventLog.CodeAddresses[frame.CodeAddress];
-                if (AsyncProfilerMethodNames.TryGetLogicalStateMachineMethodName(AsyncProfilerMethodNames.NormalizeMethodName(codeAddress.FullMethodName), out string logicalName, out string stateMachineSuffix))
-                {
-                    StackSourceModuleIndex module = m_outputStackSource.Interner.ModuleIntern(codeAddress.ModuleName);
-                    StackSourceFrameIndex logicalFrame = m_outputStackSource.Interner.FrameIntern(
-                        AsyncProfilerMethodNames.FormatLogicalStateMachineMethodName(logicalName, stateMachineSuffix),
-                        module,
-                        m_outputStackSource.NextAsyncProfilerCallStackFrameIdentityTag());
-
-                    m_outputStackSource.SetFrameCodeAddress(logicalFrame, frame.CodeAddress);
-                    m_logicalSyncFrameByCodeAddress.Add(frame.CodeAddress, logicalFrame);
-
-                    return logicalFrame;
-                }
-
-                m_logicalSyncFrameByCodeAddress.Add(frame.CodeAddress, StackSourceFrameIndex.Invalid);
+                return logicalFrame;
             }
 
             if (frame.CodeAddress != CodeAddressIndex.Invalid)
@@ -485,6 +509,37 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             return m_outputStackSource.Interner.FrameIntern("?!?");
+        }
+
+        private bool TryGetLogicalSyncFrame(CodeAddressIndex codeAddressIndex, out StackSourceFrameIndex logicalFrame)
+        {
+            if (!m_logicalSyncFrameByCodeAddress.TryGetValue(codeAddressIndex, out logicalFrame))
+            {
+                logicalFrame = InternLogicalSyncFrame(codeAddressIndex);
+                m_logicalSyncFrameByCodeAddress.Add(codeAddressIndex, logicalFrame);
+            }
+
+            return logicalFrame != StackSourceFrameIndex.Invalid;
+        }
+
+        /// <summary>Returns an invalid frame when the method has no logical state-machine name.</summary>
+        private StackSourceFrameIndex InternLogicalSyncFrame(CodeAddressIndex codeAddressIndex)
+        {
+            TraceCodeAddress codeAddress = m_eventLog.CodeAddresses[codeAddressIndex];
+            string methodName = AsyncProfilerMethodNames.NormalizeMethodName(codeAddress.FullMethodName);
+            if (!AsyncProfilerMethodNames.TryGetLogicalStateMachineMethodName(methodName, out string logicalName, out string stateMachineSuffix))
+            {
+                return StackSourceFrameIndex.Invalid;
+            }
+
+            StackSourceModuleIndex module = m_outputStackSource.Interner.ModuleIntern(codeAddress.ModuleName);
+            StackSourceFrameIndex logicalFrame = m_outputStackSource.Interner.FrameIntern(
+                AsyncProfilerMethodNames.FormatLogicalStateMachineMethodName(logicalName, stateMachineSuffix),
+                module,
+                m_outputStackSource.NextAsyncProfilerCallStackFrameIdentityTag());
+
+            m_outputStackSource.SetFrameCodeAddress(logicalFrame, codeAddressIndex);
+            return logicalFrame;
         }
 
         private StackSourceFrameIndex InternAsyncFrame(AsyncProfilerStitchedFrame frame, ProcessIndex processIndex)
@@ -501,18 +556,6 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             bool parentContextCurrent = frame.Origin == AsyncProfilerStitchedFrameOrigin.AsyncContextParentCurrent;
             bool completing = frame.Origin == AsyncProfilerStitchedFrameOrigin.V1CompletedBody;
             bool completionUnwind = frame.Origin == AsyncProfilerStitchedFrameOrigin.V1CompletionReturn;
-
-            // Only labels use the inferred state; frame metadata keeps the captured state.
-            int presentationState = state;
-            if (completing || completionUnwind)
-            {
-                presentationState = -2;
-            }
-            else if (current || parentContextCurrent)
-            {
-                presentationState = -1;
-            }
-
             bool annotateActive = m_transforms.EnableFrameAnnotations && frame.ContextKind == AsyncProfilerStitchedFrameContextKind.Active;
 
             // Keep different states and origins separate even when the displayed names match.
@@ -533,53 +576,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             int identityTag = m_outputStackSource.NextAsyncProfilerCallStackFrameIdentityTag();
-            string prefix = parentContext || annotateActive ? GetAnnotationPrefix(kind) : string.Empty;
-
-            StackSourceFrameIndex asyncFrame;
-            if (frame.Presentation == AsyncProfilerStitchedFramePresentation.LogicalStateMachineMethod && frame.CodeAddress != CodeAddressIndex.Invalid)
-            {
-                TraceCodeAddress codeAddress = m_eventLog.CodeAddresses[frame.IsStateMachineBoxCarrier ? segment.CodeAddressAt(segmentFrameIndex) : frame.CodeAddress];
-
-                if (AsyncProfilerMethodNames.TryGetLogicalStateMachineMethodName(AsyncProfilerMethodNames.NormalizeMethodName(codeAddress.FullMethodName), out string logicalName, out string stateMachineSuffix))
-                {
-                    StackSourceModuleIndex module = m_outputStackSource.Interner.ModuleIntern(codeAddress.ModuleName);
-                    asyncFrame = m_outputStackSource.Interner.FrameIntern(
-                        AsyncProfilerMethodNames.FormatLogicalStateMachineMethodName(
-                            logicalName,
-                            stateMachineSuffix,
-                            parentContext || annotateActive ? presentationState : (int?)null),
-                        module,
-                        identityTag,
-                        prefix);
-                }
-                else if (prefix.Length != 0)
-                {
-                    StackSourceModuleIndex module = m_outputStackSource.Interner.ModuleIntern(codeAddress.ModuleName);
-                    asyncFrame = m_outputStackSource.Interner.FrameIntern(codeAddress.FullMethodName, module, identityTag, prefix);
-                }
-                else
-                {
-                    asyncFrame = m_outputStackSource.Interner.FrameIntern(m_outputStackSource.GetFrameIndex(frame.CodeAddress), string.Empty, identityTag);
-                }
-            }
-            else if (frame.CodeAddress != CodeAddressIndex.Invalid)
-            {
-                if (prefix.Length != 0)
-                {
-                    TraceCodeAddress codeAddress = m_eventLog.CodeAddresses[frame.CodeAddress];
-                    StackSourceModuleIndex module = m_outputStackSource.Interner.ModuleIntern(codeAddress.ModuleName);
-                    asyncFrame = m_outputStackSource.Interner.FrameIntern(codeAddress.FullMethodName, module, identityTag, prefix);
-                }
-                else
-                {
-                    asyncFrame = m_outputStackSource.Interner.FrameIntern(m_outputStackSource.GetFrameIndex(frame.CodeAddress), string.Empty, identityTag);
-                }
-            }
-            else
-            {
-                string name = prefix + "AsyncFrame(0x" + instructionPointer.ToString("x") + ")";
-                asyncFrame = m_outputStackSource.Interner.FrameIntern(name, StackSourceModuleIndex.Invalid, identityTag);
-            }
+            bool annotate = parentContext || annotateActive;
+            string prefix = annotate ? GetAnnotationPrefix(kind) : string.Empty;
+            int? labelState = annotate ? GetPresentationState(frame.Origin, state) : null;
+            StackSourceFrameIndex asyncFrame = InternAsyncFrameName(frame, identityTag, prefix, labelState, instructionPointer);
 
             m_frameByIdentity.Add(identity, asyncFrame);
             m_outputStackSource.SetAsyncProfilerCallStackFrameInfo(
@@ -599,6 +599,70 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     completionUnwind));
 
             return asyncFrame;
+        }
+
+        /// <summary>Only labels use the inferred state; frame metadata keeps the captured state.</summary>
+        private static int GetPresentationState(AsyncProfilerStitchedFrameOrigin origin, int capturedState)
+        {
+            return origin switch
+            {
+                AsyncProfilerStitchedFrameOrigin.V1CompletedBody or AsyncProfilerStitchedFrameOrigin.V1CompletionReturn => -2,
+                AsyncProfilerStitchedFrameOrigin.AsyncCurrent or AsyncProfilerStitchedFrameOrigin.AsyncContextParentCurrent => -1,
+                _ => capturedState,
+            };
+        }
+
+        private StackSourceFrameIndex InternAsyncFrameName(
+            AsyncProfilerStitchedFrame frame,
+            int identityTag,
+            string prefix,
+            int? labelState,
+            ulong instructionPointer)
+        {
+            if (frame.CodeAddress == CodeAddressIndex.Invalid)
+            {
+                string name = prefix + "AsyncFrame(0x" + instructionPointer.ToString("x") + ")";
+                return m_outputStackSource.Interner.FrameIntern(name, StackSourceModuleIndex.Invalid, identityTag);
+            }
+
+            bool isLogical = frame.Presentation == AsyncProfilerStitchedFramePresentation.LogicalStateMachineMethod;
+            if (!isLogical && prefix.Length == 0)
+            {
+                return InternUnannotatedFrame(frame.CodeAddress, identityTag);
+            }
+
+            CodeAddressIndex nameAddress = frame.CodeAddress;
+            if (isLogical && frame.IsStateMachineBoxCarrier)
+            {
+                nameAddress = frame.Segment.CodeAddressAt(frame.SegmentFrameIndex);
+            }
+
+            if (isLogical)
+            {
+                TraceCodeAddress codeAddress = m_eventLog.CodeAddresses[nameAddress];
+                string methodName = AsyncProfilerMethodNames.NormalizeMethodName(codeAddress.FullMethodName);
+                if (AsyncProfilerMethodNames.TryGetLogicalStateMachineMethodName(methodName, out string logicalName, out string stateMachineSuffix))
+                {
+                    string displayName = AsyncProfilerMethodNames.FormatLogicalStateMachineMethodName(logicalName, stateMachineSuffix, labelState);
+                    StackSourceModuleIndex logicalModule = m_outputStackSource.Interner.ModuleIntern(codeAddress.ModuleName);
+                    return m_outputStackSource.Interner.FrameIntern(displayName, logicalModule, identityTag, prefix);
+                }
+            }
+
+            if (prefix.Length == 0)
+            {
+                return InternUnannotatedFrame(frame.CodeAddress, identityTag);
+            }
+
+            // Derive from the physical frame so unresolved names and later symbol lookups behave as they do for it.
+            StackSourceFrameIndex physicalFrame = m_outputStackSource.GetFrameIndex(nameAddress);
+            return m_outputStackSource.Interner.FrameIntern(physicalFrame, string.Empty, identityTag, prefix);
+        }
+
+        private StackSourceFrameIndex InternUnannotatedFrame(CodeAddressIndex codeAddress, int identityTag)
+        {
+            StackSourceFrameIndex physicalFrame = m_outputStackSource.GetFrameIndex(codeAddress);
+            return m_outputStackSource.Interner.FrameIntern(physicalFrame, string.Empty, identityTag);
         }
 
         private static string GetAnnotationPrefix(AsyncCallstackKind kind)
@@ -645,7 +709,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 return false;
             }
 
-            return left.Context.Thread.Equals(right.Context.Thread) && left.Context.DispatcherId == right.Context.DispatcherId && left.Context.StartQpc == right.Context.StartQpc;
+            return left.Context.Thread.Equals(right.Context.Thread) &&
+                left.Context.DispatcherId == right.Context.DispatcherId &&
+                left.Context.StartQpc == right.Context.StartQpc;
         }
 
         private readonly struct CallStackSourceFrameIdentity : IEquatable<CallStackSourceFrameIdentity>

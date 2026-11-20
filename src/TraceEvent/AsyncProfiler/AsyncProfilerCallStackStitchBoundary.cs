@@ -116,7 +116,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             string suffix = method.Substring(ContinuationWrapperPrefix.Length);
-            if (suffix.Length == 0 || !int.TryParse(suffix, NumberStyles.None, CultureInfo.InvariantCulture, out int index) || (uint)index >= (uint)WrapperPoolCount)
+            if (suffix.Length == 0 || !int.TryParse(suffix, NumberStyles.None, CultureInfo.InvariantCulture, out int index))
+            {
+                return false;
+            }
+
+            if ((uint)index >= (uint)WrapperPoolCount)
             {
                 return false;
             }
@@ -153,7 +158,10 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             // MoveNext alone does not distinguish the standalone dispatcher from application state machines.
-            if (method == AsyncStateMachineDispatcherMethodName && AsyncProfilerMethodNames.GetDeclaringTypeName(frameName) == AsyncStateMachineDispatcherTypeName)
+            bool isStandaloneDispatcher =
+                method == AsyncStateMachineDispatcherMethodName &&
+                AsyncProfilerMethodNames.GetDeclaringTypeName(frameName) == AsyncStateMachineDispatcherTypeName;
+            if (isStandaloneDispatcher)
             {
                 return AsyncProfilerCallStackStitchBoundaryKind.V1Dispatcher;
             }
@@ -196,13 +204,25 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
 
             EnsureBuilt();
-            return m_boundaries.TryGetValue(methodIndex, out AsyncProfilerCallStackStitchBoundaryInfo info) ? info : AsyncProfilerCallStackStitchBoundaryInfo.None;
+            if (!m_boundaries.TryGetValue(methodIndex, out AsyncProfilerCallStackStitchBoundaryInfo info))
+            {
+                return AsyncProfilerCallStackStitchBoundaryInfo.None;
+            }
+
+            return info;
         }
 
         #region private
 
-        internal AsyncProfilerRuntimeSupport GetRuntimeSupport(CodeAddressIndex codeAddress) =>
-            codeAddress == CodeAddressIndex.Invalid ? AsyncProfilerRuntimeSupport.Common : m_runtimeResolver.ResolveModuleSupport(m_codeAddresses.ModuleFileIndex(codeAddress));
+        internal AsyncProfilerRuntimeSupport GetRuntimeSupport(CodeAddressIndex codeAddress)
+        {
+            if (codeAddress == CodeAddressIndex.Invalid)
+            {
+                return AsyncProfilerRuntimeSupport.Common;
+            }
+
+            return m_runtimeResolver.ResolveModuleSupport(m_codeAddresses.ModuleFileIndex(codeAddress));
+        }
 
         /// <summary>
         /// Builds classifications once, checking CoreLib ownership before reading method names.

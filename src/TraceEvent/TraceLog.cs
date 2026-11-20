@@ -2171,6 +2171,113 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
             universalConverter.BeforeProcess(this, rawEvents);
         }
 
+        private const int MaxAsyncProfilerErrorDetails = 10;
+
+        /// <summary>
+        /// Creates the builder that indexes async-profiler records while raw events are copied. Internal buffer
+        /// timestamps use the trace's QPC domain unchanged. Raw batches are omitted from the ETLX unless
+        /// KeepAsyncProfilerEvents or KeepAllEvents is set.
+        /// </summary>
+        private AsyncProfilerIndexBuilder CreateAsyncProfilerIndexBuilder(TraceEventDispatcher rawEvents)
+        {
+            var parser = new AsyncProfilerTraceEventParser(rawEvents);
+            var builder = new AsyncProfilerIndexBuilder(
+                parser,
+                data => Processes.GetOrCreateProcess(data.ProcessID, data.TimeStampQPC).ProcessIndex);
+            builder.ParseError += (processIndex, error) =>
+            {
+                if (builder.ParseErrorCount > MaxAsyncProfilerErrorDetails)
+                {
+                    return;
+                }
+
+                DebugWarn(false, string.Format(
+                    "AsyncProfiler PID {0}, process index {1}, thread {2}, QPC {3}: {4}",
+                    Processes[processIndex].ProcessID, processIndex,
+                    error.BufferHeader?.OsThreadId.ToString() ?? "unknown",
+                    error.TimestampQpc?.ToString() ?? "unknown", error), null);
+            };
+
+            if (!options.KeepAsyncProfilerEvents)
+            {
+                parser.AsyncEvents += delegate { removeFromStream = true; };
+            }
+
+            RegisterAsyncProfilerCodeAddresses(builder);
+            return builder;
+        }
+
+        /// <summary>
+        /// Registers async-profiler native IPs as code addresses before rundown, and remembers their indices.
+        /// Resolution removes raw addresses from the lookup map, but some call stacks are interned only at trace end.
+        /// Only CodeAddressIndex references are persisted; compiler state remains separate from address identity.
+        /// </summary>
+        private void RegisterAsyncProfilerCodeAddresses(AsyncProfilerIndexBuilder builder)
+        {
+            var codeAddressByMethodId = new Dictionary<(ProcessIndex ProcessIndex, ulong MethodId), CodeAddressIndex>();
+
+            CodeAddressIndex GetOrCreateCodeAddress(ProcessIndex processIndex, ulong methodId)
+            {
+                if (methodId == 0)
+                {
+                    return CodeAddressIndex.Invalid;
+                }
+
+                if (codeAddressByMethodId.TryGetValue((processIndex, methodId), out CodeAddressIndex codeAddress))
+                {
+                    return codeAddress;
+                }
+
+                TraceProcess process = Processes[processIndex];
+                if (process == null)
+                {
+                    return CodeAddressIndex.Invalid;
+                }
+
+                codeAddress = codeAddresses.GetOrCreateCodeAddressIndex(process, methodId);
+                if (codeAddress != CodeAddressIndex.Invalid)
+                {
+                    codeAddressByMethodId[(processIndex, methodId)] = codeAddress;
+                }
+
+                return codeAddress;
+            }
+
+            builder.Index.OnFrameInterned = delegate (AsyncProfilerCallStackFrames frames)
+            {
+                for (int i = 0; i < frames.FrameCount; i++)
+                {
+                    CodeAddressIndex codeAddress = GetOrCreateCodeAddress(frames.ProcessIndex, frames.InstructionPointerAt(i));
+                    if (codeAddress != CodeAddressIndex.Invalid)
+                    {
+                        frames.SetCodeAddressAt(i, codeAddress);
+                    }
+                }
+            };
+
+            builder.OnFrameObserved = delegate (ProcessIndex processIndex, ulong methodId, AsyncCallstackKind kind)
+            {
+                GetOrCreateCodeAddress(processIndex, methodId);
+            };
+        }
+
+        /// <summary>
+        /// Commits async call stacks still open at the end of the event stream, so they remain queryable
+        /// through trace end, then keeps the index unless it is empty.
+        /// </summary>
+        private void FinishAsyncProfilerIndex(AsyncProfilerIndexBuilder builder)
+        {
+            builder.Finish();
+            if (builder.ParseErrorCount != 0)
+            {
+                DebugWarn(false, string.Format(
+                    "AsyncProfiler reported {0} parse errors; uncertain call-stack state was invalidated. " +
+                    "At most {1} error details were logged.",
+                    builder.ParseErrorCount, MaxAsyncProfilerErrorDetails), null);
+            }
+
+            asyncProfilerCallStacks = builder.Index.IsEmpty ? null : builder.Index;
+        }
         /// <summary>
         ///  Copies the events from the 'rawEvents' dispatcher to the output stream 'IStreamWriter'.  It
         ///  also creates auxiliary data structures associated with the raw events (eg, processes, threads,
@@ -2186,70 +2293,7 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
             // parsed property and then copied into the resulting ETLX file in their final form.
             GC.KeepAlive(new GCDynamicTraceEventParser(rawEvents));
 
-            // Build the async index while processing raw events. Internal buffer timestamps use the trace's
-            // QPC domain unchanged. Raw batches are omitted unless KeepAsyncProfilerEvents or KeepAllEvents is set.
-            var asyncProfilerParser = new AsyncProfilerTraceEventParser(rawEvents);
-            var asyncProfilerComputer = new AsyncProfilerIndexBuilder(
-                asyncProfilerParser,
-                data => Processes.GetOrCreateProcess(data.ProcessID, data.TimeStampQPC).ProcessIndex);
-            const int MaxAsyncProfilerErrorDetails = 10;
-            asyncProfilerComputer.ParseError += (processIndex, error) =>
-            {
-                if (asyncProfilerComputer.ParseErrorCount <= MaxAsyncProfilerErrorDetails)
-                {
-                    DebugWarn(false, string.Format(
-                        "AsyncProfiler PID {0}, process index {1}, thread {2}, QPC {3}: {4}",
-                        Processes[processIndex].ProcessID, processIndex,
-                        error.BufferHeader?.OsThreadId.ToString() ?? "unknown",
-                        error.TimestampQpc?.ToString() ?? "unknown", error), null);
-                }
-            };
-            if (!options.KeepAsyncProfilerEvents)
-            {
-                asyncProfilerParser.AsyncEvents += delegate { removeFromStream = true; };
-            }
-
-            // Both instrumentation families emit native IPs. Register them before rundown and retain their indices:
-            // resolution removes raw addresses from the lookup map, but some call stacks are interned only at trace end.
-            // Persist only CodeAddressIndex references; compiler state remains separate from address identity.
-            var asyncProfilerFrameCodeAddressByMethodId = new Dictionary<(ProcessIndex ProcessIndex, ulong MethodId), CodeAddressIndex>();
-
-            Func<ProcessIndex, ulong, CodeAddressIndex> rememberAsyncProfilerFrameCodeAddress = delegate (ProcessIndex processIndex, ulong methodId)
-            {
-                if (methodId == 0)
-                {
-                    return CodeAddressIndex.Invalid;
-                }
-
-                if (!asyncProfilerFrameCodeAddressByMethodId.TryGetValue((processIndex, methodId), out CodeAddressIndex codeAddress))
-                {
-                    TraceProcess process = Processes[processIndex];
-                    codeAddress = process != null ? codeAddresses.GetOrCreateCodeAddressIndex(process, methodId) : CodeAddressIndex.Invalid;
-                    if (codeAddress != CodeAddressIndex.Invalid)
-                    {
-                        asyncProfilerFrameCodeAddressByMethodId[(processIndex, methodId)] = codeAddress;
-                    }
-                }
-
-                return codeAddress;
-            };
-
-            asyncProfilerComputer.Index.OnFrameInterned = delegate (AsyncProfilerCallStackFrames frames)
-            {
-                for (int i = 0; i < frames.FrameCount; i++)
-                {
-                    CodeAddressIndex codeAddress = rememberAsyncProfilerFrameCodeAddress(frames.ProcessIndex, frames.InstructionPointerAt(i));
-                    if (codeAddress != CodeAddressIndex.Invalid)
-                    {
-                        frames.SetCodeAddressAt(i, codeAddress);
-                    }
-                }
-            };
-
-            asyncProfilerComputer.OnFrameObserved = delegate (ProcessIndex processIndex, ulong methodId, AsyncCallstackKind kind)
-            {
-                rememberAsyncProfilerFrameCodeAddress(processIndex, methodId);
-            };
+            AsyncProfilerIndexBuilder asyncProfilerIndexBuilder = CreateAsyncProfilerIndexBuilder(rawEvents);
 
             // Fix up MemInfoWS records so that we get one per process rather than one per machine
             rawEvents.Kernel.MemoryProcessMemInfo += delegate (MemoryProcessMemInfoTraceData data)
@@ -2510,19 +2554,8 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
                 eventsLost = rawEvents.EventsLost;
             }
 
-            // Commit any async call stacks still open (resumed but not yet suspended/completed) at end of the
-            // event stream - they were live when the trace ended, so they remain queryable through end of trace.
-            asyncProfilerComputer.Finish();
-            if (asyncProfilerComputer.ParseErrorCount != 0)
-            {
-                DebugWarn(false, string.Format(
-                    "AsyncProfiler reported {0} parse errors; uncertain call-stack state was invalidated. " +
-                    "At most {1} error details were logged.",
-                    asyncProfilerComputer.ParseErrorCount, MaxAsyncProfilerErrorDetails), null);
-            }
+            FinishAsyncProfilerIndex(asyncProfilerIndexBuilder);
 
-            // Avoid persisting an empty index.
-            asyncProfilerCallStacks = asyncProfilerComputer.Index.IsEmpty ? null : asyncProfilerComputer.Index;
 
             if (maxEventCount != -1 && eventCount >= maxEventCount)
             {
@@ -2856,7 +2889,8 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
         /// It then clears this list.   While doing this processing it will check to see if the target stack 'target' is in that list and
         /// it will return true if it was.
         /// </summary>
-        private bool EmitStackOnExitFromKernel(ref IncompleteStack listOfIncompleteKernelStacks, CallStackIndex userModeStack, IncompleteStack target, long userModeTimeStampQPC = UseEventTimeStampQPC)
+        private bool EmitStackOnExitFromKernel(ref IncompleteStack listOfIncompleteKernelStacks, CallStackIndex userModeStack, IncompleteStack target,
+            long userModeTimeStampQPC = UseEventTimeStampQPC)
         {
             bool foundTarget = false;
 #if DEBUG
@@ -2890,7 +2924,8 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
         /// It then clears this list.   While doing this processing it will check to see if the target stack 'target' is in that list and
         /// it will return true if it was.
         /// </summary>
-        private bool EmitStackOnExitFromKernel(ref IncompleteStack listOfIncompleteKernelStacks, Address userModeKey, IncompleteStack target, long userModeTimeStampQPC = UseEventTimeStampQPC)
+        private bool EmitStackOnExitFromKernel(ref IncompleteStack listOfIncompleteKernelStacks, Address userModeKey, IncompleteStack target,
+            long userModeTimeStampQPC = UseEventTimeStampQPC)
         {
             bool foundTarget = false;
 #if DEBUG
@@ -4435,7 +4470,7 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
         private DeferedRegion lazyCswitchBlockingEventsToStacks;
         private DeferedRegion lazyStackUserModeTimes;
         private DeferedRegion lazyAsyncProfilerCallStacks;
-        private AsyncProfilerCallStacksIndex asyncProfilerCallStacks;       // Per-thread active async call stacks (RuntimeAsync + StateMachineAsync); null if none. Lazily loaded.
+        private AsyncProfilerCallStacksIndex asyncProfilerCallStacks;       // Lazily loaded; null if none.
         private readonly object asyncProfilerCallStacksLock = new object();
         private TraceEvents events;
         private GrowableArray<EventPageEntry> eventPages;   // The offset offset of a page
@@ -4452,7 +4487,6 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
         private List<MethodLoadUnloadVerboseTraceData> jittedMethods;
         private List<MethodLoadUnloadJSTraceData> jsJittedMethods;
         private Dictionary<JavaScriptSourceKey, string> sourceFilesByID;
-
 
         private TraceModuleFiles moduleFiles;
         private GrowableArray<EventsToStackIndex> eventsToStacks;
@@ -7264,18 +7298,31 @@ namespace Microsoft.Diagnostics.Tracing.Etlx
             for (int i = 0; i < modules.Count; i++)
             {
                 TraceLoadedModule module = modules[i];
-                if ((moduleKind == TraceLoadedModuleKind.Native && module is TraceManagedModule) ||
-                    (moduleKind == TraceLoadedModuleKind.Managed && !(module is TraceManagedModule)))
+                if (!IsModuleKind(module, moduleKind))
                 {
                     continue;
                 }
 
-                if (string.Compare(module.FilePath, fileName, StringComparison.OrdinalIgnoreCase) == 0 && module.loadTimeQPC <= timeQPC && timeQPC < module.unloadTimeQPC)
+                bool isLoadedAtTime = module.loadTimeQPC <= timeQPC && timeQPC < module.unloadTimeQPC;
+                if (isLoadedAtTime && string.Compare(module.FilePath, fileName, StringComparison.OrdinalIgnoreCase) == 0)
                 {
                     return module;
                 }
             }
             return null;
+        }
+
+        private static bool IsModuleKind(TraceLoadedModule module, TraceLoadedModuleKind moduleKind)
+        {
+            switch (moduleKind)
+            {
+                case TraceLoadedModuleKind.Native:
+                    return !(module is TraceManagedModule);
+                case TraceLoadedModuleKind.Managed:
+                    return module is TraceManagedModule;
+                default:
+                    return true;
+            }
         }
 
         // #ModuleHandlersCalledFromTraceLog

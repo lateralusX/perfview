@@ -31,13 +31,15 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         public ulong OsThreadId => Thread.OsThreadId;
 
         /// <summary>The instrumentation family that emitted this call stack.</summary>
-        public AsyncProfilerCallStackKind Kind =>
-            Frames.Kind == AsyncCallstackKind.StateMachineAsync ? AsyncProfilerCallStackKind.StateMachineAsync : AsyncProfilerCallStackKind.RuntimeAsync;
+        public AsyncProfilerCallStackKind Kind => Frames.Kind == AsyncCallstackKind.StateMachineAsync
+            ? AsyncProfilerCallStackKind.StateMachineAsync
+            : AsyncProfilerCallStackKind.RuntimeAsync;
 
         /// <summary>The captured frames, leaf-to-root, including later V1 appends.
         /// Completion progress and presentation transforms are not applied; these frames do not identify
         /// the currently executing method.</summary>
-        public IReadOnlyList<AsyncProfilerCallStackFrame> CapturedFrames => m_capturedFrames ?? (m_capturedFrames = new CapturedFrameList(this));
+        public IReadOnlyList<AsyncProfilerCallStackFrame> CapturedFrames =>
+            m_capturedFrames ??= new CapturedFrameList(this);
 
         /// <summary>The nesting depth (0 = outermost) of this async call stack on its thread.</summary>
         public int Depth { get; private set; }
@@ -45,7 +47,9 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// <summary>The inclusive resume timestamp in the trace's QPC domain.</summary>
         public long StartQpc { get; private set; }
 
-        /// <summary>The exclusive end timestamp in the trace's QPC domain; <see cref="long.MaxValue"/> if open at stream end.</summary>
+        /// <summary>
+        /// The exclusive end timestamp in the trace's QPC domain; <see cref="long.MaxValue"/> if open at stream end.
+        /// </summary>
         public long EndQpc { get; private set; }
 
         #region private
@@ -61,7 +65,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             CompletionDelta[] methodCompletions,
             CompletionDelta[] exceptionCompletions,
             long[] wrapperResets)
-            : this(default, 0, depth, framesIndex, frames, continuationIndexBase, wrapperCount, startQpc, endQpc, methodCompletions, exceptionCompletions, wrapperResets)
+            : this(default, 0, depth, framesIndex, frames, continuationIndexBase, wrapperCount,
+                startQpc, endQpc, methodCompletions, exceptionCompletions, wrapperResets)
         {
         }
 
@@ -79,7 +84,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             CompletionDelta[] exceptionCompletions,
             long[] wrapperResets)
         {
-            Reset(thread, dispatcherId, depth, framesIndex, frames, continuationIndexBase, wrapperCount, startQpc, endQpc, methodCompletions, exceptionCompletions, wrapperResets);
+            Reset(thread, dispatcherId, depth, framesIndex, frames, continuationIndexBase, wrapperCount,
+                startQpc, endQpc, methodCompletions, exceptionCompletions, wrapperResets);
         }
 
         // Both flags cover this process and instrumentation kind for the configuration interval containing StartQpc.
@@ -116,7 +122,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         /// normal-completion and exception-unwind events. Missing events are not inferred.
         /// The timestamp is not range-checked, and the count is not capped at <c>CapturedFrames.Count</c>.
         /// </summary>
-        internal int GetCompletedFrameCount(long timestampQpc) => GetMethodCompletedFrameCount(timestampQpc) + GetExceptionCompletedFrameCount(timestampQpc);
+        internal int GetCompletedFrameCount(long timestampQpc) =>
+            GetMethodCompletedFrameCount(timestampQpc) + GetExceptionCompletedFrameCount(timestampQpc);
 
         /// <summary>
         /// The V2 completion count derived from recorded wrapper resets and <paramref name="currentMethodIndex"/>,
@@ -210,20 +217,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             serializer.Write(StartQpc);
             serializer.Write(EndQpc);
 
-            serializer.Write(_methodCompletions.Length);
-            for (int i = 0; i < _methodCompletions.Length; i++)
-            {
-                serializer.Write(_methodCompletions[i].Qpc);
-                serializer.Write(_methodCompletions[i].Delta);
-            }
-
-            serializer.Write(_exceptionCompletions.Length);
-            for (int i = 0; i < _exceptionCompletions.Length; i++)
-            {
-                serializer.Write(_exceptionCompletions[i].Qpc);
-                serializer.Write(_exceptionCompletions[i].Delta);
-            }
-
+            WriteCompletions(serializer, _methodCompletions);
+            WriteCompletions(serializer, _exceptionCompletions);
             serializer.Write(_wrapperResets.Length);
             for (int i = 0; i < _wrapperResets.Length; i++)
             {
@@ -231,7 +226,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             }
         }
 
-        internal static AsyncProfilerCallStack Read(Deserializer deserializer, Func<AsyncProfilerCallStackFramesIndex, AsyncProfilerCallStackFrames> resolveFrames)
+        internal static AsyncProfilerCallStack Read(Deserializer deserializer,
+            Func<AsyncProfilerCallStackFramesIndex, AsyncProfilerCallStackFrames> resolveFrames)
         {
             ProcessIndex processIndex = (ProcessIndex)deserializer.ReadInt();
             ulong osThreadId = (ulong)deserializer.ReadInt64();
@@ -243,23 +239,8 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             long startQpc = deserializer.ReadInt64();
             long endQpc = deserializer.ReadInt64();
 
-            int methodCompletionCount = deserializer.ReadInt();
-            CompletionDelta[] methodCompletions = methodCompletionCount == 0 ? Array.Empty<CompletionDelta>() : new CompletionDelta[methodCompletionCount];
-            for (int i = 0; i < methodCompletionCount; i++)
-            {
-                long timestampQpc = deserializer.ReadInt64();
-                int delta = deserializer.ReadInt();
-                methodCompletions[i] = new CompletionDelta(timestampQpc, delta);
-            }
-
-            int exceptionCompletionCount = deserializer.ReadInt();
-            CompletionDelta[] exceptionCompletions = exceptionCompletionCount == 0 ? Array.Empty<CompletionDelta>() : new CompletionDelta[exceptionCompletionCount];
-            for (int i = 0; i < exceptionCompletionCount; i++)
-            {
-                long timestampQpc = deserializer.ReadInt64();
-                int delta = deserializer.ReadInt();
-                exceptionCompletions[i] = new CompletionDelta(timestampQpc, delta);
-            }
+            CompletionDelta[] methodCompletions = ReadCompletions(deserializer);
+            CompletionDelta[] exceptionCompletions = ReadCompletions(deserializer);
 
             int wrapperResetCount = deserializer.ReadInt();
             long[] wrapperResets = wrapperResetCount == 0 ? Array.Empty<long>() : new long[wrapperResetCount];
@@ -281,6 +262,34 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 methodCompletions,
                 exceptionCompletions,
                 wrapperResets);
+        }
+
+        private static void WriteCompletions(Serializer serializer, CompletionDelta[] completions)
+        {
+            serializer.Write(completions.Length);
+            for (int i = 0; i < completions.Length; i++)
+            {
+                serializer.Write(completions[i].Qpc);
+                serializer.Write(completions[i].Delta);
+            }
+        }
+
+        private static CompletionDelta[] ReadCompletions(Deserializer deserializer)
+        {
+            int count = deserializer.ReadInt();
+            if (count == 0)
+            {
+                return Array.Empty<CompletionDelta>();
+            }
+
+            var completions = new CompletionDelta[count];
+            for (int i = 0; i < count; i++)
+            {
+                long timestampQpc = deserializer.ReadInt64();
+                int delta = deserializer.ReadInt();
+                completions[i] = new CompletionDelta(timestampQpc, delta);
+            }
+            return completions;
         }
 
         private static int SumDeltasUpTo(CompletionDelta[] deltas, long timestampQpc)

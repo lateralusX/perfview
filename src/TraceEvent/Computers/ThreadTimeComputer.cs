@@ -383,7 +383,8 @@ namespace Microsoft.Diagnostics.Tracing
                         return;
                     }
 
-                    // The persisted async index supersedes the optional raw batch records.
+                    // The raw batches are consumed separately to build the async index. As ordinary EventSource
+                    // events they would add their binary buffers as giant payload frames.
                     if (data.ProviderGuid == AsyncProfilerTraceEventParser.ProviderGuid)
                     {
                         return;

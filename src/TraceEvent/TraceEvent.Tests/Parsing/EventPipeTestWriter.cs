@@ -32,7 +32,7 @@ namespace TraceEventTests
         public byte Level { get; set; }
         public byte Version { get; set; }
         public Dictionary<string, string> Attributes { get; set; } = new Dictionary<string, string>();
-        
+
     }
 
     public class MetadataParameter
@@ -307,7 +307,7 @@ namespace TraceEventTests
                 {
                     flags |= 2;
                 }
-                
+
                 w.Write(flags);
                 w.Write(sequencePoints.Length);
                 foreach (var sequencePoint in sequencePoints)
@@ -662,7 +662,7 @@ namespace TraceEventTests
             else if(type.TypeCode == MetadataTypeCode.RelLoc)
             {
                 writer.WriteV6MetadataType((type as RelLocMetadataType).ElementType);
-            } 
+            }
             else if(type.TypeCode == MetadataTypeCode.DataLoc)
             {
                 writer.WriteV6MetadataType((type as DataLocMetadataType).ElementType);
@@ -1007,7 +1007,7 @@ namespace TraceEventTests
             writer.WriteBlockV6OrGreater(7 /* RemoveThread */, writeThreadEntries);
         }
 
-        
+
 
         public static void WriteRemoveThreadEntry(this BinaryWriter writer, long threadIndex, int sequenceNumber)
         {

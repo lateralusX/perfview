@@ -105,6 +105,61 @@ namespace TraceEventTests
         }
 
         [Theory]
+        [InlineData(false, false)]
+        [InlineData(true, false)]
+        [InlineData(true, true)]
+        public void RuntimeAsync_ParentContexts_SkipZeroIpSlotsAndNameUnresolvedFrames(
+            bool enableFrameAnnotations, bool unresolvedParent)
+        {
+            Frame current = Frame.App("Scenario.ChildAsync");
+            Frame ownerCurrent = Frame.App("Scenario.OwnerCurrentAsync");
+            Frame ownerRoot = Frame.App("Scenario.OwnerRootAsync");
+            var scenario = new StitchScenario
+            {
+                Sync = new[]
+                {
+                    Frame.App("Scenario.DoWork"),
+                    current,
+                    Frame.V2Wrapper(0),
+                    Frame.V2InstrumentedDispatch,
+                    Frame.V2Dispatch,
+                    Frame.ThreadPoolDispatch,
+                    Frame.WorkerThreadStart,
+                },
+                Async = new[] { current },
+                ContextParent = AsyncSegment.Runtime(Frame.Zero, ownerCurrent, Frame.Zero, ownerRoot),
+                OmitSymbolFor = unresolvedParent ? ownerRoot : null,
+                EnableParentContexts = true,
+                EnableFrameAnnotations = enableFrameAnnotations,
+                ExpectedStitched = new[]
+                {
+                    Frame.App("Scenario.DoWork"),
+                    current,
+                    ownerCurrent,
+                    ownerRoot,
+                    Frame.ThreadPoolDispatch,
+                    Frame.WorkerThreadStart,
+                },
+                ExpectedDiagnostics = new CallStackDiagnosticsExpectation
+                {
+                    SegmentsProcessed = 2,
+                    V2InfrastructureFramesCollapsed = 4,
+                },
+                AssertStitchedStackSource = stackSource =>
+                {
+                    for (int i = 0; i < stackSource.CallFrameIndexLimit; i++)
+                    {
+                        string name = stackSource.GetFrameName((StackSourceFrameIndex)i, false);
+                        Assert.DoesNotContain("AsyncFrame(0x0)", name);
+                        Assert.False(name.EndsWith("!", StringComparison.Ordinal), name);
+                    }
+                },
+            };
+
+            scenario.AssertProductionStitch();
+        }
+
+        [Theory]
         [InlineData(false)]
         [InlineData(true)]
         public void RuntimeAsync_ParentContexts_RendersParentContextMetadata(bool enableFrameAnnotations)

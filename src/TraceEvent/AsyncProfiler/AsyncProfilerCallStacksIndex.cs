@@ -270,7 +270,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
             for (int i = 0; i < candidates.Count; i++)
             {
                 AsyncProfilerDispatcherInfo dispatcher = candidates[i];
-                if (dispatcher.CreationThread.Equals(parent.Thread) && parent.StartQpc <= dispatcher.CreationQpc && dispatcher.CreationQpc < parent.EndQpc)
+                bool createdOnParentThread = dispatcher.CreationThread.Equals(parent.Thread);
+                bool createdDuringParent =
+                    parent.StartQpc <= dispatcher.CreationQpc &&
+                    dispatcher.CreationQpc < parent.EndQpc;
+                if (createdOnParentThread && createdDuringParent)
                 {
                     result.Add(dispatcher);
                 }
@@ -1413,7 +1417,11 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                     return false;
                 }
 
-                if (latest.DispatcherId != callStack.DispatcherId || latest.Depth != callStack.Depth || latest.FramesIndex != callStack.FramesIndex)
+                bool sameCallStack =
+                    latest.DispatcherId == callStack.DispatcherId &&
+                    latest.Depth == callStack.Depth &&
+                    latest.FramesIndex == callStack.FramesIndex;
+                if (!sameCallStack)
                 {
                     return false;
                 }
@@ -1627,7 +1635,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
 
             public bool Equals(FrameKey other)
             {
-                if (_processIndex != other._processIndex || _kind != other._kind || _hash != other._hash || _frameCount != other._frameCount)
+                bool sameHeader =
+                    _processIndex == other._processIndex &&
+                    _kind == other._kind &&
+                    _hash == other._hash &&
+                    _frameCount == other._frameCount;
+                if (!sameHeader)
                 {
                     return false;
                 }

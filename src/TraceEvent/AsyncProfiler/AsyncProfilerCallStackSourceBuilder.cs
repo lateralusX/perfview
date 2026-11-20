@@ -63,12 +63,14 @@ namespace Microsoft.Diagnostics.Tracing.Computers
                 throw new InvalidOperationException("Cannot produce call stacks after the output has been finalized.");
             }
 
-            if (physicalStack != CallStackIndex.Invalid && ((int)physicalStack < 0 || (int)physicalStack >= m_log.CallStacks.Count))
+            bool physicalStackInRange = (int)physicalStack >= 0 && (int)physicalStack < m_log.CallStacks.Count;
+            if (physicalStack != CallStackIndex.Invalid && !physicalStackInRange)
             {
                 throw new ArgumentOutOfRangeException(nameof(physicalStack));
             }
 
-            if (root != StackSourceCallStackIndex.Invalid && ((int)root < 0 || (int)root >= m_output.CallStackIndexLimit))
+            bool rootInRange = (int)root >= 0 && (int)root < m_output.CallStackIndexLimit;
+            if (root != StackSourceCallStackIndex.Invalid && !rootInRange)
             {
                 throw new ArgumentOutOfRangeException(nameof(root));
             }

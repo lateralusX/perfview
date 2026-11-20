@@ -256,9 +256,8 @@ namespace Microsoft.Diagnostics.Tracing
                     if (data.ProviderGuid == SampleProfilerTraceEventParser.ProviderGuid)
                         return;
 
-                    // The raw AsyncEvents payload is consumed separately to build the async call stack index.
-                    // Treating it as an ordinary EventSource event would stringify its binary buffer into a giant
-                    // stack frame and incorrectly transition the emitting thread to the blocked state.
+                    // The raw batches are consumed separately to build the async index. As ordinary EventSource
+                    // events they would become a giant frame and mark the emitting thread as blocked.
                     if (data.ProviderGuid == AsyncProfilerTraceEventParser.ProviderGuid)
                     {
                         return;
@@ -304,7 +303,7 @@ namespace Microsoft.Diagnostics.Tracing
 
             m_outputStackSource.DoneAddingSamples();
             m_threadState = null;
-            ClearAsyncProfilerCallStackResources();
+            m_asyncProfilerCallStackSourceBuilder?.ClearResources();
         }
 
         #region private
@@ -539,27 +538,15 @@ namespace Microsoft.Diagnostics.Tracing
         }
 
         /// <summary>
-        /// Drops every computer-owned reference that can retain async index records. The shared TraceLog index and
-        /// diagnostics intentionally remain available after generation.
-        /// </summary>
-        private void ClearAsyncProfilerCallStackResources()
-        {
-            m_asyncProfilerCallStackSourceBuilder?.ClearResources();
-        }
-
-        /// <summary>
-        /// Aggregate soft diagnostics from every reconstructed CPU sample of the last
-        /// <see cref="GenerateThreadTimeStacks"/> run, or null when async call stacks were inactive. Counters include
-        /// successful segments and normal fallback/presentation activity as well as anomalies; nonzero counters
-        /// do not by themselves indicate failure. Diagnostic messages are bounded.
+        /// Aggregate diagnostics from reconstructed CPU samples, or null when async call stacks were inactive.
+        /// Counters include normal reconstruction, fallback, and presentation activity as well as anomalies.
+        /// Messages are bounded.
         /// </summary>
         internal AsyncProfilerCallStackDiagnostics AsyncProfilerCallStackDiagnostics => m_asyncProfilerCallStackSourceBuilder?.Diagnostics;
 
         /// <summary>
-        /// When true, each reconstructed sample records a per-segment happy-path trace step (kind / boundary / completed
-        /// count / spliced range) into <see cref="AsyncProfilerCallStackDiagnostics"/>'s <c>Messages</c>, in addition to the
-        /// anomaly notes. Off by default; intended for debugging async call-stack reconstruction. Set before
-        /// <see cref="GenerateThreadTimeStacks"/>.
+        /// Emit per-segment reconstruction details into <see cref="AsyncProfilerCallStackDiagnostics"/>'s bounded messages.
+        /// Disabled by default; configure before generation.
         /// </summary>
         internal bool TraceAsyncProfilerCallStackSteps { get; set; }
 

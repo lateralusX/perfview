@@ -361,6 +361,17 @@ foreach (AsyncProfilerCallStack callStack in computer.GetCallStacks(sampleEvent)
 }
 ```
 
+**Exporting to Speedscope.** `SpeedScopeStackSourceWriter.WriteAsyncCallStacksAsJson`
+writes the recorded async call stacks as a timeline, one profile per
+thread, without CPU samples or physical stacks. A frame stays open while
+its call stack is active and has not completed. Widths show elapsed time,
+not CPU time. An overload that takes a sampling interval instead takes
+snapshots on a fixed time grid.
+
+```csharp
+SpeedScopeStackSourceWriter.WriteAsyncCallStacksAsJson(traceLog, "async.speedscope.json");
+```
+
 Keep the `TraceLog` open while querying or resolving frames. The builder
 and transforms are not thread-safe, and stack generation must not be
 called reentrantly.
@@ -388,17 +399,18 @@ reconstruction types use `Microsoft.Diagnostics.Tracing.Computers`.
 
 | Responsibility | Main implementation |
 |---|---|
-| Batch framing and record decoding | `AsyncProfilerTraceEventParser.cs`, `AsyncProfilerTypes.cs` |
+| Batch framing and record decoding | `AsyncProfilerTraceEventParser.cs`, `AsyncProfilerTypes.cs`, `BufferReader.cs` |
 | Building the index and recovery | `AsyncProfilerIndexBuilder.cs` |
-| Recorded call stacks and frames | `AsyncProfilerCallStack.cs`, `AsyncProfilerCallStackFrame.cs`, `AsyncProfilerCallStackFrames.cs` |
+| Recorded call stacks and frames | `AsyncProfilerCallStack.cs`, `AsyncProfilerCallStackKind.cs`, `AsyncProfilerCallStackFrame.cs`, `AsyncProfilerCallStackFrames.cs`, `AsyncProfilerThreadKey.cs` |
 | Index storage and time queries | `AsyncProfilerCallStacksIndex.cs` |
 | Conversion, symbol binding, and ETLX storage | `src\TraceEvent\TraceLog.cs` |
 | Public queries | `AsyncProfilerCallStackComputer.cs` |
 | Public stack building and callback context | `AsyncProfilerCallStackSourceBuilder.cs`, `AsyncProfilerCallStackTransformContext.cs` |
-| Stitching and join points | `AsyncProfilerCallStackStitcher.cs`, `AsyncProfilerCallStackStitchBoundary.cs` |
+| Stitching and join points | `AsyncProfilerCallStackStitcher.cs`, `AsyncProfilerCallStackStitchingState.cs`, `AsyncProfilerStitchedFrame.cs`, `AsyncProfilerStitchResult.cs`, `AsyncProfilerCallStackStitchBoundary.cs` |
 | Method-name normalization | `AsyncProfilerMethodNames.cs` |
 | Runtime-specific rules | `AsyncProfilerRuntimeNames.cs`, `AsyncProfilerRuntimeSupport.cs`, `AsyncProfilerRuntimeResolver.cs`, `AsyncProfilerRuntimeSequenceMatch.cs` |
 | Historical parent contexts | `AsyncProfilerParentContextBuilder.cs` |
-| Presentation settings and transforms | `AsyncCallStackTransforms.cs`, `AsyncProfilerCallStackTransformPipeline.cs`, `AsyncProfilerCallStackTransformPasses.cs` |
-| Stack-source output and frame metadata | `AsyncProfilerCallStackSourceBuilderCore.cs`, `src\TraceEvent\TraceEventStacks.cs` |
+| Presentation settings and transforms | `AsyncCallStackTransforms.cs`, `AsyncProfilerCallStackTransformPipeline.cs`, `AsyncProfiler*TransformPass.cs`, `AsyncProfilerCallStackTransformHelpers.cs` |
+| Stack-source output and frame metadata | `AsyncProfilerCallStackSourceBuilderCore.cs`, `AsyncProfilerCallStackDiagnostics.cs`, `src\TraceEvent\TraceEventStacks.cs` |
+| Speedscope export | `src\TraceEvent\Stacks\SpeedScopeStackSourceWriter.cs` |
 | Thread-time computers | `src\TraceEvent\Computers\SampleProfilerThreadTimeComputer.cs`, `src\TraceEvent\Computers\ThreadTimeComputer.cs` |

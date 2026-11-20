@@ -39,7 +39,12 @@ namespace Microsoft.Diagnostics.Tracing.Computers
         {
             AsyncProfilerCallStacksIndex index = m_log.AsyncProfilerCallStacks;
             TraceProcess process = index == null ? null : m_log.Processes.GetProcess(processId, timestampQpc);
-            return process == null ? Array.Empty<AsyncProfilerCallStack>() : index.GetCallStacks(new AsyncProfilerThreadKey(process.ProcessIndex, osThreadId), timestampQpc);
+            if (process == null)
+            {
+                return Array.Empty<AsyncProfilerCallStack>();
+            }
+
+            return index.GetCallStacks(new AsyncProfilerThreadKey(process.ProcessIndex, osThreadId), timestampQpc);
         }
 
         /// <summary>Returns recorded async call stacks for an event's process, thread, and QPC timestamp.</summary>
