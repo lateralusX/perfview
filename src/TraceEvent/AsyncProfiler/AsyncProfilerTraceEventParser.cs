@@ -282,7 +282,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
             eventId = (AsyncEventID)buffer[index++];
 
             bool hasTimestampDelta =
-                BufferReader.TryReadCompressedUInt64(buffer, ref index, limit, out ulong deltaTicks);
+                AsyncProfilerBufferReader.TryReadCompressedUInt64(buffer, ref index, limit, out ulong deltaTicks);
             bool timestampWouldOverflow =
                 deltaTicks > long.MaxValue ||
                 timestampQpc > long.MaxValue - (long)deltaTicks;
@@ -327,8 +327,8 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
                 case AsyncEventID.CreateRuntimeAsyncContext:
                 case AsyncEventID.CreateStateMachineAsyncContext:
                     {
-                        if (!BufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong parentId) ||
-                            !BufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong dispatcherId))
+                        if (!AsyncProfilerBufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong parentId) ||
+                            !AsyncProfilerBufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong dispatcherId))
                         {
                             return false;
                         }
@@ -339,7 +339,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
                 case AsyncEventID.ResumeRuntimeAsyncContext:
                 case AsyncEventID.ResumeStateMachineAsyncContext:
                     {
-                        if (!BufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong dispatcherId))
+                        if (!AsyncProfilerBufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong dispatcherId))
                         {
                             return false;
                         }
@@ -358,7 +358,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
                 case AsyncEventID.UnwindRuntimeAsyncException:
                 case AsyncEventID.UnwindStateMachineAsyncException:
                     {
-                        if (!BufferReader.TryReadCompressedUInt32(buffer, ref index, payloadEnd, out uint unwoundFrames))
+                        if (!AsyncProfilerBufferReader.TryReadCompressedUInt32(buffer, ref index, payloadEnd, out uint unwoundFrames))
                         {
                             return false;
                         }
@@ -401,8 +401,8 @@ namespace Microsoft.Diagnostics.Tracing.Parsers
                     }
                 case AsyncEventID.AsyncProfilerSyncClock:
                     {
-                        if (!BufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong qpcSync) ||
-                            !BufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong utcSync))
+                        if (!AsyncProfilerBufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong qpcSync) ||
+                            !AsyncProfilerBufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong utcSync))
                         {
                             return false;
                         }

@@ -1,8 +1,6 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
-using System;
-
 namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
 {
     /// <summary>
@@ -10,7 +8,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
     /// Fixed-width reads require enough input bytes. Compressed reads stop at their limit and may advance
     /// the index even when they return false.
     /// </summary>
-    internal static class BufferReader
+    internal static class AsyncProfilerBufferReader
     {
         public static ushort ReadUInt16LE(byte[] buffer, ref int index)
         {

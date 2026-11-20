@@ -399,7 +399,7 @@ reconstruction types use `Microsoft.Diagnostics.Tracing.Computers`.
 
 | Responsibility | Main implementation |
 |---|---|
-| Batch framing and record decoding | `AsyncProfilerTraceEventParser.cs`, `AsyncProfilerTypes.cs`, `BufferReader.cs` |
+| Batch framing and record decoding | `AsyncProfilerTraceEventParser.cs`, `AsyncProfilerTypes.cs`, `AsyncProfilerBufferReader.cs` |
 | Building the index and recovery | `AsyncProfilerIndexBuilder.cs` |
 | Recorded call stacks and frames | `AsyncProfilerCallStack.cs`, `AsyncProfilerCallStackKind.cs`, `AsyncProfilerCallStackFrame.cs`, `AsyncProfilerCallStackFrames.cs`, `AsyncProfilerThreadKey.cs` |
 | Index storage and time queries | `AsyncProfilerCallStacksIndex.cs` |

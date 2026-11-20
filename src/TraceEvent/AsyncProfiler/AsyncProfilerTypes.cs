@@ -249,12 +249,12 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
             }
 
             int index = 1;
-            uint totalSize = BufferReader.ReadUInt32LE(buffer, ref index);
-            uint asyncThreadContextId = BufferReader.ReadUInt32LE(buffer, ref index);
-            ulong osThreadId = BufferReader.ReadUInt64LE(buffer, ref index);
-            uint eventCount = BufferReader.ReadUInt32LE(buffer, ref index);
-            ulong startTimestampQpc = BufferReader.ReadUInt64LE(buffer, ref index);
-            ulong endTimestampQpc = BufferReader.ReadUInt64LE(buffer, ref index);
+            uint totalSize = AsyncProfilerBufferReader.ReadUInt32LE(buffer, ref index);
+            uint asyncThreadContextId = AsyncProfilerBufferReader.ReadUInt32LE(buffer, ref index);
+            ulong osThreadId = AsyncProfilerBufferReader.ReadUInt64LE(buffer, ref index);
+            uint eventCount = AsyncProfilerBufferReader.ReadUInt32LE(buffer, ref index);
+            ulong startTimestampQpc = AsyncProfilerBufferReader.ReadUInt64LE(buffer, ref index);
+            ulong endTimestampQpc = AsyncProfilerBufferReader.ReadUInt64LE(buffer, ref index);
 
             header = new BufferHeader(
                 buffer[0], totalSize, asyncThreadContextId, osThreadId, eventCount,
@@ -514,12 +514,12 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
             frameCount = buffer[index++];
 
             if (eventId == AsyncEventID.CreateRuntimeAsyncCallstack &&
-                !BufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out parentDispatcherId))
+                !AsyncProfilerBufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out parentDispatcherId))
             {
                 return false;
             }
 
-            return BufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out dispatcherId);
+            return AsyncProfilerBufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out dispatcherId);
         }
 
         /// <summary>Reads the first IP, signed IP deltas, and any V1 compiler states.</summary>
@@ -527,7 +527,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
             byte[] buffer, ref int index, int payloadEnd, int frameCount,
             ulong[] methodIds, int[] frameStates)
         {
-            if (!BufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong currentMethodId))
+            if (!AsyncProfilerBufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong currentMethodId))
             {
                 return false;
             }
@@ -535,7 +535,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
             methodIds[0] = currentMethodId;
             if (frameStates != null)
             {
-                if (!BufferReader.TryReadCompressedInt32(buffer, ref index, payloadEnd, out int state0))
+                if (!AsyncProfilerBufferReader.TryReadCompressedInt32(buffer, ref index, payloadEnd, out int state0))
                 {
                     return false;
                 }
@@ -545,7 +545,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
 
             for (int frameIndex = 1; frameIndex < frameCount; frameIndex++)
             {
-                if (!BufferReader.TryReadCompressedInt64(buffer, ref index, payloadEnd, out long delta))
+                if (!AsyncProfilerBufferReader.TryReadCompressedInt64(buffer, ref index, payloadEnd, out long delta))
                 {
                     return false;
                 }
@@ -555,7 +555,7 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
 
                 if (frameStates != null)
                 {
-                    if (!BufferReader.TryReadCompressedInt32(buffer, ref index, payloadEnd, out int state))
+                    if (!AsyncProfilerBufferReader.TryReadCompressedInt32(buffer, ref index, payloadEnd, out int state))
                     {
                         return false;
                     }
@@ -610,10 +610,10 @@ namespace Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler
             ref int index, int payloadEnd, out AsyncMetadataEvent result)
         {
             result = default;
-            if (!BufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong qpcFrequency) ||
-                !BufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong qpcSync) ||
-                !BufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong utcSync) ||
-                !BufferReader.TryReadCompressedUInt32(buffer, ref index, payloadEnd, out uint eventBufferSize))
+            if (!AsyncProfilerBufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong qpcFrequency) ||
+                !AsyncProfilerBufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong qpcSync) ||
+                !AsyncProfilerBufferReader.TryReadCompressedUInt64(buffer, ref index, payloadEnd, out ulong utcSync) ||
+                !AsyncProfilerBufferReader.TryReadCompressedUInt32(buffer, ref index, payloadEnd, out uint eventBufferSize))
             {
                 return false;
             }

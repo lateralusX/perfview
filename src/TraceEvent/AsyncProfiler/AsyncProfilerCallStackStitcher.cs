@@ -7,8 +7,6 @@ using System.Collections.Generic;
 using Microsoft.Diagnostics.Tracing.Etlx;
 using Microsoft.Diagnostics.Tracing.Parsers.AsyncProfiler;
 
-using static Microsoft.Diagnostics.Tracing.Computers.AsyncProfilerRuntimeSupport;
-
 namespace Microsoft.Diagnostics.Tracing.Computers
 {
     /// <summary>
